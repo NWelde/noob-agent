@@ -11,20 +11,6 @@ Claude Code must follow all rules in [`AGENTS.md`](AGENTS.md). The following rul
 7. Update `CHANGELOG.md` whenever code changes, using the format and allowed tags defined in `AGENTS.md`.
 8. Stage and commit one explicit file at a time. Never use bulk staging commands such as `git add .` or `git add -A`.
 
-## Default Permission: Isolated Scaffolding Only
-
-Claude Code's default role is to build isolated scaffolding, not the noob-agent main agent loop. It may create or edit only documentation and files under `scaffolding/` unless the requester explicitly approves a plan that names the core files or interfaces to change.
-
-Scaffolding is disposable, non-production support work that is not imported, called, built, or deployed by the main application. Suitable scaffolding for this project includes:
-
-- mock `GameConnector` observations and primitive-tool responses;
-- test fixtures, test helpers, and sample episode/skill manifests;
-- contract-validation examples derived from `connector_contract.md` and `skill_contract.md`;
-- local developer documentation, diagrams, and setup checklists;
-- prototype scripts that run only from `scaffolding/` and do not access credentials, a live game server, W&B, or production configuration.
-
-Scaffolding must remain isolated: it cannot be imported by production code, modify shared runtime configuration, add dependencies, start services, access secrets, or change CI. It must include a short README explaining how to run it and how to remove it.
-
 ## First Authorized Task: Deterministic Fake-Connector Scaffolding
 
 Claude Code's first task is expressly authorized as isolated scaffolding. Work
