@@ -1,0 +1,215 @@
+{
+  "connector_version": "fake-minecraft-0.1.0",
+  "game_id": "minecraft",
+  "observation_mode": "structured_nearby_state",
+  "schema_version": "noob-agent.connector.v1",
+  "timing_model": "game_ticks",
+  "tools": [
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "radius": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "radius"
+        ],
+        "type": "object"
+      },
+      "description": "Refresh the visible nearby state within a radius.",
+      "max_duration": 10,
+      "name": "observe",
+      "preconditions": [],
+      "state_changing": false
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "tolerance": {
+            "maximum": 2,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "z": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "z",
+          "tolerance"
+        ],
+        "type": "object"
+      },
+      "description": "Walk to a reachable public position.",
+      "max_duration": 100,
+      "name": "move_to",
+      "preconditions": [
+        "The destination is reachable on foot."
+      ],
+      "state_changing": true
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "object_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_id"
+        ],
+        "type": "object"
+      },
+      "description": "Face a visible object.",
+      "max_duration": 10,
+      "name": "look_at",
+      "preconditions": [
+        "The object is currently visible."
+      ],
+      "state_changing": true
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "object_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_id"
+        ],
+        "type": "object"
+      },
+      "description": "Return the ordinary public name and state of a visible object.",
+      "max_duration": 10,
+      "name": "inspect_object",
+      "preconditions": [
+        "The object is currently visible."
+      ],
+      "state_changing": false
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "object_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_id",
+          "count"
+        ],
+        "type": "object"
+      },
+      "description": "Collect a reachable item or resource.",
+      "max_duration": 60,
+      "name": "collect_object",
+      "preconditions": [
+        "The object is reachable."
+      ],
+      "state_changing": true
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "held_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_id"
+        ],
+        "type": "object"
+      },
+      "description": "Perform the normal use or interact control on a visible object.",
+      "max_duration": 30,
+      "name": "use_object",
+      "preconditions": [
+        "The object is reachable."
+      ],
+      "state_changing": true
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "held_item_id": {
+            "type": "string"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "z": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "held_item_id",
+          "x",
+          "y",
+          "z"
+        ],
+        "type": "object"
+      },
+      "description": "Place a placeable held object at an adjacent public position.",
+      "max_duration": 30,
+      "name": "place_object",
+      "preconditions": [
+        "The position is adjacent and unoccupied."
+      ],
+      "state_changing": true
+    },
+    {
+      "argument_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "ticks": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ticks"
+        ],
+        "type": "object"
+      },
+      "description": "Allow a visible process to advance.",
+      "max_duration": 100,
+      "name": "wait",
+      "preconditions": [],
+      "state_changing": false
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "kind": "step",
+  "request": {
+    "action_id": "a_0001",
+    "arguments": {
+      "radius": 8
+    },
+    "tool_name": "observe"
+  },
+  "result": {
+    "action_id": "a_0001",
+    "code": "OK",
+    "logical_duration": 0,
+    "message": "Visible nearby state refreshed within radius 8.",
+    "observation": {
+      "episode_id": "ep_fake_0001",
+      "game_id": "minecraft",
+      "last_action_id": "a_0001",
+      "logical_time": 0,
+      "messages": [
+        {
+          "kind": "observation",
+          "text": "Nearby state refreshed."
+        }
+      ],
+      "player": {
+        "orientation": {
+          "pitch": 0.0,
+          "yaw": 0.0
+        },
+        "position": {
+          "x": 4.0,
+          "y": 64.0,
+          "z": 1.0
+        },
+        "properties": {
+          "held_item_id": "item_1",
+          "held_item_label": "flint_and_steel"
+        }
+      },
+      "public_goal": "Light the lantern on the post.",
+      "scenario_id": "mc_signal_post_a",
+      "sequence": 1,
+      "status": {
+        "health": 20,
+        "held_item_id": "item_1",
+        "on_ground": true,
+        "time_of_day": "day"
+      },
+      "terminal": false,
+      "terminal_reason": null,
+      "visible_objects": [
+        {
+          "distance": 9.4,
+          "label": "lantern",
+          "object_id": "obj_1",
+          "position": {
+            "x": 12.0,
+            "y": 65.0,
+            "z": -4.0
+          },
+          "properties": {
+            "lit": false
+          }
+        },
+        {
+          "distance": 9.1,
+          "label": "lever",
+          "object_id": "obj_2",
+          "position": {
+            "x": 12.0,
+            "y": 64.0,
+            "z": -3.0
+          },
+          "properties": {
+            "powered": false
+          }
+        },
+        {
+          "distance": 9.2,
+          "label": "oak_fence",
+          "object_id": "obj_3",
+          "position": {
+            "x": 12.0,
+            "y": 64.0,
+            "z": -4.0
+          },
+          "properties": {}
+        }
+      ]
+    },
+    "primitive_actions_charged": 1,
+    "sequence": 1,
+    "state_changed": false,
+    "status": "succeeded",
+    "wall_time_ms": 38
+  }
+}
