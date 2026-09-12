@@ -1,0 +1,289 @@
+"""The local episode store: SQLite as the source of truth.
+
+Uses the standard library only. Every write runs inside an explicit
+transaction, so a rejected row leaves the database exactly as it was. Duplicate
+episode and action IDs are refused rather than silently overwritten, because a
+recorded attempt must never change after the fact.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from types import TracebackType
+from typing import TypeVar
+
+from pydantic import ValidationError
+
+from noob_agent.domain.model import ConnectorManifest, Observation, StepResult, ToolRequest
+from noob_agent.domain.records import (
+    DurableRecord,
+    EpisodeOutcome,
+    EpisodeRecord,
+    ExperimentRecord,
+    StepRecord,
+    StoredEpisode,
+)
+from noob_agent.storage.schema import SCHEMA_STATEMENTS, SCHEMA_VERSION
+
+_RecordT = TypeVar("_RecordT", bound=DurableRecord)
+
+
+class StorageError(RuntimeError):
+    """Base class for every durable-record failure."""
+
+
+class DuplicateRecordError(StorageError):
+    """A record with this identity is already recorded and cannot be replaced."""
+
+
+class UnknownRecordError(StorageError):
+    """The record, or the parent it belongs to, is not in the store."""
+
+
+class InconsistentRecordError(StorageError):
+    """The record's own invariants do not hold, so it must not be persisted."""
+
+
+def _classify(error: sqlite3.IntegrityError, context: str) -> StorageError:
+    """Turn a SQLite constraint failure into the store's own error type."""
+    if "FOREIGN KEY" in str(error).upper():
+        return UnknownRecordError(f"{context} refers to a record that does not exist.")
+    return DuplicateRecordError(f"{context} is already recorded.")
+
+
+def _revalidate(record: _RecordT, context: str) -> _RecordT:
+    """Re-run a record's own validators before it becomes durable.
+
+    `model_copy(update=...)` and `model_construct` both bypass validation, so a
+    caller can hold a record whose invariants no longer hold. Catching that here
+    keeps a bad row out of the source of truth, instead of letting it fail much
+    later when the episode is read back.
+    """
+    try:
+        return type(record).model_validate(record.model_dump())
+    except ValidationError as error:
+        raise InconsistentRecordError(f"{context} is not internally consistent: {error}") from error
+
+
+class EpisodeStore:
+    """Durable, append-only local records for experiments and episodes."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    @classmethod
+    def open(cls, path: Path | str) -> EpisodeStore:
+        """Open (creating if needed) a database and apply the schema."""
+        connection = sqlite3.connect(path, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        store = cls(connection)
+        store.initialize()
+        return store
+
+    def initialize(self) -> None:
+        """Create the schema if it is not already present."""
+        with self._transaction():
+            for statement in SCHEMA_STATEMENTS:
+                self._connection.execute(statement)
+            recorded = self._connection.execute("SELECT version FROM schema_version").fetchone()
+            if recorded is None:
+                self._connection.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+                )
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self) -> EpisodeStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """One explicit transaction: every statement lands, or none of them do."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+        self._connection.execute("COMMIT")
+
+    def create_experiment(self, record: ExperimentRecord) -> None:
+        """Record one comparison configuration. Its ID must be unused."""
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO experiment (
+                        experiment_id, model_id, condition, connector_version,
+                        decision_budget, primitive_budget, wall_time_budget_ms, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.experiment_id,
+                        record.model_id,
+                        record.condition,
+                        record.connector_version,
+                        record.decision_budget,
+                        record.primitive_budget,
+                        record.wall_time_budget_ms,
+                        record.created_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Experiment {record.experiment_id!r}") from error
+
+    def create_episode(self, record: EpisodeRecord) -> None:
+        """Open one episode, pinned to the manifest and reset state it began from."""
+        record = _revalidate(record, f"Episode {record.episode_id!r}")
+        manifest_json = record.manifest.model_dump_json()
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO episode (
+                        episode_id, experiment_id, game_id, scenario_id, seed, split,
+                        manifest_json, manifest_hash, reset_observation_json, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.episode_id,
+                        record.experiment_id,
+                        record.game_id,
+                        record.scenario_id,
+                        record.seed,
+                        record.split,
+                        manifest_json,
+                        manifest_hash(record.manifest),
+                        record.reset_observation.model_dump_json(),
+                        record.started_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Episode {record.episode_id!r}") from error
+
+    def append_step(self, record: StepRecord) -> None:
+        """Append one immutable public step to an open episode."""
+        self.append_steps((record,))
+
+    def append_steps(self, records: Iterable[StepRecord]) -> None:
+        """Append several steps atomically: all of them land, or none do."""
+        validated = [
+            _revalidate(record, f"Step {record.sequence} of episode {record.episode_id!r}")
+            for record in records
+        ]
+        with self._transaction():
+            for record in validated:
+                try:
+                    self._connection.execute(
+                        """
+                        INSERT INTO step (
+                            episode_id, sequence, action_id, request_json, result_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record.episode_id,
+                            record.sequence,
+                            record.request.action_id,
+                            record.request.model_dump_json(),
+                            record.result.model_dump_json(),
+                        ),
+                    )
+                except sqlite3.IntegrityError as error:
+                    raise _classify(
+                        error,
+                        f"Step {record.sequence} of episode {record.episode_id!r} "
+                        f"(action {record.request.action_id!r})",
+                    ) from error
+
+    def finalize_episode(self, outcome: EpisodeOutcome) -> None:
+        """Write an episode's final outcome exactly once."""
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO episode_outcome (
+                        episode_id, stop_reason, terminal,
+                        total_decisions, total_primitives, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        outcome.episode_id,
+                        outcome.stop_reason,
+                        int(outcome.terminal),
+                        outcome.total_decisions,
+                        outcome.total_primitives,
+                        outcome.finished_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Outcome for episode {outcome.episode_id!r}") from error
+
+    def read_episode(self, episode_id: str) -> StoredEpisode:
+        """Read one episode back with its steps in recorded sequence order."""
+        row = self._connection.execute(
+            "SELECT * FROM episode WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        if row is None:
+            raise UnknownRecordError(f"Episode {episode_id!r} is not recorded.")
+
+        episode = EpisodeRecord(
+            episode_id=row["episode_id"],
+            experiment_id=row["experiment_id"],
+            game_id=row["game_id"],
+            scenario_id=row["scenario_id"],
+            seed=row["seed"],
+            split=row["split"],
+            manifest=ConnectorManifest.model_validate_json(row["manifest_json"]),
+            reset_observation=Observation.model_validate_json(row["reset_observation_json"]),
+            started_at=row["started_at"],
+        )
+
+        step_rows = self._connection.execute(
+            "SELECT * FROM step WHERE episode_id = ? ORDER BY sequence ASC", (episode_id,)
+        ).fetchall()
+        steps = tuple(
+            StepRecord(
+                episode_id=step_row["episode_id"],
+                sequence=step_row["sequence"],
+                request=ToolRequest.model_validate_json(step_row["request_json"]),
+                result=StepResult.model_validate_json(step_row["result_json"]),
+            )
+            for step_row in step_rows
+        )
+
+        outcome_row = self._connection.execute(
+            "SELECT * FROM episode_outcome WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        outcome = (
+            None
+            if outcome_row is None
+            else EpisodeOutcome(
+                episode_id=outcome_row["episode_id"],
+                stop_reason=outcome_row["stop_reason"],
+                terminal=bool(outcome_row["terminal"]),
+                total_decisions=outcome_row["total_decisions"],
+                total_primitives=outcome_row["total_primitives"],
+                finished_at=outcome_row["finished_at"],
+            )
+        )
+
+        return StoredEpisode(episode=episode, steps=steps, outcome=outcome)
+
+
+def manifest_hash(manifest: ConnectorManifest) -> str:
+    """Fingerprint a manifest so an episode records the tool surface it ran on."""
+    return hashlib.sha256(manifest.model_dump_json().encode("utf-8")).hexdigest()
