@@ -13,10 +13,13 @@ from noob_agent.domain.model import Observation
 from noob_agent.domain.records import EpisodeOutcome, EpisodeRecord, ExperimentRecord, StepRecord
 from noob_agent.storage import (
     DuplicateRecordError,
+    EpisodeFinalizedError,
     EpisodeStore,
     InconsistentRecordError,
+    StorageError,
     UnknownRecordError,
 )
+from noob_agent.storage.repository import _classify
 
 
 def test_round_trips_an_episode_in_sequence(
@@ -144,6 +147,98 @@ def test_rejects_an_episode_whose_reset_belongs_to_another_episode(
 
     with pytest.raises(UnknownRecordError):
         store.read_episode("ep_0002")
+
+
+def test_create_experiment_rejects_an_internally_inconsistent_record(
+    store: EpisodeStore, database_path: Path, experiment: ExperimentRecord
+) -> None:
+    """model_copy skips validation, so the store must re-check before writing."""
+    smuggled = experiment.model_copy(update={"decision_budget": -99})
+
+    with pytest.raises(InconsistentRecordError):
+        store.create_experiment(smuggled)
+
+    connection = sqlite3.connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM experiment WHERE experiment_id = ?", (experiment.experiment_id,)
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is None
+
+
+def test_finalize_episode_rejects_an_internally_inconsistent_record(
+    store: EpisodeStore,
+    database_path: Path,
+    experiment: ExperimentRecord,
+    episode: EpisodeRecord,
+    outcome: EpisodeOutcome,
+) -> None:
+    """model_copy skips validation, so the store must re-check before writing."""
+    store.create_experiment(experiment)
+    store.create_episode(episode)
+    smuggled = outcome.model_copy(update={"total_decisions": -5})
+
+    with pytest.raises(InconsistentRecordError):
+        store.finalize_episode(smuggled)
+
+    connection = sqlite3.connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM episode_outcome WHERE episode_id = ?", (outcome.episode_id,)
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is None
+
+
+def test_rejects_appending_a_step_after_the_episode_is_finalized(
+    store: EpisodeStore,
+    experiment: ExperimentRecord,
+    episode: EpisodeRecord,
+    outcome: EpisodeOutcome,
+    step_factory: Callable[..., StepRecord],
+) -> None:
+    """A finalized episode's outcome must not go stale relative to its steps."""
+    store.create_experiment(experiment)
+    store.create_episode(episode)
+    store.finalize_episode(outcome)
+
+    with pytest.raises(EpisodeFinalizedError):
+        store.append_step(step_factory(1))
+
+    assert store.read_episode(episode.episode_id).steps == ()
+
+
+def test_read_episode_wraps_a_corrupted_row_as_a_storage_error(
+    store: EpisodeStore, database_path: Path, experiment: ExperimentRecord, episode: EpisodeRecord
+) -> None:
+    """A row that bypassed the store's own guards must not leak a raw ValidationError."""
+    store.create_experiment(experiment)
+    store.create_episode(episode)
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE episode SET scenario_id = '' WHERE episode_id = ?", (episode.episode_id,)
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(InconsistentRecordError):
+        store.read_episode(episode.episode_id)
+
+
+def test_classify_treats_a_non_uniqueness_integrity_error_as_a_generic_storage_error() -> None:
+    """NOT NULL and CHECK failures are not duplicates and must not be mislabeled."""
+    error = sqlite3.IntegrityError("NOT NULL constraint failed: experiment.model_id")
+
+    classified = _classify(error, "Experiment 'exp_0001'")
+
+    assert type(classified) is StorageError
+    assert not isinstance(classified, DuplicateRecordError)
 
 
 def test_rejects_a_step_whose_result_does_not_match_its_request(

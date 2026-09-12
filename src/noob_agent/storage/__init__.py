@@ -2,6 +2,7 @@
 
 from noob_agent.storage.repository import (
     DuplicateRecordError,
+    EpisodeFinalizedError,
     EpisodeStore,
     InconsistentRecordError,
     StorageError,
@@ -13,6 +14,7 @@ from noob_agent.storage.schema import SCHEMA_VERSION
 __all__ = [
     "SCHEMA_VERSION",
     "DuplicateRecordError",
+    "EpisodeFinalizedError",
     "EpisodeStore",
     "InconsistentRecordError",
     "StorageError",
