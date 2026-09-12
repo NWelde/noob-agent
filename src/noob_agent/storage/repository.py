@@ -48,11 +48,18 @@ class InconsistentRecordError(StorageError):
     """The record's own invariants do not hold, so it must not be persisted."""
 
 
+class EpisodeFinalizedError(StorageError):
+    """The episode has already been finalized and can no longer be appended to."""
+
+
 def _classify(error: sqlite3.IntegrityError, context: str) -> StorageError:
     """Turn a SQLite constraint failure into the store's own error type."""
-    if "FOREIGN KEY" in str(error).upper():
+    message = str(error).upper()
+    if "FOREIGN KEY" in message:
         return UnknownRecordError(f"{context} refers to a record that does not exist.")
-    return DuplicateRecordError(f"{context} is already recorded.")
+    if "UNIQUE" in message or "PRIMARY KEY" in message:
+        return DuplicateRecordError(f"{context} is already recorded.")
+    return StorageError(f"{context} violates a database constraint: {error}")
 
 
 def _revalidate(record: _RecordT, context: str) -> _RecordT:
@@ -123,6 +130,7 @@ class EpisodeStore:
 
     def create_experiment(self, record: ExperimentRecord) -> None:
         """Record one comparison configuration. Its ID must be unused."""
+        record = _revalidate(record, f"Experiment {record.experiment_id!r}")
         with self._transaction():
             try:
                 self._connection.execute(
@@ -187,6 +195,14 @@ class EpisodeStore:
         ]
         with self._transaction():
             for record in validated:
+                finalized = self._connection.execute(
+                    "SELECT 1 FROM episode_outcome WHERE episode_id = ?", (record.episode_id,)
+                ).fetchone()
+                if finalized is not None:
+                    raise EpisodeFinalizedError(
+                        f"Episode {record.episode_id!r} is already finalized "
+                        "and cannot accept new steps."
+                    )
                 try:
                     self._connection.execute(
                         """
@@ -211,6 +227,7 @@ class EpisodeStore:
 
     def finalize_episode(self, outcome: EpisodeOutcome) -> None:
         """Write an episode's final outcome exactly once."""
+        outcome = _revalidate(outcome, f"Outcome for episode {outcome.episode_id!r}")
         with self._transaction():
             try:
                 self._connection.execute(
@@ -240,46 +257,52 @@ class EpisodeStore:
         if row is None:
             raise UnknownRecordError(f"Episode {episode_id!r} is not recorded.")
 
-        episode = EpisodeRecord(
-            episode_id=row["episode_id"],
-            experiment_id=row["experiment_id"],
-            game_id=row["game_id"],
-            scenario_id=row["scenario_id"],
-            seed=row["seed"],
-            split=row["split"],
-            manifest=ConnectorManifest.model_validate_json(row["manifest_json"]),
-            reset_observation=Observation.model_validate_json(row["reset_observation_json"]),
-            started_at=row["started_at"],
-        )
-
-        step_rows = self._connection.execute(
-            "SELECT * FROM step WHERE episode_id = ? ORDER BY sequence ASC", (episode_id,)
-        ).fetchall()
-        steps = tuple(
-            StepRecord(
-                episode_id=step_row["episode_id"],
-                sequence=step_row["sequence"],
-                request=ToolRequest.model_validate_json(step_row["request_json"]),
-                result=StepResult.model_validate_json(step_row["result_json"]),
+        try:
+            episode = EpisodeRecord(
+                episode_id=row["episode_id"],
+                experiment_id=row["experiment_id"],
+                game_id=row["game_id"],
+                scenario_id=row["scenario_id"],
+                seed=row["seed"],
+                split=row["split"],
+                manifest=ConnectorManifest.model_validate_json(row["manifest_json"]),
+                reset_observation=Observation.model_validate_json(row["reset_observation_json"]),
+                started_at=row["started_at"],
             )
-            for step_row in step_rows
-        )
 
-        outcome_row = self._connection.execute(
-            "SELECT * FROM episode_outcome WHERE episode_id = ?", (episode_id,)
-        ).fetchone()
-        outcome = (
-            None
-            if outcome_row is None
-            else EpisodeOutcome(
-                episode_id=outcome_row["episode_id"],
-                stop_reason=outcome_row["stop_reason"],
-                terminal=bool(outcome_row["terminal"]),
-                total_decisions=outcome_row["total_decisions"],
-                total_primitives=outcome_row["total_primitives"],
-                finished_at=outcome_row["finished_at"],
+            step_rows = self._connection.execute(
+                "SELECT * FROM step WHERE episode_id = ? ORDER BY sequence ASC", (episode_id,)
+            ).fetchall()
+            steps = tuple(
+                StepRecord(
+                    episode_id=step_row["episode_id"],
+                    sequence=step_row["sequence"],
+                    request=ToolRequest.model_validate_json(step_row["request_json"]),
+                    result=StepResult.model_validate_json(step_row["result_json"]),
+                )
+                for step_row in step_rows
             )
-        )
+
+            outcome_row = self._connection.execute(
+                "SELECT * FROM episode_outcome WHERE episode_id = ?", (episode_id,)
+            ).fetchone()
+            outcome = (
+                None
+                if outcome_row is None
+                else EpisodeOutcome(
+                    episode_id=outcome_row["episode_id"],
+                    stop_reason=outcome_row["stop_reason"],
+                    terminal=bool(outcome_row["terminal"]),
+                    total_decisions=outcome_row["total_decisions"],
+                    total_primitives=outcome_row["total_primitives"],
+                    finished_at=outcome_row["finished_at"],
+                )
+            )
+        except ValidationError as error:
+            raise InconsistentRecordError(
+                f"Episode {episode_id!r} has a recorded row that is not internally "
+                f"consistent: {error}"
+            ) from error
 
         return StoredEpisode(episode=episode, steps=steps, outcome=outcome)
 
