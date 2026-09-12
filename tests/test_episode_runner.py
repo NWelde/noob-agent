@@ -15,6 +15,7 @@ from fakes.connector import (
 )
 
 from noob_agent.connectors import ConnectorLostError
+from noob_agent.domain.model import StepResult, ToolRequest
 from noob_agent.domain.records import ExperimentRecord
 from noob_agent.runtime import EpisodeRunner
 from noob_agent.storage import EpisodeStore
@@ -396,3 +397,86 @@ async def test_a_non_connector_error_propagates(
 def test_connector_loss_is_a_distinct_error_type() -> None:
     assert issubclass(ConnectorLostError, Exception)
     assert not issubclass(ConnectorLostError, ValueError)
+
+
+class MismatchedActionIdConnector(ScriptedConnector):
+    """Violates the contract: the result's action_id is not the request's."""
+
+    async def step(self, request: ToolRequest) -> StepResult:
+        return await super().step(
+            ToolRequest(action_id="a_bogus", tool_name=request.tool_name, arguments={})
+        )
+
+
+class RepeatedSequenceConnector(ScriptedConnector):
+    """Violates the contract: reuses a sequence number."""
+
+    async def step(self, request: ToolRequest) -> StepResult:
+        result = await super().step(request)
+        self._sequence = 1
+        return result
+
+
+class SkippedSequenceConnector(ScriptedConnector):
+    """Violates the contract: jumps the sequence forward."""
+
+    async def step(self, request: ToolRequest) -> StepResult:
+        self._sequence += 10
+        return await super().step(request)
+
+
+@pytest.mark.parametrize(
+    "connector_class",
+    [MismatchedActionIdConnector, RepeatedSequenceConnector, SkippedSequenceConnector],
+)
+async def test_a_contract_violating_connector_still_finalizes_the_episode(
+    connector_class: type[ScriptedConnector], prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    """A result that cannot be durably recorded ends the episode, it does not crash it.
+
+    The runner's whole promise is a bounded episode that always carries a stop
+    reason. A misbehaving connector must not be able to leave an episode row
+    with no outcome in the source of truth.
+    """
+    connector = connector_class(*[ScriptedStep() for _ in range(4)])
+
+    result = await run_episode(prepared_store, connector, ScriptedPolicy(), clock)
+
+    assert result.stop_reason == "unknown_result"
+
+    stored = prepared_store.read_episode(result.episode_id)
+    assert stored.outcome is not None, "the episode was left unfinalized"
+    assert stored.outcome.stop_reason == "unknown_result"
+
+
+async def test_a_failing_close_does_not_mask_the_original_error(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    """The cause must survive a connector whose teardown also fails."""
+
+    class DoublyBrokenConnector(ScriptedConnector):
+        async def step(self, request: ToolRequest) -> StepResult:
+            raise ValueError("the real cause")
+
+        async def close(self) -> None:
+            raise RuntimeError("teardown also failed")
+
+    connector = DoublyBrokenConnector(ScriptedStep())
+
+    with pytest.raises(ValueError, match="the real cause"):
+        await run_episode(prepared_store, connector, ScriptedPolicy(), clock)
+
+
+async def test_a_failing_close_surfaces_when_nothing_else_went_wrong(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    """A close failure is only swallowed to protect a real cause, never hidden outright."""
+
+    class CloseFailsConnector(ScriptedConnector):
+        async def close(self) -> None:
+            raise RuntimeError("teardown failed")
+
+    connector = CloseFailsConnector(ScriptedStep(terminal=True, terminal_reason="goal_reached"))
+
+    with pytest.raises(RuntimeError, match="teardown failed"):
+        await run_episode(prepared_store, connector, ScriptedPolicy(), clock)

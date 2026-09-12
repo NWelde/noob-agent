@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
+
+from pydantic import ValidationError
 
 from noob_agent.connectors import ConnectorLostError, GameConnector
 from noob_agent.domain.model import Observation, StepResult, ToolRequest
@@ -27,7 +30,7 @@ from noob_agent.domain.records import (
     StepRecord,
     StopReason,
 )
-from noob_agent.storage import EpisodeStore
+from noob_agent.storage import EpisodeStore, StorageError
 
 # Three identical failed calls with no intervening public state change end the
 # episode, per connector_contract.md.
@@ -118,11 +121,16 @@ class EpisodeRunner:
     ) -> EpisodeResult:
         """Reset, act within budget, and record the episode and its outcome."""
         try:
-            return await self._run(
+            result = await self._run(
                 experiment=experiment, scenario_id=scenario_id, seed=seed, split=split
             )
-        finally:
-            await self._connector.close()
+        except BaseException:
+            # Closing must not replace the error that is already propagating.
+            with suppress(Exception):
+                await self._connector.close()
+            raise
+        await self._connector.close()
+        return result
 
     async def _run(
         self,
@@ -183,14 +191,27 @@ class EpisodeRunner:
                 stop_reason = "connector_lost"
                 break
 
-            self._store.append_step(
-                StepRecord(
-                    episode_id=episode_id,
-                    sequence=result.sequence,
-                    request=request,
-                    result=result,
+            # A result the harness cannot durably record is a result whose effect
+            # on the game cannot be confirmed, so the episode ends the same way an
+            # unknown action ends it: recorded, and never retried. Crashing here
+            # would leave an episode row with no outcome in the source of truth.
+            try:
+                if result.sequence != sequence:
+                    raise ValueError(
+                        f"The connector returned sequence {result.sequence}, expected {sequence}."
+                    )
+                self._store.append_step(
+                    StepRecord(
+                        episode_id=episode_id,
+                        sequence=result.sequence,
+                        request=request,
+                        result=result,
+                    )
                 )
-            )
+            except (ValidationError, ValueError, StorageError):
+                stop_reason = "unknown_result"
+                break
+
             primitives_used += result.primitive_actions_charged
             observation = result.observation
             terminal = result.observation.terminal
