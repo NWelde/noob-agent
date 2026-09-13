@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from fakes.connector import FakeClock, ScriptedPolicy
 
 from noob_agent.connectors import ConnectorError, GameConnector, doom
 from noob_agent.connectors.doom import DoomConnector
 from noob_agent.domain.model import Observation, StepResult, ToolRequest
+from noob_agent.domain.records import ExperimentRecord
+from noob_agent.runtime import EpisodeRunner
+from noob_agent.storage import EpisodeStore
 
 TRAINING = "doom-basic-training"
 HELDOUT_A = "doom-basic-heldout-a"
 HELDOUT_B = "doom-basic-heldout-b"
 SEED = 20260912
+STARTED_AT = datetime(2026, 9, 12, 22, 0, 0, tzinfo=UTC)
 CENTERED_SEED = 101
 MANIFEST_PATH = Path("scenarios/doom/basic-v1/manifest.json")
 APPROVED_GOAL = (
@@ -35,6 +41,53 @@ def _target(observation: Observation) -> int:
 
 def _without_episode_id(observation: Observation) -> dict[str, object]:
     return observation.model_dump(exclude={"episode_id"})
+
+
+async def test_fresh_connectors_give_unique_seed_free_episode_ids() -> None:
+    episode_ids = []
+    for _ in range(3):
+        connector = DoomConnector()
+        try:
+            episode_ids.append((await connector.reset(HELDOUT_A, SEED)).episode_id)
+        finally:
+            await connector.close()
+
+    assert len(set(episode_ids)) == 3, episode_ids
+    for episode_id in episode_ids:
+        assert episode_id.startswith(f"{HELDOUT_A}-")
+        assert "doom-doom-" not in episode_id
+        assert str(SEED) not in episode_id
+        for word in PRIVATE_WORDS:
+            assert word not in episode_id.lower()
+
+
+async def test_episodes_from_fresh_connectors_share_one_store(store: EpisodeStore) -> None:
+    experiment = ExperimentRecord(
+        experiment_id="exp_doom_ids",
+        model_id="scripted-policy",
+        condition="cold",
+        connector_version=doom.CONNECTOR_VERSION,
+        decision_budget=1,
+        primitive_budget=1,
+        wall_time_budget_ms=90_000,
+        created_at=STARTED_AT,
+    )
+    store.create_experiment(experiment)
+
+    recorded = []
+    for seed in (101, 102, 103):
+        runner = EpisodeRunner(
+            connector=DoomConnector(),
+            store=store,
+            policy=ScriptedPolicy(("observe", {})),
+            clock=FakeClock(wall=STARTED_AT),
+        )
+        result = await runner.run(
+            experiment=experiment, scenario_id=HELDOUT_A, seed=seed, split="held-out"
+        )
+        recorded.append(store.read_episode(result.episode_id).episode.seed)
+
+    assert recorded == [101, 102, 103]
 
 
 async def test_manifest_declares_the_ten_doom_bdp_primitives() -> None:

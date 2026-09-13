@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 21:54 PDT | [FIXED] | Doom episode IDs are now unique across connector instances (the scenario ID plus a random decimal token), so held-out episodes of one scenario from fresh connectors can be recorded in one store instead of colliding on `doom-doom-<scenario>-r001`.
+
 2026-09-12 21:52 PDT | [ADDED] | Added the independent Doom grader for build-order step 8b: a private outcome pinned to its episode, a grade decided only after a finished Doom episode from kills and player death alone, refusal of mismatched or foreign-game episodes, and a scripted center-and-fire oracle that solves every precommitted held-out cell within the frozen 12-decision, 24-primitive budget.
 
 2026-09-12 21:46 PDT | [FIXED] | A rejected Doom request now advances the public sequence like any other durable result, so the episode runner records it as a step instead of ending the episode on a sequence mismatch.

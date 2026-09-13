@@ -10,6 +10,7 @@ message.
 from __future__ import annotations
 
 import importlib
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,7 +132,6 @@ class DoomConnector:
         self._latest: Observation | None = None
         self._outcome: DoomEpisodeOutcome | None = None
         self._sequence = 0
-        self._resets = 0
 
     async def manifest(self) -> ConnectorManifest:
         return MANIFEST
@@ -154,9 +154,10 @@ class DoomConnector:
         game.make_action([0.0] * len(self._buttons), SETTLE_TICKS)
         if time.monotonic() - started > self._settings.reset_timeout_seconds:
             raise ConnectorError("Doom reset exceeded its timeout.")
-        self._resets += 1
         self._scenario_id, self._sequence = scenario_id, 0
-        self._episode_id = f"doom-{scenario_id}-r{self._resets:03d}"
+        # Unique across connector instances so episodes share one store, and
+        # decimal so the token can never spell a word the leak checks forbid.
+        self._episode_id = f"{scenario_id}-{secrets.randbelow(10**16):016d}"
         self._capture_outcome()
         self._latest = self._observation(None)
         return self._latest
