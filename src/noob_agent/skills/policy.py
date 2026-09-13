@@ -61,6 +61,7 @@ def check_static_policy(source: str) -> list[SkillValidationIssue]:
             )
         ]
 
+    forbidden_aliases = _collect_forbidden_aliases(tree)
     issues: list[SkillValidationIssue] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -70,10 +71,10 @@ def check_static_policy(source: str) -> list[SkillValidationIssue]:
                     issues.append(_forbidden_import(alias.name, node))
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
-if node.level or root not in ALLOWED_IMPORT_MODULES:
+            if node.level or root not in ALLOWED_IMPORT_MODULES:
                 issues.append(_forbidden_import(node.module or "", node))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in FORBIDDEN_CALL_NAMES:
+            if node.func.id in FORBIDDEN_CALL_NAMES or node.func.id in forbidden_aliases:
                 issues.append(
                     SkillValidationIssue(
                         check="static_policy",
@@ -109,3 +110,18 @@ def _forbidden_import(name: str, node: ast.Import | ast.ImportFrom) -> SkillVali
         line=node.lineno,
         column=node.col_offset,
     )
+
+
+def _collect_forbidden_aliases(tree: ast.AST) -> set[str]:
+    forbidden_refs = set(FORBIDDEN_CALL_NAMES)
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+            continue
+        if node.value.id not in forbidden_refs:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+                forbidden_refs.add(target.id)
+    return aliases

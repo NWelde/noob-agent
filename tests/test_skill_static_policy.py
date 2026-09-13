@@ -58,6 +58,20 @@ def test_rejects_file_access_via_the_open_builtin() -> None:
     assert any(issue.code == "forbidden_call" for issue in issues)
 
 
+def test_rejects_aliased_forbidden_builtins() -> None:
+    source = (
+        "async def run(context, inputs):\n"
+        "    opener = open\n"
+        "    opener('secret.txt')\n"
+        "    imp = __import__\n"
+        "    imp('os')\n"
+    )
+
+    issues = check_static_policy(source)
+
+    assert sum(issue.code == "forbidden_call" for issue in issues) == 2
+
+
 @pytest.mark.parametrize("call", ["eval('1')", "exec('pass')", "compile('1', '<s>', 'eval')"])
 def test_rejects_dynamic_execution(call: str) -> None:
     issues = check_static_policy(f"async def run(context, inputs):\n    {call}\n")
