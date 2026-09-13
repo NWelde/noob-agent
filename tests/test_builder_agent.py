@@ -192,13 +192,13 @@ async def test_records_the_candidate_even_when_validation_rejects_it(
 async def test_runtime_contract_failure_is_rejected_before_acceptance(
     stored_episode: EpisodeStore, registry: SkillRegistry, episode: EpisodeRecord
 ) -> None:
-    source = '''from noob_agent.skills.contract import SkillContext, SkillResult
+    source = """from noob_agent.skills.contract import SkillContext, SkillResult
 
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
     await context.attack(target="nearest")
     return SkillResult(status="failed", summary="Done.", primitive_actions_used=0)
-'''
+"""
     client = ScriptedModelClient(candidate(source))
 
     outcome = await build(client, registry, stored_episode, episode.episode_id, max_repairs=0)
@@ -212,13 +212,13 @@ async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
 async def test_runtime_failure_evidence_is_returned_to_the_bounded_repair(
     stored_episode: EpisodeStore, registry: SkillRegistry, episode: EpisodeRecord
 ) -> None:
-    source = '''from noob_agent.skills.contract import SkillContext, SkillResult
+    source = """from noob_agent.skills.contract import SkillContext, SkillResult
 
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
     await context.attack(target="nearest")
     return SkillResult(status="failed", summary="Done.", primitive_actions_used=0)
-'''
+"""
     client = ScriptedModelClient(candidate(source), candidate(VALID_SOURCE))
 
     outcome = await build(client, registry, stored_episode, episode.episode_id, max_repairs=1)
@@ -360,3 +360,30 @@ def test_the_builder_prompt_states_the_public_goal(
     rendered = render_builder_prompt(evidence, primitive_names=PRIMITIVE_NAMES)
 
     assert evidence.public_goal in rendered
+
+
+def test_both_builder_prompts_document_the_real_skill_contract(
+    stored_episode: EpisodeStore, episode: EpisodeRecord
+) -> None:
+    """A live repair spent its whole output cap guessing an undocumented API."""
+    from typing import get_args
+
+    from noob_agent.skills.contract import EvidenceKind, SkillStatusClaim
+
+    evidence = select_evidence(stored_episode.read_episode(episode.episode_id))
+    issue = SkillValidationIssue(check="contract", code="SKILL_INVALID_RESULT", message="bad")
+
+    for rendered in (
+        render_builder_prompt(evidence, primitive_names=PRIMITIVE_NAMES),
+        render_repair_prompt(previous_source=VALID_SOURCE, issues=(issue,)),
+    ):
+        assert "await context.observe()" in rendered
+        assert "await context.call(" in rendered
+        assert "visible_objects" in rendered and "object_id" in rendered
+        assert "SkillResult(" in rendered and "status=" in rendered
+        assert "summary=" in rendered and "primitive_actions_used=" in rendered
+        assert "EvidenceRef(kind=" in rendered
+        for kind in get_args(EvidenceKind):
+            assert f'"{kind}"' in rendered
+        for status in get_args(SkillStatusClaim):
+            assert f'"{status}"' in rendered
