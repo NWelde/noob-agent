@@ -78,7 +78,7 @@ single-pass results.
 
 - **Round 0.** Round 0 is the single-pass training attempt and build above.
 - **Practice.** The accepted skill plays a fixed set of training-split practice
-  seeds (`scenarios/doom/basic-v2`: `practice_seeds`). Each practice episode has
+  seeds (`scenarios/doom/basic-v3`: four `practice_seeds`, two targets on each side). Each practice episode has
   the held-out episode budget and a fresh Action conversation.
 - **Refinement.** Each later round makes one refinement call, up to 12,000
   tokens, plus its repairs, up to 8,000 tokens each. A validated refinement plays
@@ -86,9 +86,10 @@ single-pass results.
 - **Keep or reject.** A refinement is accepted, and the incumbent retired, only
   if its public practice score is higher: the fraction of practice episodes ending
   in a terminal state, with fewer primitive actions breaking ties. Otherwise it is
-  rejected and the loop stops.
-- **Stopping.** The loop stops after 3 refinement rounds, a round without
-  improvement, a perfect practice score, or the learning budget.
+  rejected, and the next refinement again starts from the incumbent.
+- **Stopping.** The loop stops after 3 refinement rounds, 2 consecutive rounds
+  without a kept version (a refinement that fails validation counts as one), a
+  perfect practice score, or the learning budget (section 24, step 24b).
 - **Learning budget.** At most 140 learning model calls, 300,000 learning tokens
   (training, Builder, and practice calls), and 900 seconds of learning wall time.
 - **Held-out.** Held-out cells run once, after the loop has ended, with the final
