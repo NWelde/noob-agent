@@ -316,7 +316,9 @@ async def test_the_stricter_of_skill_and_episode_budget_wins(
         for _ in range(3):
             seen.append(await host.call("observe", {"radius": 2}))
         assert host.remaining_budget().primitive_actions == 0
-        return SkillResult(status="inconclusive", summary="Out of budget.", primitive_actions_used=2)
+        return SkillResult(
+            status="inconclusive", summary="Out of budget.", primitive_actions_used=2
+        )
 
     runtime = SkillRuntime(ScriptedSkillExecutor(script), available=(version,))
     invocation = await invoke(runtime, version, connector, recording_store, remaining_primitives=2)
