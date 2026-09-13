@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+2026-09-12 22:10 PDT | [DOCUMENTED] | Recorded the first live Doom learning sequence with W&B Inference `deepseek-ai/DeepSeek-V4-Flash-0731` and the labeled local-subprocess executor: cold training hit its decision limit with 13 of 20 unusable Action replies and no kill, the Builder's reply was unusable at its 2,048-token cap, and held-out episodes were skipped because no skill was accepted.
+
+2026-09-12 22:10 PDT | [ADDED] | Added the game-neutral `LearningSequence` for build-order step 8c, which runs one cold training episode under the frozen training budgets, one Builder run on that episode's public evidence, and fresh-connector held-out episodes with the accepted skill, grading each after it ends. Added `scripts/run_doom_learning_sequence.py`, which refuses to run with a disabled model provider, model ID, or sandbox mode.
+
 2026-09-12 21:54 PDT | [FIXED] | Doom episode IDs are now unique across connector instances (the scenario ID plus a random decimal token), so held-out episodes of one scenario from fresh connectors can be recorded in one store instead of colliding on `doom-doom-<scenario>-r001`.
 
 2026-09-12 21:52 PDT | [ADDED] | Added the independent Doom grader for build-order step 8b: a private outcome pinned to its episode, a grade decided only after a finished Doom episode from kills and player death alone, refusal of mismatched or foreign-game episodes, and a scripted center-and-fire oracle that solves every precommitted held-out cell within the frozen 12-decision, 24-primitive budget.
