@@ -8,6 +8,7 @@ the budgets, the scenario, or its own acceptance rules.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 
 from noob_agent.agents.evidence import TraceEvidence
@@ -96,7 +97,22 @@ def render_repair_prompt(*, previous_source: str, issues: Iterable[SkillValidati
     The rejected candidate receives its own failing checks and nothing else: no
     private grader predicate and no held-out data ever reaches a repair.
     """
-    listed = [f"- [{issue.check}/{issue.code}] {issue.message}" for issue in issues]
+    listed = []
+    for issue in issues:
+        line = f"- [{issue.check}/{issue.code}] {issue.message}"
+        evidence = {
+            key: value
+            for key, value in {
+                "fixture": issue.fixture,
+                "public_inputs": issue.public_inputs,
+                "public_result": issue.public_result,
+                "public_logs": issue.public_logs or None,
+            }.items()
+            if value is not None
+        }
+        if evidence:
+            line += f"\n  Public failure evidence: {json.dumps(evidence, sort_keys=True)}"
+        listed.append(line)
     if not listed:
         raise ValueError("A repair prompt needs at least one validation issue.")
     return f"""Your candidate was rejected by automated validation.

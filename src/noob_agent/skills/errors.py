@@ -9,9 +9,18 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
-SkillValidationCheck = Literal["package", "static_policy"]
+SkillValidationCheck = Literal[
+    "package",
+    "static_policy",
+    "load",
+    "contract",
+    "training_replay",
+    "negative_case",
+    "repeatability",
+    "validation_variation",
+]
 
 
 class SkillValidationIssue(BaseModel):
@@ -24,6 +33,10 @@ class SkillValidationIssue(BaseModel):
     message: str
     line: int | None = None
     column: int | None = None
+    fixture: str | None = None
+    public_inputs: dict[str, JsonValue] | None = None
+    public_result: dict[str, JsonValue] | None = None
+    public_logs: tuple[dict[str, JsonValue], ...] = ()
 
 
 class SkillValidationError(Exception):

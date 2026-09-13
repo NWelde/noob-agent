@@ -238,11 +238,13 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             builder = BuilderAgent(
                 self._recording(training_record, role="builder", episode_id=cold_result.episode_id),
                 self._registry,
+                executor=self._executor,
                 max_repairs=self._max_repairs,
                 max_output_tokens=self._builder_max_output_tokens,
             )
             outcome = await builder.build(
                 select_evidence(training_stored),
+                training_trace=training_stored,
                 primitive_names=tuple(tool.name for tool in manifest.tools),
                 authoring_model_id=self._model_id,
                 created_at=self._clock.now(),
