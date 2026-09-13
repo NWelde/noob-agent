@@ -99,6 +99,10 @@ def test_pressing_the_button_opens_the_bars_with_public_feedback() -> None:
     assert f"{condition}fill 31 100 -1 31 102 1 minecraft:air" in tick
     assert condition + "title @a[x=24,y=99,z=-4,dx=10,dy=5,dz=8] actionbar" in tick
     assert "The iron-bar gateway opens." in tick
+    # The sidecar records action-bar feedback, so a duplicate chat copy would
+    # show the model the same message twice.
+    assert "tellraw" not in tick
+    assert tick.count("The iron-bar gateway opens.") == 1
     # The message is issued before the bars disappear, so it fires exactly once.
     assert tick.index("actionbar") < tick.index("minecraft:air")
 
@@ -357,7 +361,7 @@ class _ScriptedModel:
         )
 
 
-def test_easy_run_succeeds_mirrors_every_call_to_chat_and_summarizes(tmp_path: Path) -> None:
+def test_easy_run_narrates_concisely_and_preserves_full_records(tmp_path: Path) -> None:
     module = _load_run_script()
     fakes: list[_FakeMinecraft] = []
 
@@ -395,11 +399,14 @@ def test_easy_run_succeeds_mirrors_every_call_to_chat_and_summarizes(tmp_path: P
     }
 
     chat = "\n".join(fakes[0].announcements)
-    for label in ("system", "prompt", "reasoning", "reply"):
-        assert f"[noob:action {label} " in chat
-        assert f"[noob:builder {label} " in chat
-    assert "The button is right in front of me." in chat
-    assert "Builder thinking." in chat
+    assert "[noob:Pressing]" in chat
+    assert "[noob:Learning]" in chat
+    assert "The button is right in front of me." not in chat
+    assert "Builder thinking." not in chat
+    assert {call.reasoning for call in calls} == {
+        "The button is right in front of me.",
+        "Builder thinking.",
+    }
 
 
 def test_budgeted_client_stops_before_exceeding_the_generous_run_budget(tmp_path: Path) -> None:
@@ -515,3 +522,27 @@ def test_interrupted_episode_still_reports_its_durable_progress(tmp_path: Path) 
     assert summary["training"]["decisions_used"] == 1
     assert summary["training"]["primitives_used"] == 1
     assert fakes[0].closed is True
+
+
+def test_echoed_chat_transcript_never_reaches_the_model_observation() -> None:
+    module = _load_run_script()
+
+    class EchoingMinecraft(_FakeMinecraft):
+        async def reset(self, scenario_id: str, seed: int) -> Observation:
+            return _observation(
+                sequence=0,
+                messages=(
+                    "<noobagentbot> [noob:action reasoning 1/2] I should press it.",
+                    "[noob:builder reply 1/1] raw form",
+                    "The iron-bar gateway opens.",
+                    "<nathanbeyene> hello [noob: is fine mid-sentence",
+                ),
+            )
+
+    observation = asyncio.run(module.EasyGoalConnector(EchoingMinecraft()).reset("x", 1))
+
+    assert [message.text for message in observation.messages] == [
+        "The iron-bar gateway opens.",
+        "<nathanbeyene> hello [noob: is fine mid-sentence",
+    ]
+    assert observation.terminal is True
