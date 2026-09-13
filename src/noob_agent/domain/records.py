@@ -33,6 +33,7 @@ StopReason = Literal[
     "unknown_result",
     "connector_lost",
     "repeated_failure",
+    "no_progress",
 ]
 
 
