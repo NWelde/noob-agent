@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+2026-09-13 12:53 PDT | [DOCUMENTED] | Rewrote the README in plain language, documented repository terminology, clarified the verified prototype status and limitations, and replaced the compressed repository table with a readable source-tree map.
+
+2026-09-13 12:30 PDT | [DOCUMENTED] | Reworked the README around the learning loop, cold-versus-skill comparison, current Doom demo result, repository map, and reproducible commands; added an inspected Doom comparison frame.
+
+2026-09-13 12:15 PDT | [ADDED] | Added an isolated redstone lamp demo with a barrel-held power block and a bounded cold/Builder/fresh skill-reuse comparison, identical attempt limits, phase token totals, public lamp success, and Weave tracing; labelled same-task non-benchmark evidence.
+
 2026-09-13 12:06 PDT | [FIXED] | Fixed three problems found by the first live easy-mode Minecraft run: the sidecar now records `title ... actionbar` feedback from its `action_bar` packet (previously no action-bar feedback, including the Resonator room's, reached observations) and drops operator command echoes such as `[Server: ...]`; the easy room's duplicate `tellraw` success message is removed; and both Builder prompts now document the real skill contract (`context.observe`, `context.call`, `SkillResult`, and `EvidenceRef` kinds), after a repair call spent its full 100,000-token output cap guessing that API and returned no reply.
 
 2026-09-13 12:00 PDT | [FIXED] | Replaced Minecraft demo chat transcript dumps with concise Seeing, Doing, Pressing, and Learning narration, colored through tellraw. Full model records remain unchanged, and narration echoes are excluded from observations. Colored chat uses the local demo bot's existing command permission.
