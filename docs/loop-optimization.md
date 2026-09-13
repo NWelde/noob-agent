@@ -154,3 +154,23 @@ Recorded as `mc-confirm-22g-20260913T125747Z`:
   a separately approved change before a Minecraft benchmark run.
 - **Not confirmed on Minecraft:** the Builder, practice rounds, and held-out. Only
   the cold Action loop was run.
+
+## Accounting-clear Builder prompt (24a)
+
+`loop-bench-24a` (5 single-pass sequences, basic-v1) after the API reference began
+stating that `context.observe()` is free and that `primitive_actions_used` must
+equal the sum of `result.primitive_actions_charged`:
+
+| Metric | `loop-bench-22e` | `loop-bench-24a` |
+| --- | --- | --- |
+| Sequences with an accepted skill | 1 of 5 | **5 of 5** |
+| `incorrect_action_accounting` rejections | 4 | **0** |
+| Repairs needed | 5 | 2 (both `missing_target_claimed_success`, both fixed) |
+| Builder calls ending at their cap | 0 of 10 | 0 of 7 |
+| Unusable Action replies | 0 of 110 | 0 of 370 |
+| Held-out goals completed | 1 of 6 | 8 of 30 |
+| Median sequence wall time | 17.5 s | 37.7 s (more held-out cells ran) |
+
+Held-out goals by sequence: 1, 1, 1, 1, and 4 of 6. Skills are now accepted
+reliably, but most still do not solve held-out, which is what step 24b's longer
+practice loop targets.
