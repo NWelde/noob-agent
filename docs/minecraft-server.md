@@ -183,6 +183,11 @@ preconditions before delivery. A rejected call is recorded but consumes no
 primitive action. Delivered interactions settle for five game ticks before
 the sidecar returns a fresh public snapshot.
 
+Public messages include ordinary chat and `title ... actionbar` feedback, which
+arrives as its own `action_bar` packet. Diagnostic `[noob:...]` narration,
+including the server's `<name> [noob:...]` echo, and operator command echoes
+such as `[Server: ...]` are never added to observations.
+
 ## TLauncher troubleshooting
 
 | Client symptom | Verified cause | Fix |
@@ -275,9 +280,13 @@ NOOB_AGENT_SANDBOX_MODE=local \
   guards remain only against runaway loops: 500 decisions and 1,000 primitives
   per episode, 2,000 model calls and 50,000,000 tokens per run, and the
   runner's standard stop after three identical failed calls.
-- Every Action and Builder system prompt, prompt, reasoning, reply, and
-  provider error is mirrored to Minecraft chat through the same `[noob:...]`
-  transcript as the Resonator smoke run, and is excluded from observations.
+- Both smoke runners show short demo narration: aqua `Seeing`, gold `Doing`,
+  green `Pressing` for buttons, and purple `Learning` during Builder work.
+  Only the leading verb is colored; the sentence stays white. Observations
+  use visible object labels and actions describe the selected control, without
+  claiming it succeeded. Full prompts, reasoning, replies, and errors remain
+  in the recorded calls and Weave. Narration is excluded from observations.
+  Formatted chat uses `/tellraw` with the local bot's existing operator permission.
 - Press `Ctrl-C` to stop. The open episode is recorded as `unknown_result`,
   Weave is flushed, and the summary reports status `interrupted`.
 - The terminal summary names the scenario, run status, stop reason, decisions,
