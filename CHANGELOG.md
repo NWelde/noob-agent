@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 19:20 PDT | [FIXED] | A rejected request now advances the Minecraft connector's public sequence like any other durable result, so the runner records the rejection as a step and continues instead of ending the episode as an unknown result.
+
 2026-09-12 19:05 PDT | [ADDED] | Added the clean/faulty pair and independent reproduction for build-order step 6: public Finding records and private verdict/reproduction records, a private grader that verifies a reported defect only when its counts and public evidence resolve, the fault predicate holds, and the matched clean twin does not show the behavior, a reproduction runner that replays the minimal evidence sequence from a fresh reset with a different seed through ordinary primitives and records the first mismatch, schema version 2 (finding, finding_verdict, reproduction tables; a version-1 database is upgraded in place), and an optional finding object the Action agent can attach to a decision.
 
 2026-09-12 18:45 PDT | [ADDED] | Added held-out reset and skill reuse for build-order step 5: an Action agent that chooses one primitive or one accepted skill per turn and states its subgoal and expected evidence, a skill runtime that records and charges every nested primitive to the same held-out budget and refuses calls to anything but manifest primitives, an interactive skill-executor seam whose default executes nothing and whose local-subprocess fallback is labeled as weaker isolation, and a held-out runner that starts every episode with a fresh conversation, offers only accepted versions, and never hands a held-out scenario to validation or repair.
