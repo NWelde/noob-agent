@@ -36,7 +36,13 @@ class ModelRequest(BaseModel):
 
 
 class ModelResponse(BaseModel):
-    """One completion, with the usage the Model call record needs."""
+    """One completion, with the usage the Model call record needs.
+
+    `input_tokens` and `output_tokens` stay zero when the provider reports no
+    usage, so existing budget arithmetic is unchanged; `usage_reported` says
+    whether those zeros are real. `reasoning` is the provider's separate
+    reasoning text, which shares the output cap but is never part of `text`.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -44,6 +50,9 @@ class ModelResponse(BaseModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     model_id: str = Field(min_length=1)
+    finish_reason: str | None = None
+    reasoning: str | None = None
+    usage_reported: bool = True
 
 
 class ModelClient(Protocol):
@@ -56,6 +65,8 @@ class ModelClient(Protocol):
 class DisabledModelClient:
     """Safe default that never reaches a provider."""
 
+    provider = "disabled"
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
         del request
         raise ModelUnavailableError(
@@ -66,6 +77,8 @@ class DisabledModelClient:
 
 class WandbInferenceClient:
     """W&B Inference through its OpenAI-compatible chat-completions endpoint."""
+
+    provider = "wandb-inference"
 
     def __init__(self, model: ModelSettings, wandb: WandbSettings) -> None:
         if model.provider != "wandb-inference":
@@ -110,13 +123,28 @@ class WandbInferenceClient:
             max_tokens=request.max_output_tokens,
             temperature=request.temperature,
         )
+        choice = completion.choices[0]
         usage = completion.usage
+        input_tokens = getattr(usage, "prompt_tokens", None)
+        output_tokens = getattr(usage, "completion_tokens", None)
         return ModelResponse(
-            text=completion.choices[0].message.content or "",
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            text=choice.message.content or "",
+            input_tokens=input_tokens or 0,
+            output_tokens=output_tokens or 0,
             model_id=completion.model or str(self._model.inference_model),
+            finish_reason=getattr(choice, "finish_reason", None),
+            reasoning=_reasoning_text(choice.message),
+            usage_reported=isinstance(input_tokens, int) and isinstance(output_tokens, int),
         )
+
+
+def _reasoning_text(message: Any) -> str | None:
+    """The provider's separate reasoning text, under either field name it uses."""
+    for field in ("reasoning", "reasoning_content"):
+        value = getattr(message, field, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def build_model_client(model: ModelSettings, wandb: WandbSettings) -> ModelClient:
