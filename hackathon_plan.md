@@ -1090,6 +1090,77 @@ and reproduction rate. If the comparison campaign is complete, show two models.
 > experience into reliable software, transfer it to unseen situations, and use
 > it to produce evidence another tester can reproduce.
 
+## 13. Approved core-loop milestone: build-order steps 1-3
+
+This section is the explicit approval required by `CLAUDE.md` and `AGENTS.md`
+before touching protected core-loop interfaces. It covers exactly build-order
+steps 1-3 from section 10: a real Minecraft connector reset and one hard-coded
+action, one recorded cold episode, and one hand-written skill through
+validation and registry. Tracked as GitHub issues #13, #14, and #15.
+
+It authorizes touching game connectors, the scenario reset/action path, the
+generated-skill runtime and registry, and tracing (as a best-effort mirror
+only, through the existing disabled-by-default seam). It does not authorize
+touching the Action agent, the private grader, the evaluation harness, or the
+report-generation path; those remain gated separately. Builder-generated
+skills, held-out reuse, the clean/faulty pair, the ViZDoom connector, and the
+comparison runner (build-order steps 4-10) are out of scope here.
+
+### Step 1 - Minecraft connector: reset and one hard-coded action (#13)
+
+- Files: new `src/noob_agent/connectors/protocol.py` (typed `GameConnector`
+  Protocol per `connector_contract.md`); new
+  `src/noob_agent/connectors/minecraft.py` (`MinecraftConnector` implementing
+  `manifest/reset/step/is_terminal/close`). Game connection follows section 8:
+  a Node.js/Mineflayer sidecar process, driven from Python over JSON Lines on
+  the sidecar's stdio, with no new Python dependency required. The sidecar
+  lives in its own directory with its own `package.json`; it is the only new
+  external dependency and is already named in section 8, so no separate
+  dependency approval is required.
+- Tests first: `tests/test_connectors_minecraft.py` - reset repeatability on a
+  fixed seed, one hard-coded action (`observe`) returns a schema-valid
+  `StepResult`, timeout classification. Skips cleanly, not silently, if the
+  local server or sidecar is unavailable.
+- Validation: `uv run pytest tests/test_connectors_minecraft.py -v` against
+  the local server per `docs/minecraft-server.md`.
+- Acceptance: BDP criteria 1-2 (Minecraft integration starts/resets reliably;
+  Python observes and acts through its connector).
+
+### Step 2 - One complete cold episode, recorded locally and in Weave (#14)
+
+- Files: new `src/noob_agent/runtime/runner.py` (episode loop enforcing
+  budgets and action-ID idempotency from `connector_contract.md`); new
+  `src/noob_agent/storage/schema.py` and `src/noob_agent/storage/repository.py`
+  (SQLite, authoritative per section 9); extend
+  `src/noob_agent/observability/tracing.py` to mirror episode/step only when
+  `TraceSettings.enabled`.
+- Tests first: `tests/test_episode_runner.py` (deterministic cold run against
+  a stub connector); `tests/test_storage_repository.py` (episode/step
+  persistence round-trip).
+- Validation: `uv run pytest tests/test_episode_runner.py
+  tests/test_storage_repository.py -v`; manual: one live cold episode against
+  the local server, confirm the SQLite row and, if Weave credentials are set,
+  a trace.
+- Acceptance: BDP criteria 3-4 (bounded cold attempt; readable nested Weave
+  trace).
+
+### Step 3 - One hand-written skill through validation and registry (#15)
+
+- Files: new `src/noob_agent/skills/contract.py` (`SkillContext`/`SkillResult`
+  per `skill_contract.md`); new `src/noob_agent/verification/validator.py`
+  (AST-based permission and size-limit check); new
+  `src/noob_agent/skills/registry.py` (immutable version/hash assignment,
+  tool-list exposure). The fixture skill lives under `tests/fixtures/skills/`;
+  per section 10 it tests plumbing only and must never appear as a
+  model-generated result later.
+- Tests first: `tests/test_skill_validator.py` (rejects disallowed
+  imports/network/exec, accepts a compliant skill); `tests/test_skill_registry.py`
+  (version/hash immutability).
+- Validation: `uv run pytest tests/test_skill_validator.py
+  tests/test_skill_registry.py -v`.
+- Acceptance: BDP criteria 5-6 (one skill produced; sandbox or local fallback
+  accepts or rejects it via automated checks).
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)

@@ -28,6 +28,11 @@ ALLOWED_IMPORT_MODULES = frozenset(
     }
 )
 
+SKILL_CONTRACT_MODULE = "noob_agent.skills.contract"
+ALLOWED_SKILL_CONTRACT_NAMES = frozenset(
+    {"EvidenceRef", "SkillBudget", "SkillContext", "SkillResult"}
+)
+
 FORBIDDEN_CALL_NAMES = frozenset(
     {
         "eval",
@@ -70,8 +75,14 @@ def check_static_policy(source: str) -> list[SkillValidationIssue]:
                 if root not in ALLOWED_IMPORT_MODULES:
                     issues.append(_forbidden_import(alias.name, node))
         elif isinstance(node, ast.ImportFrom):
-            root = (node.module or "").split(".")[0]
-            if node.level or root not in ALLOWED_IMPORT_MODULES:
+            module = node.module or ""
+            root = module.split(".")[0]
+            if not node.level and module == SKILL_CONTRACT_MODULE:
+                for alias in node.names:
+                    if alias.name not in ALLOWED_SKILL_CONTRACT_NAMES:
+                        imported_name = f"{module}.{alias.name}"
+                        issues.append(_forbidden_import(imported_name, node))
+            elif node.level or root not in ALLOWED_IMPORT_MODULES:
                 issues.append(_forbidden_import(node.module or "", node))
             else:
                 for alias in node.names:
