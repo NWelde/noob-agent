@@ -8,6 +8,9 @@ recorded attempt must never change after the fact.
 Findings, verdicts, and reproductions follow the same rules. A finding is a
 public report; its verdict and reproductions are private grader records that
 are written once and are never read back into a prompt.
+
+Model call records are diagnostic. Each is written once, after its call, and
+nothing in the harness reads one back into a prompt.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from noob_agent.domain.records import (
     EpisodeOutcome,
     EpisodeRecord,
     ExperimentRecord,
+    ModelCallRecord,
     StepRecord,
     StoredEpisode,
 )
@@ -330,6 +334,20 @@ class EpisodeStore:
 
         return StoredEpisode(episode=episode, steps=steps, outcome=outcome)
 
+    def open_episode_id(self, experiment_id: str) -> str | None:
+        """The most recently started episode in an experiment with no outcome yet."""
+        row = self._connection.execute(
+            """
+            SELECT episode.episode_id FROM episode
+            LEFT JOIN episode_outcome USING (episode_id)
+            WHERE episode.experiment_id = ? AND episode_outcome.episode_id IS NULL
+            ORDER BY episode.rowid DESC
+            LIMIT 1
+            """,
+            (experiment_id,),
+        ).fetchone()
+        return None if row is None else str(row["episode_id"])
+
     # --- Findings and the private grader's records ---------------------------
 
     def record_finding(self, record: FindingRecord) -> None:
@@ -477,6 +495,90 @@ class EpisodeStore:
             raise InconsistentRecordError(
                 f"Episode {episode_id!r} has a finding row that is not internally "
                 f"consistent: {error}"
+            ) from error
+
+    # --- Model call records ---------------------------------------------------
+
+    def record_model_call(self, record: ModelCallRecord) -> None:
+        """Write one model call record exactly once."""
+        record = _revalidate(record, f"Model call {record.call_id!r}")
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO model_call (
+                        call_id, experiment_id, purpose, episode_id, action_id,
+                        provider, model_id, system_text, prompt_text,
+                        max_output_tokens, temperature, response_text, reasoning,
+                        finish_reason, input_tokens, output_tokens, latency_ms,
+                        error, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.call_id,
+                        record.experiment_id,
+                        record.purpose,
+                        record.episode_id,
+                        record.action_id,
+                        record.provider,
+                        record.model_id,
+                        record.system,
+                        record.prompt,
+                        record.max_output_tokens,
+                        record.temperature,
+                        record.response_text,
+                        record.reasoning,
+                        record.finish_reason,
+                        record.input_tokens,
+                        record.output_tokens,
+                        record.latency_ms,
+                        record.error,
+                        record.started_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Model call {record.call_id!r}") from error
+
+    def read_model_calls(
+        self, *, experiment_id: str | None = None, episode_id: str | None = None
+    ) -> tuple[ModelCallRecord, ...]:
+        """Model call records in the order they were written, optionally filtered."""
+        rows = self._connection.execute(
+            """
+            SELECT * FROM model_call
+            WHERE (? IS NULL OR experiment_id = ?) AND (? IS NULL OR episode_id = ?)
+            ORDER BY rowid ASC
+            """,
+            (experiment_id, experiment_id, episode_id, episode_id),
+        ).fetchall()
+        try:
+            return tuple(
+                ModelCallRecord(
+                    call_id=row["call_id"],
+                    experiment_id=row["experiment_id"],
+                    purpose=row["purpose"],
+                    episode_id=row["episode_id"],
+                    action_id=row["action_id"],
+                    provider=row["provider"],
+                    model_id=row["model_id"],
+                    system=row["system_text"],
+                    prompt=row["prompt_text"],
+                    max_output_tokens=row["max_output_tokens"],
+                    temperature=row["temperature"],
+                    response_text=row["response_text"],
+                    reasoning=row["reasoning"],
+                    finish_reason=row["finish_reason"],
+                    input_tokens=row["input_tokens"],
+                    output_tokens=row["output_tokens"],
+                    latency_ms=row["latency_ms"],
+                    error=row["error"],
+                    started_at=row["started_at"],
+                )
+                for row in rows
+            )
+        except ValidationError as error:
+            raise InconsistentRecordError(
+                f"A recorded model call is not internally consistent: {error}"
             ) from error
 
     @staticmethod
