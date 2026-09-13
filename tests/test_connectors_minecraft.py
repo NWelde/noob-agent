@@ -14,10 +14,12 @@ missing, and never hang or silently pass.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fakes.connector import ScriptedPolicy
 
 from noob_agent.connectors import ConnectorError
 from noob_agent.connectors.minecraft import (
@@ -29,6 +31,9 @@ from noob_agent.connectors.minecraft import (
     SidecarUnavailableError,
 )
 from noob_agent.domain.model import Observation, StepResult, ToolRequest
+from noob_agent.domain.records import ExperimentRecord
+from noob_agent.runtime import EpisodeRunner
+from noob_agent.storage import EpisodeStore
 
 SCENARIO_ID = "resonator-training-v1"
 SEED = 20260912
@@ -262,15 +267,52 @@ async def test_an_out_of_range_observe_radius_is_rejected(radius: object) -> Non
     assert len(transport.sent) == sent_during_reset
 
 
-async def test_a_rejected_request_does_not_advance_the_public_sequence() -> None:
-    connector, _ = stubbed(observe_reply(), observe_reply())
+async def test_a_rejected_request_is_a_durable_result_with_its_own_sequence() -> None:
+    """Every request receives one durable result, and each recorded result needs
+    its own sequence: the runner records a rejection as a step, so a rejection
+    must advance the public sequence exactly like a delivered primitive."""
+    connector, _ = stubbed(observe_reply(), observe_reply(), observe_reply())
     await connector.reset(SCENARIO_ID, SEED)
     accepted = await connector.step(ToolRequest(action_id="a_0005", tool_name="observe"))
 
     rejected = await connector.step(ToolRequest(action_id="a_0006", tool_name="no_such_tool"))
+    after = await connector.step(ToolRequest(action_id="a_0007", tool_name="observe"))
 
-    assert rejected.sequence == accepted.sequence
-    assert rejected.observation.sequence == accepted.observation.sequence
+    assert accepted.sequence == 1
+    assert rejected.sequence == 2
+    assert rejected.observation.sequence == 2
+    assert rejected.observation.last_action_id == "a_0006"
+    assert rejected.primitive_actions_charged == 0
+    assert after.sequence == 3
+    assert after.observation.sequence == 3
+
+
+async def test_the_runner_keeps_going_after_a_live_rejection(store: EpisodeStore) -> None:
+    """A rejected call costs one decision and no primitive; it must not end the
+    episode as an unknown result because of a stale sequence number."""
+    connector, _ = stubbed(observe_reply(), observe_reply())
+    experiment = ExperimentRecord(
+        experiment_id="exp_live_reject",
+        model_id="scripted-policy",
+        condition="cold",
+        connector_version="test",
+        decision_budget=2,
+        primitive_budget=40,
+        wall_time_budget_ms=180_000,
+        created_at=datetime(2026, 9, 12, 16, 0, tzinfo=UTC),
+    )
+    store.create_experiment(experiment)
+    policy = ScriptedPolicy(("charge_keystone", {}), ("observe", {"radius": 4}))
+    runner = EpisodeRunner(connector=connector, store=store, policy=policy)
+
+    result = await runner.run(experiment=experiment, scenario_id=SCENARIO_ID, seed=SEED)
+
+    assert result.stop_reason == "decision_limit"
+    assert result.decisions_used == 2
+    assert result.primitives_used == 1
+    stored = store.read_episode(result.episode_id)
+    assert [step.result.status for step in stored.steps] == ["rejected", "succeeded"]
+    assert [step.sequence for step in stored.steps] == [1, 2]
 
 
 # --- Timeout classification -------------------------------------------------

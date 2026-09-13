@@ -4,11 +4,16 @@ Uses the standard library only. Every write runs inside an explicit
 transaction, so a rejected row leaves the database exactly as it was. Duplicate
 episode and action IDs are refused rather than silently overwritten, because a
 recorded attempt must never change after the fact.
+
+Findings, verdicts, and reproductions follow the same rules. A finding is a
+public report; its verdict and reproductions are private grader records that
+are written once and are never read back into a prompt.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -16,11 +21,18 @@ from pathlib import Path
 from types import TracebackType
 from typing import TypeVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from noob_agent.domain.findings import (
+    FindingRecord,
+    FindingReport,
+    FindingVerdict,
+    ReplayOutcome,
+    ReproductionRecord,
+    StoredFinding,
+)
 from noob_agent.domain.model import ConnectorManifest, Observation, StepResult, ToolRequest
 from noob_agent.domain.records import (
-    DurableRecord,
     EpisodeOutcome,
     EpisodeRecord,
     ExperimentRecord,
@@ -29,7 +41,7 @@ from noob_agent.domain.records import (
 )
 from noob_agent.storage.schema import SCHEMA_STATEMENTS, SCHEMA_VERSION
 
-_RecordT = TypeVar("_RecordT", bound=DurableRecord)
+_RecordT = TypeVar("_RecordT", bound=BaseModel)
 
 
 class StorageError(RuntimeError):
@@ -77,7 +89,7 @@ def _revalidate(record: _RecordT, context: str) -> _RecordT:
 
 
 class EpisodeStore:
-    """Durable, append-only local records for experiments and episodes."""
+    """Durable, append-only local records for experiments, episodes, and findings."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -93,7 +105,12 @@ class EpisodeStore:
         return store
 
     def initialize(self) -> None:
-        """Create the schema if it is not already present."""
+        """Create the schema if it is not already present, upgrading additively.
+
+        Every table is created with IF NOT EXISTS, so a database at an earlier
+        version simply gains the tables it lacks and its version is advanced. A
+        database from a newer schema is refused rather than misread.
+        """
         with self._transaction():
             for statement in SCHEMA_STATEMENTS:
                 self._connection.execute(statement)
@@ -102,6 +119,13 @@ class EpisodeStore:
                 self._connection.execute(
                     "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
                 )
+            elif recorded["version"] > SCHEMA_VERSION:
+                raise StorageError(
+                    f"The database is at schema version {recorded['version']}, newer than "
+                    f"the supported version {SCHEMA_VERSION}."
+                )
+            elif recorded["version"] < SCHEMA_VERSION:
+                self._connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
 
     def close(self) -> None:
         self._connection.close()
@@ -305,6 +329,166 @@ class EpisodeStore:
             ) from error
 
         return StoredEpisode(episode=episode, steps=steps, outcome=outcome)
+
+    # --- Findings and the private grader's records ---------------------------
+
+    def record_finding(self, record: FindingRecord) -> None:
+        """Record one reported finding against an existing episode."""
+        record = _revalidate(record, f"Finding {record.finding_id!r}")
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO finding (
+                        finding_id, episode_id, action_id, reporting_model_id,
+                        report_json, reported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.finding_id,
+                        record.episode_id,
+                        record.action_id,
+                        record.reporting_model_id,
+                        record.report.model_dump_json(),
+                        record.reported_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Finding {record.finding_id!r}") from error
+
+    def record_verdict(self, verdict: FindingVerdict) -> None:
+        """Write the grader's verdict on a finding exactly once."""
+        verdict = _revalidate(verdict, f"Verdict for finding {verdict.finding_id!r}")
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO finding_verdict (
+                        finding_id, verification, reason_code, reason, grader_version, decided_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        verdict.finding_id,
+                        verdict.verification,
+                        verdict.reason_code,
+                        verdict.reason,
+                        verdict.grader_version,
+                        verdict.decided_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Verdict for finding {verdict.finding_id!r}") from error
+
+    def record_reproduction(self, record: ReproductionRecord) -> None:
+        """Record one fresh-reset reproduction attempt for a finding."""
+        record = _revalidate(record, f"Reproduction {record.reproduction_id!r}")
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO reproduction (
+                        reproduction_id, finding_id, scenario_id, seed, build, attempted_json,
+                        result, predicate_result, first_mismatch, attempted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.reproduction_id,
+                        record.finding_id,
+                        record.scenario_id,
+                        record.seed,
+                        record.build,
+                        json.dumps([step.model_dump(mode="json") for step in record.attempted]),
+                        record.result,
+                        None if record.predicate_result is None else int(record.predicate_result),
+                        record.first_mismatch,
+                        record.attempted_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Reproduction {record.reproduction_id!r}") from error
+
+    def read_finding(self, finding_id: str) -> StoredFinding:
+        """Read one finding with its verdict and reproductions, if any."""
+        row = self._connection.execute(
+            "SELECT * FROM finding WHERE finding_id = ?", (finding_id,)
+        ).fetchone()
+        if row is None:
+            raise UnknownRecordError(f"Finding {finding_id!r} is not recorded.")
+        try:
+            finding = self._finding_from_row(row)
+            verdict_row = self._connection.execute(
+                "SELECT * FROM finding_verdict WHERE finding_id = ?", (finding_id,)
+            ).fetchone()
+            verdict = (
+                None
+                if verdict_row is None
+                else FindingVerdict(
+                    finding_id=verdict_row["finding_id"],
+                    verification=verdict_row["verification"],
+                    reason_code=verdict_row["reason_code"],
+                    reason=verdict_row["reason"],
+                    grader_version=verdict_row["grader_version"],
+                    decided_at=verdict_row["decided_at"],
+                )
+            )
+            reproduction_rows = self._connection.execute(
+                "SELECT * FROM reproduction WHERE finding_id = ? ORDER BY attempted_at ASC, "
+                "reproduction_id ASC",
+                (finding_id,),
+            ).fetchall()
+            reproductions = tuple(
+                ReproductionRecord(
+                    reproduction_id=repro["reproduction_id"],
+                    finding_id=repro["finding_id"],
+                    scenario_id=repro["scenario_id"],
+                    seed=repro["seed"],
+                    build=repro["build"],
+                    attempted=tuple(
+                        ReplayOutcome.model_validate(item)
+                        for item in json.loads(repro["attempted_json"])
+                    ),
+                    result=repro["result"],
+                    predicate_result=(
+                        None
+                        if repro["predicate_result"] is None
+                        else bool(repro["predicate_result"])
+                    ),
+                    first_mismatch=repro["first_mismatch"],
+                    attempted_at=repro["attempted_at"],
+                )
+                for repro in reproduction_rows
+            )
+        except ValidationError as error:
+            raise InconsistentRecordError(
+                f"Finding {finding_id!r} has a recorded row that is not internally "
+                f"consistent: {error}"
+            ) from error
+        return StoredFinding(finding=finding, verdict=verdict, reproductions=reproductions)
+
+    def findings_for_episode(self, episode_id: str) -> tuple[FindingRecord, ...]:
+        """Every finding reported in one episode, in the order it was reported."""
+        rows = self._connection.execute(
+            "SELECT * FROM finding WHERE episode_id = ? ORDER BY reported_at ASC, finding_id ASC",
+            (episode_id,),
+        ).fetchall()
+        try:
+            return tuple(self._finding_from_row(row) for row in rows)
+        except ValidationError as error:
+            raise InconsistentRecordError(
+                f"Episode {episode_id!r} has a finding row that is not internally "
+                f"consistent: {error}"
+            ) from error
+
+    @staticmethod
+    def _finding_from_row(row: sqlite3.Row) -> FindingRecord:
+        return FindingRecord(
+            finding_id=row["finding_id"],
+            episode_id=row["episode_id"],
+            action_id=row["action_id"],
+            reporting_model_id=row["reporting_model_id"],
+            report=FindingReport.model_validate_json(row["report_json"]),
+            reported_at=row["reported_at"],
+        )
 
 
 def manifest_hash(manifest: ConnectorManifest) -> str:
