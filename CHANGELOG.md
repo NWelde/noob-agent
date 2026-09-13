@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 21:29 PDT | [DOCUMENTED] | Proposed the core-loop milestone for live Minecraft clean/faulty grading in `hackathon_plan.md` section 16: an evaluation data pack with validation and matched held-out builds, private build selection and predicate reads over a localhost-only RCON channel that bypasses the unchanged public connector, a clean-twin replay, and a live end-to-end verification and reproduction check, split into three reversible pull requests.
+
 2026-09-12 21:16 PDT | [ADDED] | Completed Minecraft connector version `minecraft-0.2.0` with the seven frozen primitives beyond `observe`, strict pre-delivery argument and latest-object-ID validation, public container and inventory objects, five-tick interaction settling, Mineflayer movement and interaction mappings, stable reset air observations, and a live end-to-end primitive acceptance flow.
 
 2026-09-12 21:03 PDT | [DOCUMENTED] | Approved the Minecraft primitive-completion milestone for the seven frozen connector actions beyond `observe`, including strict public-target validation, sidecar mappings, deterministic live checks, and explicit exclusions for contracts, dependencies, prompts, budgets, grading, and held-out content.
