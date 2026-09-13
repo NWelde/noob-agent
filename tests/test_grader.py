@@ -22,7 +22,12 @@ from noob_agent.grading.grader import (
 )
 from noob_agent.prompts.action import render_action_prompt
 from noob_agent.skills.contract import EvidenceRef
-from noob_agent.storage import SCHEMA_VERSION, DuplicateRecordError, EpisodeStore, UnknownRecordError
+from noob_agent.storage import (
+    SCHEMA_VERSION,
+    DuplicateRecordError,
+    EpisodeStore,
+    UnknownRecordError,
+)
 
 REPORTED_AT = datetime(2026, 9, 12, 19, 30, 0, tzinfo=UTC)
 DECIDED_AT = datetime(2026, 9, 12, 19, 31, 0, tzinfo=UTC)
@@ -187,9 +192,7 @@ def test_an_incomplete_report_is_rejected(
 def test_evidence_must_resolve_to_this_episodes_public_records(
     stored_episode: EpisodeStore,
 ) -> None:
-    unresolved = finding(
-        report=report(evidence=(EvidenceRef(kind="action_id", value="a_9999"),))
-    )
+    unresolved = finding(report=report(evidence=(EvidenceRef(kind="action_id", value="a_9999"),)))
 
     verdict = verify(
         stored_episode,
@@ -262,7 +265,9 @@ def test_a_scenario_id_never_encodes_clean_or_faulty_identity() -> None:
     with pytest.raises(ValidationError):
         MatchedPair(
             clean=clean,
-            faulty=ScenarioBuild(scenario_id="mc_resonator_layout_b", build="faulty", fingerprint="f"),
+            faulty=ScenarioBuild(
+                scenario_id="mc_resonator_layout_b", build="faulty", fingerprint="f"
+            ),
         )
     with pytest.raises(ValidationError):
         ScenarioBuild(scenario_id="mc_resonator_layout_a_faulty", build="faulty", fingerprint="f")
