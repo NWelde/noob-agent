@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 21:03 PDT | [DOCUMENTED] | Approved the Minecraft primitive-completion milestone for the seven frozen connector actions beyond `observe`, including strict public-target validation, sidecar mappings, deterministic live checks, and explicit exclusions for contracts, dependencies, prompts, budgets, grading, and held-out content.
+
 2026-09-12 20:54 PDT | [DOCUMENTED] | Updated the implementation handoff after integrating held-out skill reuse, clean/faulty reproduction, and the concurrently merged Doom connector into `main`, including final test evidence and the remaining live Minecraft grading scope gap.
 
 2026-09-12 20:51 PDT | [ADDED] | Added the headless ViZDoom Doom connector with the ten frozen BDP primitives, public HUD/visible-label observations, fixed-seed reset, one-tick signed turns, contract argument rejection, and live connector acceptance tests. Declared ViZDoom as the Doom game-layer runtime dependency.

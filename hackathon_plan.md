@@ -1270,6 +1270,43 @@ the approved skill-runtime milestone." This is that approval, and it is narrow.
 - Acceptance: BDP criteria 9-10 (a matched faulty variation produces a
   candidate defect; a fresh reset independently reproduces or rejects it).
 
+## 15. Approved Minecraft primitive-completion milestone
+
+This section is the explicit approval required by `AGENTS.md` to complete the
+Minecraft connector surface already frozen in `connector_contract.md`. It adds
+exactly the seven deferred primitives to the existing `observe` implementation:
+`move_to`, `look_at`, `inspect_object`, `collect_object`, `use_object`,
+`place_object`, and `wait`.
+
+The milestone authorizes changes only to the Minecraft connector, its
+Mineflayer sidecar, connector tests, and Minecraft server documentation. It
+does not authorize changes to the connector contract, tool semantics, prompts,
+budgets, stop rules, scenario contents, private grader data, held-out data,
+comparison logic, or dependencies.
+
+- Public behavior: expose the exact eight-tool Minecraft manifest from
+  `connector_contract.md`; validate every request before delivery; resolve
+  opaque public object IDs only from the latest confirmed observation; map
+  valid requests to one sidecar operation; settle for five game ticks after a
+  completed interaction; and return one schema-valid, action-charged result
+  with a fresh public observation.
+- Trust boundary: actions may use only public arguments and objects from the
+  latest public observation. No scoreboard value, scenario tag, clean/faulty
+  identity, grader predicate, or other private state may enter a request,
+  observation, result, prompt, or log.
+- Tests first: extend `tests/test_connectors_minecraft.py` before production
+  changes to cover the exact manifest schemas, valid sidecar mappings,
+  argument and target rejection without delivery or charge, timeout/result
+  classification, sequence accounting, and public-state filtering.
+- Validation: run the focused connector tests against the substituted
+  transport, then run each primitive against the live local 1.21.1 server and
+  pinned Mineflayer sidecar described in `docs/minecraft-server.md`. Reset
+  between state-changing live actions so verification remains deterministic.
+- Acceptance: all eight frozen primitives are callable through
+  `MinecraftConnector`; invalid calls cannot reach the game; successful calls
+  produce a fresh public observation; and the complete repository test, lint,
+  and type-check suites pass without a dependency change.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
