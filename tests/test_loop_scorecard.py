@@ -398,3 +398,105 @@ def test_a_database_from_before_model_call_records_scores_without_calls(
     assert score.action.calls == 0
     assert score.action.unusable_replies == 2
     assert score.action.latency_p50_ms is None
+
+
+def test_practice_calls_count_as_learning_under_the_multi_round_ceilings(
+    store: EpisodeStore,
+    database_path: Path,
+    experiment: ExperimentRecord,
+    episode: EpisodeRecord,
+    step_factory: Callable[..., StepRecord],
+) -> None:
+    _seed_sequence(store, experiment, episode, step_factory)
+    store.create_experiment(_experiment(experiment, "practice", SEQUENCE))
+    practice_id = f"{SEQUENCE}-practice-ep"
+    store.create_episode(
+        episode.model_copy(
+            update={
+                "episode_id": practice_id,
+                "experiment_id": f"{SEQUENCE}-practice",
+                "reset_observation": episode.reset_observation.model_copy(
+                    update={"episode_id": practice_id}
+                ),
+            }
+        )
+    )
+    store.append_step(step_factory(1, episode_id=practice_id, terminal=True))
+    store.finalize_episode(
+        EpisodeOutcome(
+            episode_id=practice_id,
+            stop_reason="terminal_state",
+            terminal=True,
+            total_decisions=1,
+            total_primitives=1,
+            finished_at=STARTED_AT + timedelta(seconds=95),
+        )
+    )
+    store.record_model_call(
+        _call(
+            SEQUENCE,
+            40,
+            experiment_suffix="practice",
+            episode_id=practice_id,
+            input_tokens=60_000,
+            output_tokens=0,
+            seconds=91,
+        )
+    )
+
+    (records,) = load_sequences(database_path)
+    score = score_sequence(records)
+
+    assert [e.episode_id for e in score.practice] == [practice_id]
+    assert score.learning_tokens == 4 * 1_050 + 12_800 + 2_400 + 60_000
+    assert score.learning_calls == 7
+    # Over the single-pass 60,000 ceiling, but within the multi-round 300,000 one.
+    assert "learning_tokens" not in score.ceilings_exceeded
+    assert score.condition == "multi-round"
+
+
+def test_rounds_from_an_in_process_result_are_rendered(
+    store: EpisodeStore,
+    database_path: Path,
+    experiment: ExperimentRecord,
+    episode: EpisodeRecord,
+    step_factory: Callable[..., StepRecord],
+) -> None:
+    from noob_agent.observability.loop_scorecard import RoundSummary
+
+    training_id, heldout_id = _seed_sequence(store, experiment, episode, step_factory)
+    score = score_sequence(
+        load_sequences(database_path)[0],
+        SequenceOutcome(
+            builder_accepted=True,
+            builder_stop_reason="accepted",
+            grades={training_id: False, heldout_id: True},
+            rounds=(
+                RoundSummary(
+                    round=0,
+                    version=1,
+                    decision="incumbent",
+                    practice_rate=0.0,
+                    practice_primitives=24,
+                    practice_goals=0,
+                    practice_episodes=2,
+                ),
+                RoundSummary(
+                    round=1,
+                    version=2,
+                    decision="kept",
+                    practice_rate=0.5,
+                    practice_primitives=9,
+                    practice_goals=1,
+                    practice_episodes=2,
+                ),
+            ),
+            loop_stop_reason="max_rounds",
+            practice_agreement=1.0,
+        ),
+    )
+
+    text = render_markdown(score_run([score]), title="Rounds")
+
+    assert score.rounds[1].decision == "kept"
+    assert "| Round |" in text and "kept" in text and "max_rounds" in text
