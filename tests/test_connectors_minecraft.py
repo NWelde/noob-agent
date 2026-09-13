@@ -14,6 +14,8 @@ missing, and never hang or silently pass.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -746,6 +748,56 @@ def test_sidecar_is_a_pinned_json_lines_mineflayer_package() -> None:
     ):
         assert operation in source
     assert "process.stdout.write" in source
+
+
+def _sidecar_eval(expression: str) -> Any:
+    """Evaluate one expression against the sidecar module without a game server."""
+    node = shutil.which("node")
+    if node is None or not (SIDECAR / "node_modules" / "mineflayer").exists():
+        pytest.skip("Node sidecar dependencies are not installed")
+    script = f"const s = require('./index.js'); process.stdout.write(JSON.stringify({expression}));"
+    completed = subprocess.run(
+        [node, "-e", script],
+        cwd=SIDECAR,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_sidecar_keeps_diagnostic_narration_and_operator_echoes_out_of_messages() -> None:
+    samples = [
+        "[noob:action reasoning 1/2] I should press it.",
+        "<noobagentbot> [noob:builder reply 1/1] ```python",
+        "[Server: Set nathanbeyene's game mode to Spectator Mode]",
+        "[noobagentbot: Running function noob_agent:reset]",
+        "The device does not respond.",
+        "<nathanbeyene> hello",
+    ]
+
+    kept = _sidecar_eval(f"{json.dumps(samples)}.filter(s.isPublicMessage)")
+
+    assert kept == ["The device does not respond.", "<nathanbeyene> hello"]
+
+
+def test_sidecar_records_action_bar_feedback_from_its_nbt_packet() -> None:
+    source = (SIDECAR / "index.js").read_text(encoding="utf-8")
+    component = {
+        "type": "compound",
+        "name": "",
+        "value": {
+            "text": {"type": "string", "value": "The device does not respond."},
+            "color": {"type": "string", "value": "gray"},
+        },
+    }
+
+    # `title ... actionbar` arrives as the `action_bar` packet, which
+    # Mineflayer's `actionBar` event never reports.
+    assert 'bot._client.on("action_bar"' in source
+    assert _sidecar_eval(f"s.text({json.dumps(component)})") == "The device does not respond."
 
 
 async def test_live_reset_is_repeatable_on_a_fixed_seed() -> None:
