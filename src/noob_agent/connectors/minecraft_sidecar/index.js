@@ -67,6 +67,9 @@ function publicName(value) {
 function rememberMessage(value) {
   const rendered = text(value).trim();
   if (!rendered) return;
+  // Diagnostic narration is deliberately human-visible but must not be
+  // reflected into the model's next public observation.
+  if (rendered.startsWith("[noob:")) return;
   publicMessages.push({ kind: "game", text: rendered });
   publicMessages = publicMessages.slice(-MAX_MESSAGES);
 }
@@ -512,6 +515,13 @@ async function handle(message) {
     } else if (message.op === "observe") {
       if (!bot) throw new Error("connect must succeed before observe");
       write({ id, ok: true, observation: snapshot(message.radius ?? 5) });
+    } else if (message.op === "chat") {
+      if (!bot) throw new Error("connect must succeed before chat");
+      if (typeof message.text !== "string" || !message.text || message.text.length > 256) {
+        throw new Error("chat text must contain 1 to 256 characters");
+      }
+      bot.chat(message.text);
+      write({ id, ok: true });
     } else if (
       [
         "move_to",
