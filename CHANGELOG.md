@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 17:31 PDT | [ADDED] | Added the generated-skill capability/result contract and validated hand-written fixture bridge into the immutable registry.
+
 2026-09-12 17:13 PDT | [DOCUMENTED] | Approved the core-loop milestone for build-order steps 1-3 (Minecraft connector reset/action, cold episode recording, hand-written skill validation and registry), tracked as issues #13-#15.
 
 2026-09-13 00:12 UTC | [FIXED] | Static skill policy scanning now rejects aliased forbidden builtins like `open` and `__import__`.

@@ -8,10 +8,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from noob_agent.skills import SkillRegistry, SkillValidationError
+from noob_agent.skills import SkillRegistry, SkillValidationError, check_static_policy
 from noob_agent.skills.contract import EvidenceRef, SkillBudget, SkillResult
 from noob_agent.verification.validator import validate_for_registry
-
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "hand_written_observer"
 PRIMITIVES = {"observe", "move_to", "use_object", "wait"}
@@ -64,6 +63,18 @@ def test_unsafe_candidate_is_rejected_before_it_can_enter_the_registry() -> None
             metadata_json,
             known_primitive_names=PRIMITIVES,
         )
+
+
+def test_only_public_skill_contract_names_may_be_imported() -> None:
+    allowed = check_static_policy(
+        "from noob_agent.skills.contract import SkillContext, SkillResult\n"
+    )
+    refused = check_static_policy(
+        "from noob_agent.skills.contract import SkillContractModel\n"
+    )
+
+    assert allowed == []
+    assert any(issue.code == "forbidden_import" for issue in refused)
 
 
 def test_skill_evidence_is_immutable_and_publicly_referenceable() -> None:
