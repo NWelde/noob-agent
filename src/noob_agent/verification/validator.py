@@ -542,7 +542,15 @@ def _require_negative(run: _Run, *, fixture: str, inputs: dict[str, JsonValue]) 
     result = run.execution.result
     assert result is not None
     primitive_case = fixture in {"failed_primitive", "unknown_primitive", "exhausted_budget"}
-    if result.status == "succeeded" and (not primitive_case or run.host.calls):
+    invalid_case_applies = "__unexpected_validation_input" in inputs
+    # With an empty open input schema there is no invalid input, so the
+    # invalid-input fixture reuses valid inputs and a success there is legitimate.
+    vacuous_input_case = fixture == "invalid_input" and not invalid_case_applies
+    if (
+        result.status == "succeeded"
+        and not vacuous_input_case
+        and (not primitive_case or run.host.calls)
+    ):
         raise _issue(
             run,
             check="negative_case",
@@ -578,7 +586,6 @@ def _require_negative(run: _Run, *, fixture: str, inputs: dict[str, JsonValue]) 
             fixture=fixture,
             inputs=inputs,
         )
-    invalid_case_applies = "__unexpected_validation_input" in inputs
     if (
         fixture == "invalid_input"
         and invalid_case_applies

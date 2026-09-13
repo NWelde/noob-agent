@@ -13,7 +13,7 @@ asking for more is refused before the world is touched.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -24,7 +24,7 @@ from noob_agent.agents.action import (
     Decision,
 )
 from noob_agent.connectors import GameConnector
-from noob_agent.domain.records import ExperimentRecord
+from noob_agent.domain.records import EpisodeSplit, ExperimentRecord
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient
 from noob_agent.observability.tracing import TraceSink
@@ -111,6 +111,7 @@ class HeldOutRunner:
         close_connector: bool = True,
         on_episode_started: Callable[[str], None] | None = None,
         flush_trace: bool = True,
+        offered: Sequence[SkillVersion] | None = None,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -125,16 +126,24 @@ class HeldOutRunner:
         self._close_connector = close_connector
         self._on_episode_started = on_episode_started
         self._flush_trace = flush_trace
+        # An explicit offering replaces the registry's accepted skills, for a
+        # practice episode that plays a validated candidate before acceptance.
+        self._offered = tuple(offered) if offered is not None else None
 
     async def run(
-        self, *, experiment: ExperimentRecord, scenario_id: str, seed: int
+        self,
+        *,
+        experiment: ExperimentRecord,
+        scenario_id: str,
+        seed: int,
+        split: EpisodeSplit = "held-out",
     ) -> HeldOutResult:
         """Reset the world and the conversation, then attempt the held-out scenario."""
         check_heldout_budgets(experiment)
 
         manifest = await self._connector.manifest()
         # Only accepted versions are offered; the registry exposes nothing else.
-        offered = self._registry.available_skills()
+        offered = self._registry.available_skills() if self._offered is None else self._offered
 
         # A new agent per episode is the conversation reset: it starts with no
         # history, no training trace, and no prior episode.
@@ -163,7 +172,7 @@ class HeldOutRunner:
             flush_trace=self._flush_trace,
         )
         episode = await runner.run(
-            experiment=experiment, scenario_id=scenario_id, seed=seed, split="held-out"
+            experiment=experiment, scenario_id=scenario_id, seed=seed, split=split
         )
         return HeldOutResult(
             episode=episode,

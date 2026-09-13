@@ -69,6 +69,7 @@ Observations:
 | 22.B grounded Builder, thinking off | `loop-bench-22b` (stopped after 1 of 5 sequences) | 0/20 | 528 | 0/1 | 0/2 | 23 | 31,169 (no ceiling exceeded) |
 | 22.C converging repairs | `loop-bench-22c` | 0/190 | 517 | **4/5** | 0/9 | 42 | 32,623 (no ceiling exceeded) |
 | 22.E parallel held-out and validation | `loop-bench-22e` | 0/110 | 507 | 1/5 | 0/10 | **17.5** | 32,616 (no ceiling exceeded) |
+| 22.D multi-round loop (`--rounds 3 --curve`, basic-v2) | `loop-bench-22d` | 0/311 | 570 | 3/5 | 0/11 | 34.7 | 90,214 (multi-round ceiling 300,000, not exceeded) |
 
 22.A runs use Action thinking off and Builder thinking at the provider default
 (on), so every build still ends at its 6,000-token cap and no skill is accepted.
@@ -101,3 +102,27 @@ one more primitive than the replay charged) and 1
 concurrency-1 and concurrency-8 validation tests reach identical verdicts. Five
 sequences are too few to separate this variance from a real change. Wrong
 primitive accounting is now the most common rejection and a clear target for 22.D.
+
+## Multi-round loop (22.D)
+
+`loop-bench-22d` ran 5 sequences with up to 3 refinement rounds over the practice
+seeds 20260913 and 20260915, then evaluated the kept versions on held-out:
+
+| Sequence | Rounds | Stop | Practice (public) | Held-out goals | Learning tokens / calls |
+| --- | --- | --- | --- | --- | --- |
+| s01 | incumbent only | `perfect_practice` | 2 of 2 terminal | **5 of 6** | 35,598 / 26 |
+| s02 | none | `no_skill` | none | none run | 32,245 / 22 |
+| s03 | incumbent, refinement failed validation | `no_improvement` | 0 of 2 | 1 of 6 | 66,017 / 47 |
+| s04 | incumbent, refinement did not improve (rejected) | `no_improvement` | 0 of 2, then 0 of 2 | 2 of 6 | 90,214 / 70 |
+| s05 | none | `no_skill` | none | none run | 30,162 / 22 |
+
+- **The loop works as a mechanism.** It kept an incumbent, stopped without a
+  refinement when practice was perfect, rejected a refinement that failed
+  validation, rejected a validated refinement that did not score better, and
+  evaluated held-out only after learning ended.
+- **No refinement improved a skill yet.** With the stop-after-one-round-without-
+  improvement rule, no sequence logged 3 rounds, so the "at least 3 rounds"
+  target was not met.
+- **Practice predicts held-out.** A perfect practice score came with 5 of 6
+  held-out goals, and a zero practice score with 1 and 2 of 6. The public practice
+  score agreed with the private grade on every practice episode (agreement 1.0).

@@ -132,3 +132,21 @@ async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
         issue.check == "negative_case" and issue.code == "unknown_primitive_retried"
         for issue in rejected.value.issues
     )
+
+
+async def test_a_no_input_skill_that_succeeds_is_not_rejected_by_the_invalid_input_case(
+    episode, step_factory
+) -> None:
+    """An empty open input schema has no invalid input, so success there is legitimate."""
+    open_schema = {**METADATA, "input_schema": {"properties": {}}}
+    trace = StoredEpisode(episode=episode, steps=(step_factory(1),))
+
+    report = await validate_candidate(
+        VALID_SOURCE,
+        json.dumps(open_schema),
+        known_primitive_names={"observe", "use_object"},
+        training_trace=trace,
+        executor=LocalSubprocessSkillExecutor(),
+    )
+
+    assert report.accepted is True

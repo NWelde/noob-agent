@@ -246,3 +246,65 @@ def test_score_reads_an_existing_database_without_changing_it(
     written = json.loads((tmp_path / "scores" / "recorded.json").read_text(encoding="utf-8"))
     assert written["sequences"][0]["acceptance_source"] == "inferred"
     assert "recorded-s01" in capsys.readouterr().out
+
+
+def test_run_with_rounds_uses_practice_seeds_and_reports_each_round(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    manifest = tmp_path / "manifest-v2.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scenarios": {
+                    "fake-training": {"split": "training", "seeds": [7], "practice_seeds": [8, 9]},
+                    "fake-heldout": {"split": "held-out", "seeds": [11]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = module.main(
+        [
+            "run",
+            "--sequences",
+            "1",
+            "--rounds",
+            "1",
+            "--curve",
+            "--output-dir",
+            str(tmp_path),
+            "--manifest",
+            str(manifest),
+            "--run-id",
+            "rounds-test",
+        ],
+        environ=ENVIRONMENT,
+        dependencies=_dependencies(module),
+    )
+
+    assert code == 0
+    (sequence,) = json.loads((tmp_path / "rounds-test.json").read_text(encoding="utf-8"))[
+        "sequences"
+    ]
+    assert sequence["condition"] == "multi-round"
+    # The scripted game ends every practice episode, so the first skill is already perfect.
+    assert [r["decision"] for r in sequence["rounds"]] == ["incumbent"]
+    assert sequence["rounds"][0]["practice_rate"] == 1.0
+    assert sequence["loop_stop_reason"] == "perfect_practice"
+    assert len(sequence["practice"]) == 2
+    assert [(p["version"], p["heldout_episodes"]) for p in sequence["curve"]] == [(1, 1)]
+    assert "| Round |" in capsys.readouterr().out
+
+
+def test_rounds_require_practice_seeds_in_the_manifest(tmp_path: Path, manifest: Path) -> None:
+    module = _module()
+
+    code = module.main(
+        ["run", "--rounds", "1", "--output-dir", str(tmp_path), "--manifest", str(manifest)],
+        environ=ENVIRONMENT,
+        dependencies=_dependencies(module),
+    )
+
+    assert code == 2

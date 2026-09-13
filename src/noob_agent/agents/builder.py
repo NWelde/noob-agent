@@ -55,6 +55,8 @@ BuilderStopReason = Literal[
     "truncated_reply",
     # The next call could exceed the sequence's learning token or call budget.
     "learning_budget_exhausted",
+    # A refinement passed validation and awaits its caller's decision.
+    "validated",
 ]
 
 
@@ -198,11 +200,74 @@ class BuilderAgent:
         """
         names = tuple(primitive_names)
         tools = training_trace.episode.manifest.tools
-        prompt = render_builder_prompt(evidence, primitive_names=names, tools=tools)
+        return await self._author(
+            render_builder_prompt(evidence, primitive_names=names, tools=tools),
+            evidence=evidence,
+            training_trace=training_trace,
+            names=names,
+            authoring_model_id=authoring_model_id,
+            created_at=created_at,
+            spent_tokens=spent_tokens,
+            spent_calls=spent_calls,
+            parent_version=None,
+            current_name=None,
+            current_source=None,
+            accept=True,
+        )
+
+    async def refine(
+        self,
+        incumbent: SkillVersion,
+        *,
+        prompt: str,
+        evidence: TraceEvidence,
+        training_trace: StoredEpisode,
+        primitive_names: Iterable[str],
+        authoring_model_id: str,
+        created_at: datetime,
+        spent_tokens: int = 0,
+        spent_calls: int = 0,
+    ) -> BuilderOutcome:
+        """Write one refinement of an accepted skill and validate it, without accepting it.
+
+        The refinement is a new version whose parent is the incumbent. It stops
+        at `validated`, still `validating` in the registry, so a caller can
+        compare it in practice before accepting or rejecting it. Repairs follow
+        the same rules as a build, and the name may not change.
+        """
+        return await self._author(
+            prompt,
+            evidence=evidence,
+            training_trace=training_trace,
+            names=tuple(primitive_names),
+            authoring_model_id=authoring_model_id,
+            created_at=created_at,
+            spent_tokens=spent_tokens,
+            spent_calls=spent_calls,
+            parent_version=incumbent.version,
+            current_name=incumbent.name,
+            current_source=incumbent.package.source,
+            accept=False,
+        )
+
+    async def _author(
+        self,
+        prompt: str,
+        *,
+        evidence: TraceEvidence,
+        training_trace: StoredEpisode,
+        names: tuple[str, ...],
+        authoring_model_id: str,
+        created_at: datetime,
+        spent_tokens: int,
+        spent_calls: int,
+        parent_version: int | None,
+        current_name: str | None,
+        current_source: str | None,
+        accept: bool,
+    ) -> BuilderOutcome:
+        tools = training_trace.episode.manifest.tools
         usage: list[ModelUsage] = []
-        parent_version: int | None = None
-        current_name: str | None = None
-        current_source: str | None = None
         attempts = 0
 
         while True:
@@ -328,6 +393,15 @@ class BuilderAgent:
                 )
                 continue
 
+            if not accept:
+                return BuilderOutcome(
+                    accepted=False,
+                    stop_reason="validated",
+                    attempts=attempts,
+                    version=self._registry.get(candidate.name, recorded.version),
+                    validation=validation,
+                    usage=tuple(usage),
+                )
             accepted = self._registry.accept(
                 candidate.name,
                 recorded.version,
