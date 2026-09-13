@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 11:46 PDT | [DOCUMENTED] | Rewrote the README to explain what noob-agent is for: the two learning loops, compared conditions, scorecard, games, repository map, and getting-started commands.
+
 2026-09-13 10:15 PDT | [ADDED] | Added section 24 step 24b, multi-round tuning: the improvement loop stops after 2 consecutive rounds without a kept version (a refinement that fails validation counts as one) and each refinement starts from the incumbent; practice uses the four `scenarios/doom/basic-v3` seeds, two targets on each side; refinement calls are recorded with purpose `refine` and counted by the scorecard; and a practice batch starts only when its worst case fits the learning call and token budgets, with a validated challenger that cannot fit rejected as `learning_budget`, fixing a live run where 2 of 5 sequences passed the 140-call ceiling. In the 5-sequence rerun every sequence accepted a skill, none passed a ceiling, practice agreed with the private grade on every episode, and held-out goals were 8 of 30; the most rounds logged was 2, three sequences stopped on the learning budget, and the two kept refinements won only on fewer primitives without improving held-out.
 
 2026-09-13 08:37 PDT | [ADDED] | Added section 24 step 24a: the Builder's skill API reference now states that `context.observe()`, `remaining_budget()`, and `log()` charge no primitive action, and that `primitive_actions_used` must equal the sum of `result.primitive_actions_charged` and never be counted by hand, with wording tightened so the worst-case repair still fits. On 5 live Doom sequences every sequence accepted a skill, against 1 of 5 in `loop-bench-22e`, with no accounting rejections.
