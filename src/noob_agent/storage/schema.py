@@ -10,11 +10,20 @@ recorded episodes are untouched.
 
 Version 3 adds the model_call table, one row per model request. It is additive
 in the same way: a version-2 database gains the table and keeps every row.
+
+Version 5 adds a nullable `request_options_json` column to model_call
+(`hackathon_plan.md` section 22). Version 4 was used by unmerged local work that
+added a `sequence_summary` table, so databases at 3 or 4 both upgrade by gaining
+the column; any extra table they carry is left untouched.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
+
+# Columns added to an existing table after it was first created, applied with
+# ALTER TABLE when an older database lacks them.
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("model_call", "request_options_json", "TEXT"),)
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -126,7 +135,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         output_tokens     INTEGER,
         latency_ms        INTEGER NOT NULL,
         error             TEXT,
-        started_at        TEXT    NOT NULL
+        started_at        TEXT    NOT NULL,
+        request_options_json TEXT
     )
     """,
     """

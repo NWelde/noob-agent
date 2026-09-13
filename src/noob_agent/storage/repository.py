@@ -22,7 +22,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -43,7 +43,7 @@ from noob_agent.domain.records import (
     StepRecord,
     StoredEpisode,
 )
-from noob_agent.storage.schema import SCHEMA_STATEMENTS, SCHEMA_VERSION
+from noob_agent.storage.schema import ADDED_COLUMNS, SCHEMA_STATEMENTS, SCHEMA_VERSION
 
 _RecordT = TypeVar("_RecordT", bound=BaseModel)
 
@@ -66,6 +66,14 @@ class InconsistentRecordError(StorageError):
 
 class EpisodeFinalizedError(StorageError):
     """The episode has already been finalized and can no longer be appended to."""
+
+
+def _json_or_none(value: object) -> str | None:
+    return None if value is None else json.dumps(value, sort_keys=True)
+
+
+def _loads_or_none(text: str | None) -> Any:
+    return None if text is None else json.loads(text)
 
 
 def _classify(error: sqlite3.IntegrityError, context: str) -> StorageError:
@@ -118,6 +126,12 @@ class EpisodeStore:
         with self._transaction():
             for statement in SCHEMA_STATEMENTS:
                 self._connection.execute(statement)
+            for table, column, kind in ADDED_COLUMNS:
+                present = {
+                    row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")
+                }
+                if column not in present:
+                    self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             recorded = self._connection.execute("SELECT version FROM schema_version").fetchone()
             if recorded is None:
                 self._connection.execute(
@@ -511,8 +525,8 @@ class EpisodeStore:
                         provider, model_id, system_text, prompt_text,
                         max_output_tokens, temperature, response_text, reasoning,
                         finish_reason, input_tokens, output_tokens, latency_ms,
-                        error, started_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        error, started_at, request_options_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.call_id,
@@ -534,6 +548,7 @@ class EpisodeStore:
                         record.latency_ms,
                         record.error,
                         record.started_at.isoformat(),
+                        _json_or_none(record.request_options),
                     ),
                 )
             except sqlite3.IntegrityError as error:
@@ -573,6 +588,7 @@ class EpisodeStore:
                     latency_ms=row["latency_ms"],
                     error=row["error"],
                     started_at=row["started_at"],
+                    request_options=_loads_or_none(row["request_options_json"]),
                 )
                 for row in rows
             )

@@ -2343,7 +2343,7 @@ Inference and the labeled local sandbox:
 - Landing the isolated skill-validation pipeline already written on
   `feature/doom-token-budget-summary` (step 22.0).
 - A loop scorecard and headless benchmark command (step 22.F).
-- Per-role reasoning controls and native tool-call decisions for the shared
+- Per-role reasoning controls and schema-constrained decisions for the shared
   model, used identically by every compared model that supports them
   (step 22.A).
 - Changes to the Action and Builder prompts, Builder evidence selection, and
@@ -2455,31 +2455,45 @@ never worked around by changing budgets, seeds, or grading.
   `src/noob_agent/settings.py`, `src/noob_agent/agents/action.py`,
   `src/noob_agent/prompts/action.py`, `src/noob_agent/domain/records.py`,
   `src/noob_agent/storage/schema.py`, `src/noob_agent/storage/repository.py`,
-  tests, `.env.example`, `CHANGELOG.md`.
-- `ModelRequest` gains optional `thinking: bool | None` and `tools`, and
-  `ModelResponse` gains an optional `tool_call`. The W&B Inference adapter sends
-  `chat_template_kwargs.thinking` only when `thinking` is not `None`, and sends
-  tools with `tool_choice="required"` when tools are given.
+  `src/noob_agent/runtime/sequence.py` and `src/noob_agent/runtime/heldout.py`
+  (to pass the thinking setting), `scripts/run_doom_learning_sequence.py` and
+  `scripts/loop_bench.py` (to read it), new `tests/test_action_decisions.py`,
+  the schema-version and prompt assertions in `tests/test_grader.py` and
+  `tests/test_model_calls.py`, `.env.example`, `CHANGELOG.md`.
+- `ModelRequest` gains optional `thinking: bool | None` and `response_schema`.
+  The W&B Inference adapter sends `chat_template_kwargs.thinking` only when
+  `thinking` is not `None`, and a strict `json_schema` response format when a
+  schema is given. It closes its HTTP client after every call.
 - `ModelSettings` gains `action_thinking` and `builder_thinking`, read from
   `NOOB_AGENT_ACTION_THINKING` and `NOOB_AGENT_BUILDER_THINKING`, both defaulting
   to off.
-- The Action agent offers each primitive and accepted skill as a tool. Every
-  tool also takes required `subgoal` and `expected_evidence` strings and an
-  optional `finding` object, which the agent removes before building the
-  request. A reply without a tool call falls back to the existing JSON parser,
-  so scripted providers keep working. A reply cut off at its cap without a
-  decision is still rejected as `unusable_reply` and is counted separately as
-  truncated.
-- The static instructions move to the system prompt; the user prompt carries
-  the goal, history, and observation.
-- Schema version 4 adds a nullable `request_options_json` column to
-  `model_call` holding thinking, tool names, and tool-choice mode. The change is
-  additive, and a version-3 database opens unchanged.
+- The Action agent asks for the decision schema and parses the reply. A reply
+  that is not a usable decision is still rejected as `unusable_reply`, and one
+  cut off at its cap is also marked truncated.
+- The fixed instructions, including the reply and finding formats, move to the
+  system prompt, which is identical on every turn. The user prompt keeps the
+  goal, the primitive and skill lists, the history, and the observation.
+- Schema version 5 adds a nullable `request_options_json` column (thinking and
+  the reply schema) to `model_call`. Version 4 is skipped because unmerged section 21 work already
+  wrote version-4 local databases. The change is additive: a version-3 or
+  version-4 database gains the columns and keeps every row.
 - Tests first: adapter request shape with thinking on, off, and unset, and with
-  tools; tool-call parsing including removal of intent fields, an unknown tool,
-  invalid arguments, and several calls, where the first is used; fallback to
-  text; truncation classification; settings parsing and defaults; request
-  options recorded and a version-3 database upgraded.
+  a response schema; the decision schema's name enum; parsing of the structured,
+  earlier `tool`, and earlier `skill` reply shapes; truncation classification;
+  compact argument hints; settings parsing and defaults; request options
+  recorded and a version-3 or version-4 database upgraded.
+- **Amendment after the first bench runs (2026-09-13).** Native tool calls met
+  the reliability and latency targets (0 of 100 unusable, p50 634 ms) but the
+  provider's chat template added about 1,250 input tokens for ten tool
+  definitions. Median Action input was 3,156, then 2,273 after trimming, which
+  exceeds the protocol's 40,000-token training ceiling over 20 decisions. On the
+  same recorded prompt a strict JSON-schema reply used 1,209 input tokens with
+  valid output on 3 of 3 attempts. Step 22.A therefore uses a strict JSON-schema
+  reply, `{subgoal, expected_evidence, action, arguments, finding}`, whose
+  `action` is an enum of the offered primitive and skill names, instead of
+  native tool calls. The prompt lists each action with a compact argument hint,
+  such as `turn_left(degrees: integer 1-90)`, and `request_options_json` records
+  the thinking setting and the schema. No `tool_call_json` column is added.
 - Validation: focused tests, the full suites, then `loop_bench.py run` on 5
   sequences. Acceptance: unusable replies below 5% and decision p50 at most
   3 seconds.

@@ -138,6 +138,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         builder_max_output_tokens: int = DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
         condition: str = "self-improving",
         keep_training_connector_open_during_builder: bool = False,
+        action_thinking: bool | None = None,
     ) -> None:
         self._connector_factory = connector_factory
         self._client = client
@@ -152,6 +153,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._action_max_output_tokens = action_max_output_tokens
         self._builder_max_output_tokens = builder_max_output_tokens
         self._condition = condition
+        self._action_thinking = action_thinking
         self._keep_training_connector_open_during_builder = (
             keep_training_connector_open_during_builder
         )
@@ -212,6 +214,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
                 self._recording(training_record, role="action"),
                 manifest=manifest,
                 max_output_tokens=self._action_max_output_tokens,
+                thinking=self._action_thinking,
             ),
             clock=self._clock,
             trace=self._trace,
@@ -271,6 +274,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
                     clock=self._clock,
                     trace=self._trace,
                     action_max_output_tokens=self._action_max_output_tokens,
+                    action_thinking=self._action_thinking,
                 )
                 result = await runner.run(
                     experiment=heldout_record, scenario_id=cell.scenario_id, seed=cell.seed

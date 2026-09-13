@@ -63,3 +63,13 @@ Observations:
 | Step | Bench run | Unusable replies | Action p50 ms | Accepted | Builder capped | Median wall s | Max learning tokens |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 22.F (no loop change) | baseline above | | | | | | |
+| 22.A native tool calls (superseded) | `loop-bench-22a` | 0/100 | 634 | 0/5 | 5/5 | 50 | 71,133 (training Action tokens over ceiling) |
+| 22.A trimmed tool calls (superseded) | `loop-bench-22a-r2` | 0/100 | 620 | 0/5 | 5/5 | 47 | 53,360 (training Action tokens over ceiling) |
+| 22.A JSON-schema decisions | `loop-bench-22a-r3` | 0/100 | 561 | 0/5 | 5/5 | 45 | 32,251 (no ceiling exceeded) |
+
+22.A runs use Action thinking off and Builder thinking at the provider default
+(on), so every build still ends at its 6,000-token cap and no skill is accepted.
+Step 22.B turns Builder thinking off. Median Action input was 3,156 tokens with
+native tools, 2,273 after trimming, and 1,188 with the JSON schema. In the last
+run the model chose `attack` 61 times, `turn_right` 23, `turn_left` 7, `observe`
+7, and `move_forward` 2; the baseline almost never turned.

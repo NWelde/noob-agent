@@ -106,6 +106,7 @@ class HeldOutRunner:
         trace: TraceSink | None = None,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         action_max_output_tokens: int | None = None,
+        action_thinking: bool | None = None,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -116,6 +117,7 @@ class HeldOutRunner:
         self._trace = trace
         self._history_limit = history_limit
         self._action_max_output_tokens = action_max_output_tokens
+        self._action_thinking = action_thinking
 
     async def run(
         self, *, experiment: ExperimentRecord, scenario_id: str, seed: int
@@ -139,6 +141,7 @@ class HeldOutRunner:
                 if self._action_max_output_tokens is None
                 else self._action_max_output_tokens
             ),
+            thinking=self._action_thinking,
         )
         runtime = SkillRuntime(self._executor, available=offered)
         runner = EpisodeRunner(
