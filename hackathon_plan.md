@@ -1471,6 +1471,160 @@ also means setting `enable-rcon=false` and deleting the local password. None of
 these steps changes the SQLite schema, so no database migration or downgrade is
 involved.
 
+## 17. Approved core-loop milestone: Doom learning sequence (build-order step 8)
+
+This section is the explicit approval required by `CLAUDE.md` and `AGENTS.md`
+for build-order step 8: one Doom cold, learning, and held-out sequence.
+Sections 14 and 16 both excluded step 8. Step 7, the headless ViZDoom
+connector (`doom-vizdoom-v1`), is on `main`, and the Action agent, Builder,
+registry, skill runtime, and held-out runner contain no game-specific code.
+Three gaps still stop a real Doom sequence:
+
+1. **No held-out variations.** The connector always loads `basic.cfg` and
+   ignores `scenario_id`. A local probe on 2026-09-12 confirmed that the seed
+   moves the target, but the player always starts at the same position and
+   angle. Section 6.2 requires held-out attempts to change both the starting
+   position and the target position.
+2. **No usable aiming signal.** Observations carry only label names. The same
+   probe showed ViZDoom already reports where each visible label is on screen.
+   Without that, the agent cannot tell which way to move to engage a target, so
+   the section 6.2 training skill of locating, approaching, and engaging a
+   visible target cannot be learned from public evidence.
+3. **No Doom grader and no sequence driver.** The only grader is the Resonator
+   grader. Nothing chains a cold training episode, the Builder, and held-out
+   episodes for one model.
+
+It authorizes: a Doom connector version bump to `doom-vizdoom-v2` with declared
+scenario variations, a new public goal, a screen-offset property on visible
+objects, and a harness-only private outcome; a Doom grader; a game-neutral
+single-sequence driver and its run script; and the documentation for them.
+
+It does not authorize changes to the Minecraft connector, `connector_contract.md`
+outer interface, the ten Doom primitive names and argument schemas, the Action or
+Builder prompts, budgets, stop rules, the skill contract, static skill policy,
+the Resonator grader, the storage schema, the comparison runner, the
+report-generation path, or project dependencies. Comparing models or
+conditions, aggregating results, and reporting remain build-order step 9 and
+still need their own approval.
+
+### Doom scenario definition
+
+- **Base scenario.** ViZDoom's included `basic.cfg`: one hostile target, and
+  the episode ends when the target is killed, the player dies, or the episode
+  times out. The connector keeps its existing 2,100-tick timeout and start tick
+  of 14.
+- **Public goal.** Every Doom condition receives exactly: "Eliminate the hostile
+  target in this area. Use visible results as evidence. Finish within the
+  action budget." It does not mention aiming, centering, screen offsets, or how
+  many hits are needed.
+- **Scenario IDs.** `doom-basic-training`, `doom-basic-heldout-a`, and
+  `doom-basic-heldout-b`. Each ID sets a fixed starting offset that the
+  connector applies during reset, before observation zero: none for training, a
+  leftward strafe for `heldout-a`, and a rightward strafe for `heldout-b`. The
+  seed sets the target position. Reset ticks are not charged to any budget. An
+  undeclared scenario ID fails reset with `ConnectorError`.
+- **Seeds.** One training seed and three precommitted seeds for each held-out
+  scenario, all distinct, committed in `scenarios/doom/basic-v1/manifest.json`
+  before any scored run. Action, Builder, prompt, and skill code never imports
+  that manifest, and a test enforces it.
+- **Private success.** `goal_completed` is true when the kill count is at least
+  one and the player is not dead when the episode ends. The kill count, player
+  death, and timeout are never placed in an observation, a step result, a
+  message, or `terminal_reason`, which stays `episode_finished` for every ending.
+
+### Step 8a - Doom connector `doom-vizdoom-v2`
+
+- Files: `src/noob_agent/connectors/doom.py`, `tests/test_connectors_doom.py`,
+  new `scenarios/doom/basic-v1/manifest.json`, `docs/doom-env.md`, and
+  `CHANGELOG.md`.
+- Behavior: the three declared scenario IDs and their reset offsets. The new
+  public goal. Each visible object gains `properties.screen_offset`, an integer
+  from -100 to 100 giving where the label's horizontal center sits between the
+  screen's left edge and its right edge. The player's own `DoomPlayer` label is
+  no longer listed as a visible object. A harness-only
+  `DoomConnector.private_outcome()` returns the kill count, player death, and
+  timeout, captured when the episode finishes and still readable after
+  `close()`. It is not part of `GameConnector`, and nothing given to a policy or
+  skill can reach it.
+- Tests first: an undeclared scenario ID fails reset. A fixed scenario and seed
+  reset twice gives identical public observations. The held-out scenarios start
+  at player positions that differ from training, while the primitive manifest
+  stays identical across all three. `screen_offset` is present, bounded, and
+  negative for a target left of center. `DoomPlayer` is not listed. No
+  observation or step result, serialized, contains a kill count, a death flag, a
+  timeout flag, or a seed. `private_outcome()` reports one kill after a scripted
+  center-and-fire sequence, and zero kills after a timeout.
+- Validation: `uv run pytest tests/test_connectors_doom.py -v` with ViZDoom
+  installed. `uv run python scaffolding/doom_env/check_env.py` still passes.
+- Acceptance: BDP criteria 1-2 for Doom with real held-out variations.
+
+### Step 8b - Doom grader
+
+- Files: new `src/noob_agent/grading/doom.py`, new `tests/test_doom_grader.py`,
+  and `CHANGELOG.md`.
+- Behavior: a `DoomPrivateOutcome` record, a `DoomEpisodeGrade` with
+  `goal_completed` and a grader version, and
+  `grade_doom_episode(stored, outcome)`. The grade is decided only after the
+  episode. A model's claim of success is never an input.
+- Tests first: a kill with the player alive is success. A kill after the player
+  died, a timeout, and zero kills are each failures. A grade mismatched to a
+  different episode is refused. The grade reads only the private outcome and the
+  episode's own ID, never the model's decisions. A scripted oracle solves every
+  held-out scenario and seed in the manifest within the frozen held-out budget of
+  12 decisions and 24 primitives, and grades as success.
+- Validation: `uv run pytest tests/test_doom_grader.py -v`.
+- Acceptance: an independent Doom success signal that never reaches an agent.
+
+### Step 8c - Single learning sequence and live Doom run
+
+- Files: new `src/noob_agent/runtime/sequence.py`, new
+  `scripts/run_doom_learning_sequence.py`, new `tests/test_learning_sequence.py`,
+  new `tests/test_doom_learning_integration.py`, an update to
+  `docs/current-status.md`, and `CHANGELOG.md`.
+- Behavior: `LearningSequence` is game-neutral and takes a connector factory,
+  one model client, the store, the registry, the skill executor, a grading
+  callback, one training scenario and seed, and a list of held-out scenarios and
+  seeds. Each episode gets a fresh connector. It runs one cold training episode
+  with an `ActionAgent` and no skills, selects public evidence with
+  `select_evidence`, and calls `BuilderAgent.build`. When a version is accepted,
+  it runs each held-out episode through `HeldOutRunner` and grades each episode
+  only after it ends. It returns one sequence result: the episode IDs, the
+  Builder outcome, the accepted version if any, and each grade. It uses only
+  existing storage APIs. It does not compare models or conditions, aggregate,
+  or write a report. The script wires existing settings for the model provider,
+  sandbox mode, and database, then prints the sequence result. It refuses to run
+  when the provider or sandbox mode is disabled.
+- Tests first: `tests/test_learning_sequence.py` uses the fake connector and a
+  fake model provider. The Builder receives evidence from the training episode
+  only. No held-out episode starts when no version is accepted, and the result
+  records why. Every held-out episode starts with a fresh connector and a fresh
+  conversation. Grades are computed after each episode and never reach the model
+  client. `tests/test_doom_learning_integration.py` uses real ViZDoom and a fake
+  provider that returns a fixed skill fixture labeled as scripted. The whole
+  sequence completes, the accepted skill is offered and invoked in both held-out
+  scenarios, and every nested primitive is charged. The test skips cleanly, not
+  silently, when ViZDoom is unavailable. The fixture must never be reported as
+  model-generated.
+- Validation: `uv run pytest tests/test_learning_sequence.py
+  tests/test_doom_learning_integration.py -v`, then the full test, Ruff, and
+  strict mypy suites. Manually, run
+  `uv run python scripts/run_doom_learning_sequence.py` once with the configured
+  W&B Inference model and the labeled local-subprocess executor, and record the
+  result honestly in `docs/current-status.md`. That includes whether a skill was
+  accepted and each held-out grade.
+- Acceptance: build-order step 8. A live model completes a bounded cold Doom
+  attempt, the Builder produces a candidate from its trace, and an accepted skill
+  reaches fresh held-out variations that the grader scores independently. BDP
+  criteria 3 and 5-8 for Doom are met when the live run succeeds. A live run in
+  which the model fails is still recorded and reported as a failure, never
+  replaced with the scripted fixture.
+
+### Rollback
+
+Each step is its own pull request and can be reverted alone. Reverting 8a
+restores `doom-vizdoom-v1`. 8b and 8c add only new modules, tests, and a script.
+No step changes the SQLite schema or dependencies.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 21:36 PDT | [DOCUMENTED] | Proposed the core-loop milestone for build-order step 8 in `hackathon_plan.md` section 17: Doom connector `doom-vizdoom-v2` with declared training and held-out scenario variations, a public target-elimination goal, a screen-offset aiming property, and a harness-only private outcome; an independent Doom grader; and a game-neutral single learning sequence with a live Doom run, split into three reversible pull requests.
+
 2026-09-12 21:29 PDT | [DOCUMENTED] | Proposed the core-loop milestone for live Minecraft clean/faulty grading in `hackathon_plan.md` section 16: an evaluation data pack with validation and matched held-out builds, private build selection and predicate reads over a localhost-only RCON channel that bypasses the unchanged public connector, a clean-twin replay, and a live end-to-end verification and reproduction check, split into three reversible pull requests.
 
 2026-09-12 21:16 PDT | [ADDED] | Completed Minecraft connector version `minecraft-0.2.0` with the seven frozen primitives beyond `observe`, strict pre-delivery argument and latest-object-ID validation, public container and inventory objects, five-tick interaction settling, Mineflayer movement and interaction mappings, stable reset air observations, and a live end-to-end primitive acceptance flow.
