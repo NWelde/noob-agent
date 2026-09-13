@@ -113,6 +113,52 @@ class EpisodeOutcome(DurableRecord):
     finished_at: datetime
 
 
+ModelCallPurpose = Literal["action", "build", "repair"]
+
+
+class ModelCallRecord(DurableRecord):
+    """One model request and what came back, written after the call returns or fails.
+
+    The episode is the acting episode for an Action call and the authoring
+    episode for a Builder call. Token counts are `None` when the provider did
+    not report them, never zero. There is no field for a credential. A record
+    is diagnostic only: it never enters a prompt, an observation, evidence
+    selection, or a grade.
+    """
+
+    call_id: str = Field(min_length=1)
+    experiment_id: str = Field(min_length=1)
+    purpose: ModelCallPurpose
+    episode_id: str | None = Field(default=None, min_length=1)
+    # The decision an Action reply produced; absent for Builder calls and failures.
+    action_id: str | None = Field(default=None, min_length=1)
+    provider: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    system: str
+    prompt: str
+    max_output_tokens: int = Field(gt=0)
+    temperature: float
+    response_text: str | None = None
+    reasoning: str | None = None
+    finish_reason: str | None = None
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    latency_ms: int = Field(ge=0)
+    error: str | None = None
+    started_at: datetime
+
+    @model_validator(mode="after")
+    def links_and_outcome_agree(self) -> Self:
+        """A call either returned a reply or failed, and only Action calls act."""
+        if (self.response_text is None) == (self.error is None):
+            raise ValueError("A model call has exactly one of a response or an error.")
+        if self.purpose == "action" and self.episode_id is None:
+            raise ValueError("An Action call must name the episode it acted in.")
+        if self.action_id is not None and (self.purpose != "action" or self.error is not None):
+            raise ValueError("Only a returned Action call produces an action_id.")
+        return self
+
+
 class StoredEpisode(DurableRecord):
     """An episode read back from the store, with its steps in sequence."""
 

@@ -9,6 +9,10 @@ Separation holds by construction. The Builder sees only public evidence from
 the cold training episode. Held-out episodes run through `HeldOutRunner`, which
 has no path to the Builder or to validation. Grades are returned to the caller
 and never passed to a model client.
+
+Every model call is recorded. Each role gets its own `RecordingModelClient`,
+which writes one Model call record per call to the store and mirrors it to the
+trace sink; the agents never see those records.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from noob_agent.connectors.protocol import GameConnector
 from noob_agent.domain.records import ExperimentRecord, StopReason, StoredEpisode
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient
+from noob_agent.models.recording import ModelRole, RecordingModelClient
 from noob_agent.observability.tracing import TraceSink
 from noob_agent.runtime.heldout import HeldOutRunner, heldout_experiment
 from noob_agent.runtime.runner import Clock, EpisodeRunner, SystemClock
@@ -136,6 +141,20 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._trace = trace
         self._max_repairs = max_repairs
 
+    def _recording(
+        self, experiment: ExperimentRecord, *, role: ModelRole, episode_id: str | None = None
+    ) -> RecordingModelClient:
+        return RecordingModelClient(
+            self._client,
+            store=self._store,
+            experiment_id=experiment.experiment_id,
+            role=role,
+            model_id=self._model_id,
+            episode_id=episode_id,
+            clock=self._clock,
+            trace=self._trace,
+        )
+
     async def run(
         self,
         *,
@@ -172,7 +191,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         cold = EpisodeRunner(
             connector=connector,
             store=self._store,
-            policy=ActionAgent(self._client, manifest=manifest),
+            policy=ActionAgent(self._recording(training_record, role="action"), manifest=manifest),
             clock=self._clock,
             trace=self._trace,
         )
@@ -193,7 +212,11 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             grade=self._grade(training_stored, connector),
         )
 
-        builder = BuilderAgent(self._client, self._registry, max_repairs=self._max_repairs)
+        builder = BuilderAgent(
+            self._recording(training_record, role="builder", episode_id=cold_result.episode_id),
+            self._registry,
+            max_repairs=self._max_repairs,
+        )
         outcome = await builder.build(
             select_evidence(training_stored),
             primitive_names=tuple(tool.name for tool in manifest.tools),
@@ -210,7 +233,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
                     connector=heldout_connector,
                     store=self._store,
                     registry=self._registry,
-                    client=self._client,
+                    client=self._recording(heldout_record, role="action"),
                     executor=self._executor,
                     clock=self._clock,
                     trace=self._trace,

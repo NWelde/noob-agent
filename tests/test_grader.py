@@ -318,7 +318,7 @@ def test_a_version_1_database_is_upgraded_in_place(
 
     with EpisodeStore.open(str(database_path)) as reopened:
         version = reopened._connection.execute("SELECT version FROM schema_version").fetchone()
-        assert version[0] == SCHEMA_VERSION == 2
+        assert version[0] == SCHEMA_VERSION == 3
         assert reopened.read_episode("ep_0001").outcome is not None
         reopened.record_finding(finding())
         assert reopened.read_finding("fnd_0001").finding == finding()
