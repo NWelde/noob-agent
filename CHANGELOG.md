@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 23:02 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 19, a Doom episode replay viewer: display-only `window_visible` and `realtime` settings for the Doom connector that change no recorded value, and `scripts/replay_doom_episode.py`, which replays a recorded episode's exact requests from a copy of the store in a visible ViZDoom window, verifies every step against the record, stops at the first mismatch, and never calls a model or grader, split into two reversible pull requests.
+
 2026-09-12 22:49 PDT | [ADDED] | Added validated per-role output settings with 1,024-token Action and 6,000-token Builder defaults, wired them through cold, build, repair, and held-out calls and the Doom run summary, and made run-exit trace delivery best effort by draining Weave after closing open calls and using a real W&B base URL default.
 
 2026-09-12 22:36 PDT | [DOCUMENTED] | Amended `hackathon_plan.md` section 18 so step 18b also delivers step 18a traces: `WeaveTraceSink.flush()` drains the Weave client's upload queue, the Doom run script flushes the trace sink at exit even when no skill is accepted, and `.env.example` sets `WANDB_BASE_URL=https://api.wandb.ai` instead of exporting a blank host, with tests and rollback notes.
