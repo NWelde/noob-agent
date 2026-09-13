@@ -7,11 +7,14 @@ Scalar columns hold only the bookkeeping the harness queries on.
 Version 2 adds the finding, finding_verdict, and reproduction tables. The
 change is additive: a version-1 database gains the new tables on open and its
 recorded episodes are untouched.
+
+Version 3 adds the model_call table, one row per model request. It is additive
+in the same way: a version-2 database gains the table and keeps every row.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -99,6 +102,31 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         predicate_result INTEGER,
         first_mismatch   TEXT,
         attempted_at     TEXT    NOT NULL
+    )
+    """,
+    # Diagnostic records of model requests. Token counts are NULL when the
+    # provider did not report them. No column holds a credential.
+    """
+    CREATE TABLE IF NOT EXISTS model_call (
+        call_id           TEXT    PRIMARY KEY,
+        experiment_id     TEXT    NOT NULL REFERENCES experiment (experiment_id),
+        purpose           TEXT    NOT NULL,
+        episode_id        TEXT    REFERENCES episode (episode_id),
+        action_id         TEXT,
+        provider          TEXT    NOT NULL,
+        model_id          TEXT    NOT NULL,
+        system_text       TEXT    NOT NULL,
+        prompt_text       TEXT    NOT NULL,
+        max_output_tokens INTEGER NOT NULL,
+        temperature       REAL    NOT NULL,
+        response_text     TEXT,
+        reasoning         TEXT,
+        finish_reason     TEXT,
+        input_tokens      INTEGER,
+        output_tokens     INTEGER,
+        latency_ms        INTEGER NOT NULL,
+        error             TEXT,
+        started_at        TEXT    NOT NULL
     )
     """,
     """
