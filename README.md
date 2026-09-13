@@ -29,8 +29,9 @@ validated from its own training attempt.
 **Minecraft:** the redstone lamp exercise. The bot (`noobagentbot`) takes a
 redstone block from a barrel and places it beside the lamp. Its in-game chat
 narrates each step (`Seeing`, `Doing`, `Pressing`, `Learning`), and the lamp
-lights once Minecraft reports it powered. This frame comes from a screen
-recording of the run. It is a same-task demo, not a held-out benchmark result.
+lights once Minecraft reports it powered. This frame comes from a demo
+recording of the exercise. It is not a graded model result; see
+[What is working today](#what-is-working-today) for the recorded model run.
 
 ![Minecraft redstone exercise: noobagentbot places the power block and the redstone lamp lights up](assets/redstone-lamp-lit.png)
 
@@ -38,19 +39,51 @@ recording of the run. It is a same-task demo, not a held-out benchmark result.
 
 This is a hackathon prototype, not a finished benchmark. The shared learning
 loop, Minecraft and Doom connectors, persistent run records, skill validation,
-and deterministic tests are in the repository. The current live evidence is
-more limited:
+Weave tracing, and deterministic tests are in the repository. All live numbers
+below come from `deepseek-ai/DeepSeek-V4-Flash-0731` on W&B Inference, with
+skills run in the labeled local subprocess. Full scorecards are in
+[`docs/loop-optimization.md`](docs/loop-optimization.md).
 
-- A hand-written fixture skill passes the deterministic Doom learning loop.
-  That fixture tests the plumbing and is not a model result.
-- The recorded Doom model run did not produce an accepted skill. The model
-  exhausted its action budget without killing the target, and the Builder
-  reply was cut off at its output limit.
-- The live Minecraft clean-versus-faulty grading path and independent defect
+**Doom: the model now learns skills reliably, but transfer is uneven.**
+
+- After the loop fixes in plan sections 22–24, the model wrote a skill that
+  passed validation in 5 of 5 benchmark sequences, up from 1 of 5. None of 597
+  Action replies were unusable, and no sequence exceeded a protocol ceiling.
+  Before these fixes, about half of Action replies were cut off at their token
+  cap.
+- Held-out success (`loop-bench-24b-r2`): 8 of 30 goals. The best sequence
+  solved all 4 practice seeds and 5 of 6 held-out cells. The other four solved
+  0 or 1 of 6 each.
+- Practice scores agreed with the private grader on every episode, so practice
+  is a trustworthy signal for keeping or dropping a skill version.
+- Multi-round refinement runs, but it has not improved held-out results yet.
+  The two refinements kept only used fewer primitives. Three of 5 sequences
+  stopped on the 140-call learning budget after one refinement round.
+- The Doom comparison image above is one demo recording on one held-out seed.
+  Skill quality varies between learning sequences, so a rerun can differ.
+
+**Minecraft: the Action loop works live, but the full learning loop is not
+proven yet.**
+
+- On the live server, a cold training episode had 0 of 10 unusable replies and
+  a 690 ms median decision.
+- In the recorded redstone lamp run (`minecraft-redstone-20260913T191654Z`),
+  the cold attempt lit the lamp in 9 decisions, including one rejected block
+  placement. The Builder's reply was unusable, so no skill was learned and
+  there was no skill-reuse attempt. A second run ran out of decisions without
+  lighting the lamp and then timed out. That redstone runner is not on `main`
+  yet.
+- Minecraft observations are large. A 20-decision training episode used 43,752
+  tokens, over the 40,000-token ceiling. PR #68 cuts the observation size but
+  has not met its target.
+- The Resonator clean-versus-faulty grading path and independent defect
   reproduction are not complete.
 
-The repo is ready to support a first technical phase and a credible prototype
-review. It should not claim that the full cross-game benchmark is finished.
+**Not yet built:** the CoreWeave Sandbox executor; so far skills run only in
+the local subprocess.
+
+The repo supports a credible prototype review. It should not claim that the
+full cross-game benchmark is finished.
 
 ## How it works
 
