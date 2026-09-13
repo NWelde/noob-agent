@@ -422,3 +422,21 @@ async def test_basic_v2_keeps_v1_cells_and_adds_distinct_visible_practice_seeds(
             _target(await connector.reset(TRAINING, seed))
     finally:
         await connector.close()
+
+
+async def test_basic_v3_adds_four_practice_seeds_with_targets_on_both_sides() -> None:
+    v2 = json.loads(Path("scenarios/doom/basic-v2/manifest.json").read_text(encoding="utf-8"))
+    v3 = json.loads(Path("scenarios/doom/basic-v3/manifest.json").read_text(encoding="utf-8"))
+
+    for scenario_id, scenario in v2["scenarios"].items():
+        assert v3["scenarios"][scenario_id]["seeds"] == scenario["seeds"]
+    practice = v3["scenarios"][TRAINING]["practice_seeds"]
+    every_other_seed = {seed for s in v3["scenarios"].values() for seed in s["seeds"]}
+    assert len(set(practice)) == 4 and not set(practice) & every_other_seed
+    connector = DoomConnector()
+    try:
+        offsets = [_target(await connector.reset(TRAINING, seed)) for seed in practice]
+    finally:
+        await connector.close()
+    assert sum(1 for offset in offsets if offset < 0) == 2
+    assert sum(1 for offset in offsets if offset > 0) == 2
