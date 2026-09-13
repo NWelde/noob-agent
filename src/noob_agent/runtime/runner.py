@@ -1,13 +1,18 @@
-"""The bounded cold-episode runner.
+"""The bounded episode runner.
 
-One agent decision calls one primitive. Every observation, request, and result
-is recorded through the SQLite store before another action is allowed, and the
-episode always ends with a recorded stop reason.
+One agent decision calls one primitive or one accepted skill. Every
+observation, request, and result is recorded through the SQLite store before
+another action is allowed, and the episode always ends with a recorded stop
+reason.
 
-The runner sees only the public connector surface. It performs no grading, calls
-no model API, and executes no generated skill. It sends nothing to a remote
-service unless a trace mirror is explicitly enabled, and then only after the
-local record is durable.
+The runner sees only the public connector surface. It performs no grading and
+calls no model API. It executes no generated skill itself: a skill decision is
+delegated to a `SkillRuntime`, which runs the candidate outside this process
+and records every nested primitive as an ordinary step charged to the same
+budget. Without a runtime, a skill decision is simply an undeclared tool name
+that the connector refuses. The runner sends nothing to a remote service unless
+a trace mirror is explicitly enabled, and then only after the local record is
+durable.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
@@ -39,6 +44,7 @@ from noob_agent.observability.tracing import (
     episode_started_event,
     step_event,
 )
+from noob_agent.skills.runtime import SkillInvocation, SkillRequest, SkillRuntime, SkillUseRecord
 from noob_agent.storage import EpisodeStore, StorageError
 
 # Three identical failed calls with no intervening public state change end the
@@ -47,9 +53,18 @@ REPEATED_FAILURE_LIMIT = 3
 
 
 class Policy(Protocol):
-    """Chooses the next primitive from the latest public observation."""
+    """Chooses the next primitive or skill from the latest public observation."""
 
-    async def choose(self, observation: Observation) -> ToolRequest: ...
+    async def choose(self, observation: Observation) -> ToolRequest | SkillRequest: ...
+
+
+@runtime_checkable
+class FeedbackPolicy(Protocol):
+    """A policy that wants to see how each of its decisions turned out."""
+
+    def notice(
+        self, request: ToolRequest | SkillRequest, outcome: StepResult | SkillInvocation
+    ) -> None: ...
 
 
 class Clock(Protocol):
@@ -79,6 +94,7 @@ class EpisodeResult:
     terminal: bool
     decisions_used: int
     primitives_used: int
+    skill_uses: tuple[SkillUseRecord, ...] = ()
 
 
 @dataclass
@@ -115,6 +131,7 @@ class EpisodeRunner:
         policy: Policy,
         clock: Clock | None = None,
         trace: TraceSink | None = None,
+        skills: SkillRuntime | None = None,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -123,6 +140,8 @@ class EpisodeRunner:
         # Mirroring is off unless a sink is supplied; see
         # noob_agent.observability.tracing.build_trace_sink.
         self._trace = trace if trace is not None else NullTraceSink()
+        # No runtime means no skill is offered: a cold episode.
+        self._skills = skills
 
     def _mirror(self, event: TraceEvent) -> None:
         """Mirror one event that the store has already made durable.
@@ -132,6 +151,12 @@ class EpisodeRunner:
         """
         with suppress(Exception):
             self._trace.record(event)
+
+    def _notice(
+        self, request: ToolRequest | SkillRequest, outcome: StepResult | SkillInvocation
+    ) -> None:
+        if isinstance(self._policy, FeedbackPolicy):
+            self._policy.notice(request, outcome)
 
     async def run(
         self,
@@ -192,6 +217,7 @@ class EpisodeRunner:
         sequence = 0
         streak = _FailureStreak()
         observation = reset_observation
+        skill_uses: list[SkillUseRecord] = []
         stop_reason: StopReason | None = "terminal_state" if terminal else None
 
         while stop_reason is None:
@@ -204,8 +230,56 @@ class EpisodeRunner:
 
             request = await self._policy.choose(observation)
             decisions_used += 1
-            sequence += 1
 
+            if isinstance(request, SkillRequest):
+                version = None if self._skills is None else self._skills.lookup(request.skill_name)
+                if version is not None and self._skills is not None:
+                    invocation = await self._skills.invoke(
+                        request,
+                        version,
+                        connector=self._connector,
+                        manifest=manifest,
+                        observation=observation,
+                        sequence=sequence,
+                        record_step=self._store.append_step,
+                        remaining_primitives=experiment.primitive_budget - primitives_used,
+                        remaining_wall_ms=experiment.wall_time_budget_ms
+                        - (self._clock.monotonic_ms() - started_ms),
+                    )
+                    # Every nested primitive was recorded before the skill saw
+                    # its result; mirror and charge them here in order.
+                    streak_count = 0
+                    for step in invocation.steps:
+                        self._mirror(step_event(step))
+                        primitives_used += step.result.primitive_actions_charged
+                        streak_count = streak.record(step.request, step.result)
+                        sequence = step.sequence
+                    observation = invocation.observation
+                    terminal = observation.terminal
+                    skill_uses.append(invocation.use)
+                    self._notice(request, invocation)
+
+                    if invocation.connector_lost:
+                        stop_reason = "connector_lost"
+                    elif invocation.unknown_result or invocation.record_failed:
+                        stop_reason = "unknown_result"
+                    elif terminal:
+                        stop_reason = "terminal_state"
+                    elif streak_count >= REPEATED_FAILURE_LIMIT:
+                        stop_reason = "repeated_failure"
+                    elif primitives_used >= experiment.primitive_budget:
+                        stop_reason = "primitive_limit"
+                    continue
+
+                # A skill that was not offered is an undeclared tool: the
+                # connector refuses it, costing a decision and no primitive.
+                request = ToolRequest(
+                    action_id=request.action_id,
+                    tool_name=request.skill_name,
+                    arguments=request.inputs,
+                )
+
+            sequence += 1
             try:
                 result = await self._connector.step(request)
             except ConnectorLostError:
@@ -238,6 +312,7 @@ class EpisodeRunner:
             primitives_used += result.primitive_actions_charged
             observation = result.observation
             terminal = result.observation.terminal
+            self._notice(request, result)
 
             if result.code == "CONNECTOR_LOST":
                 stop_reason = "connector_lost"
@@ -270,4 +345,5 @@ class EpisodeRunner:
             terminal=terminal,
             decisions_used=decisions_used,
             primitives_used=primitives_used,
+            skill_uses=tuple(skill_uses),
         )
