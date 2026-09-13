@@ -68,6 +68,7 @@ Observations:
 | 22.A JSON-schema decisions | `loop-bench-22a-r3` | 0/100 | 561 | 0/5 | 5/5 | 45 | 32,251 (no ceiling exceeded) |
 | 22.B grounded Builder, thinking off | `loop-bench-22b` (stopped after 1 of 5 sequences) | 0/20 | 528 | 0/1 | 0/2 | 23 | 31,169 (no ceiling exceeded) |
 | 22.C converging repairs | `loop-bench-22c` | 0/190 | 517 | **4/5** | 0/9 | 42 | 32,623 (no ceiling exceeded) |
+| 22.E parallel held-out and validation | `loop-bench-22e` | 0/110 | 507 | 1/5 | 0/10 | **17.5** | 32,616 (no ceiling exceeded) |
 
 22.A runs use Action thinking off and Builder thinking at the provider default
 (on), so every build still ends at its 6,000-token cap and no skill is accepted.
@@ -90,3 +91,13 @@ each of sequences 2, 4, and 5, and none run for sequence 3, whose repairs ran ou
 (`repair_budget_exhausted`). Most held-out failures stopped at the primitive
 limit after three skill uses, so the accepted skills vary widely in quality. That
 is what step 22.D's practice rounds are meant to improve.
+
+`loop-bench-22e` cut the median sequence to 17.5 s by playing 6 held-out cells at
+once and running validation in concurrent phases. Only 1 of 5 sequences accepted
+a skill, against 4 of 5 in 22.C. The rejections were genuine skill defects of the
+same kinds 22.C saw: 4 `contract/incorrect_action_accounting` (the result reported
+one more primitive than the replay charged) and 1
+`negative_case/missing_target_claimed_success`. They were not timeouts, and the
+concurrency-1 and concurrency-8 validation tests reach identical verdicts. Five
+sequences are too few to separate this variance from a real change. Wrong
+primitive accounting is now the most common rejection and a clear target for 22.D.
