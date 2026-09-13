@@ -179,12 +179,13 @@ async def test_sequence_applies_caps_to_cold_build_repair_and_heldout_calls(
     action_requests = [request for request in client.requests if request.system != BUILDER_SYSTEM]
     builder_requests = [request for request in client.requests if request.system == BUILDER_SYSTEM]
     assert [request.max_output_tokens for request in action_requests] == [ACTION_CAP, ACTION_CAP]
-    assert [request.max_output_tokens for request in builder_requests] == [BUILDER_CAP, BUILDER_CAP]
+    # Section 22.C: a repair uses the smaller of the Builder cap and the 3,000 repair default.
+    assert [request.max_output_tokens for request in builder_requests] == [BUILDER_CAP, 3_000]
     records = store.read_model_calls()
     assert [(record.purpose, record.max_output_tokens) for record in records] == [
         ("action", ACTION_CAP),
         ("build", BUILDER_CAP),
-        ("repair", BUILDER_CAP),
+        ("repair", 3_000),
         ("action", ACTION_CAP),
     ]
 

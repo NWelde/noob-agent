@@ -32,6 +32,8 @@ from noob_agent.models.client import ModelClient, ModelRequest
 from noob_agent.prompts.builder import (
     BUILDER_SYSTEM,
     DEFAULT_BUILD_MAX_OUTPUT_TOKENS,
+    DEFAULT_REPAIR_MAX_OUTPUT_TOKENS,
+    estimated_tokens,
     render_builder_prompt,
     render_repair_prompt,
 )
@@ -49,6 +51,10 @@ BuilderStopReason = Literal[
     "accepted",
     "repair_budget_exhausted",
     "unusable_reply",
+    # The reply ended at its output cap before a complete candidate.
+    "truncated_reply",
+    # The next call could exceed the sequence's learning token or call budget.
+    "learning_budget_exhausted",
 ]
 
 
@@ -77,7 +83,8 @@ class BuilderOutcome(BaseModel):
 
     accepted: bool
     stop_reason: BuilderStopReason
-    attempts: int = Field(ge=1)
+    # Model calls sent; zero when the learning budget was already spent.
+    attempts: int = Field(ge=0)
     version: SkillVersion | None = None
     validation: SkillValidationReport | None = None
     usage: tuple[ModelUsage, ...] = ()
@@ -137,6 +144,9 @@ class BuilderAgent:
         max_repairs: int = 1,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         thinking: bool | None = None,
+        repair_max_output_tokens: int = DEFAULT_REPAIR_MAX_OUTPUT_TOKENS,
+        learning_token_budget: int | None = None,
+        learning_call_budget: int | None = None,
     ) -> None:
         if max_repairs < 0:
             raise ValueError("max_repairs cannot be negative.")
@@ -146,6 +156,27 @@ class BuilderAgent:
         self._max_repairs = max_repairs
         self._max_output_tokens = max_output_tokens
         self._thinking = thinking
+        self._repair_max_output_tokens = repair_max_output_tokens
+        self._learning_token_budget = learning_token_budget
+        self._learning_call_budget = learning_call_budget
+
+    def _over_budget(self, request: ModelRequest, *, spent_tokens: int, spent_calls: int) -> bool:
+        """Whether this call could push the sequence past its learning budget.
+
+        The projection counts the whole output cap, so the budget can never be
+        exceeded by a call that was allowed to start.
+        """
+        if self._learning_call_budget is not None and spent_calls + 1 > self._learning_call_budget:
+            return True
+        if self._learning_token_budget is None:
+            return False
+        projected = (
+            spent_tokens
+            + estimated_tokens(request.system)
+            + estimated_tokens(request.prompt)
+            + request.max_output_tokens
+        )
+        return projected > self._learning_token_budget
 
     async def build(
         self,
@@ -155,26 +186,44 @@ class BuilderAgent:
         primitive_names: Iterable[str],
         authoring_model_id: str,
         created_at: datetime,
+        spent_tokens: int = 0,
+        spent_calls: int = 0,
     ) -> BuilderOutcome:
-        """Author, record, and validate one candidate, repairing it while budget lasts."""
+        """Author, record, and validate one candidate, repairing it while budget lasts.
+
+        `spent_tokens` and `spent_calls` are the sequence's learning spend before
+        the Builder starts, so the learning budget covers training and authoring.
+        """
         names = tuple(primitive_names)
-        prompt = render_builder_prompt(
-            evidence, primitive_names=names, tools=training_trace.episode.manifest.tools
-        )
+        tools = training_trace.episode.manifest.tools
+        prompt = render_builder_prompt(evidence, primitive_names=names, tools=tools)
         usage: list[ModelUsage] = []
         parent_version: int | None = None
+        current_name: str | None = None
+        current_source: str | None = None
         attempts = 0
 
         while True:
-            attempts += 1
-            response = await self._client.complete(
-                ModelRequest(
-                    system=BUILDER_SYSTEM,
-                    prompt=prompt,
-                    max_output_tokens=self._max_output_tokens,
-                    thinking=self._thinking,
-                )
+            request = ModelRequest(
+                system=BUILDER_SYSTEM,
+                prompt=prompt,
+                max_output_tokens=(
+                    self._max_output_tokens if attempts == 0 else self._repair_max_output_tokens
+                ),
+                thinking=self._thinking,
             )
+            used = sum(item.input_tokens + item.output_tokens for item in usage)
+            if self._over_budget(
+                request, spent_tokens=spent_tokens + used, spent_calls=spent_calls + attempts
+            ):
+                return BuilderOutcome(
+                    accepted=False,
+                    stop_reason="learning_budget_exhausted",
+                    attempts=attempts,
+                    usage=tuple(usage),
+                )
+            attempts += 1
+            response = await self._client.complete(request)
             usage.append(
                 ModelUsage(
                     model_id=response.model_id,
@@ -188,11 +237,44 @@ class BuilderAgent:
             except UnusableReplyError:
                 return BuilderOutcome(
                     accepted=False,
-                    stop_reason="unusable_reply",
+                    stop_reason=(
+                        "truncated_reply"
+                        if response.finish_reason == "length"
+                        else "unusable_reply"
+                    ),
                     attempts=attempts,
                     usage=tuple(usage),
                 )
 
+            if current_name is not None and candidate.name != current_name:
+                # A repair must extend the rejected version's lineage, so a renamed
+                # reply is a public rejection that spends a repair, not a new skill.
+                assert current_source is not None and parent_version is not None
+                if len(usage) > self._max_repairs:
+                    return BuilderOutcome(
+                        accepted=False,
+                        stop_reason="repair_budget_exhausted",
+                        attempts=attempts,
+                        usage=tuple(usage),
+                    )
+                prompt = render_repair_prompt(
+                    previous_source=current_source,
+                    issues=(
+                        SkillValidationIssue(
+                            check="package",
+                            code="renamed_repair",
+                            message=(
+                                f"A repair must keep the skill name {current_name!r}; "
+                                f"the reply named it {candidate.name!r}."
+                            ),
+                        ),
+                    ),
+                    evidence=evidence,
+                    primitive_names=names,
+                    tools=tools,
+                    skill_name=current_name,
+                )
+                continue
             # Recorded before validation: a rejected attempt must stay visible.
             recorded = self._registry.propose(
                 RegistryPackage(
@@ -231,7 +313,16 @@ class BuilderAgent:
                         usage=tuple(usage),
                     )
                 parent_version = recorded.version
-                prompt = render_repair_prompt(previous_source=candidate.source, issues=issues)
+                current_name = candidate.name
+                current_source = candidate.source
+                prompt = render_repair_prompt(
+                    previous_source=candidate.source,
+                    issues=issues,
+                    evidence=evidence,
+                    primitive_names=names,
+                    tools=tools,
+                    skill_name=candidate.name,
+                )
                 continue
 
             accepted = self._registry.accept(

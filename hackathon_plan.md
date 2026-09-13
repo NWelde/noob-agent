@@ -2531,8 +2531,21 @@ never worked around by changing budgets, seeds, or grading.
   `tests/test_builder_prompts.py`, `CHANGELOG.md`.
 - A repair prompt carries the API reference, the primitive definitions, the same
   bounded evidence, the rejected source, and the public failure evidence.
-- The repair output cap defaults to 3,000 and the repair prompt stays under
-  5,000 estimated tokens, so a repair fits the 8,000-token ceiling.
+- The repair output cap defaults to 3,000, or the configured Builder cap if that
+  is smaller, and the repair prompt stays under 5,000 estimated tokens, so a
+  repair fits the 8,000-token ceiling.
+- **Implementation detail (2026-09-13).** The source, the name to keep, and at
+  most three failing checks with 300 characters of evidence each are always
+  included. The primitive definitions and then the trace are added only while the
+  prompt still fits, so even a 12 KiB skill's repair stays in budget. The worked
+  example was tightened to keep the system prompt at about 1,240 estimated
+  tokens.
+- **Renamed repairs (found in the 22.B bench).** A repair that changes the skill's
+  name used to raise `UnknownSkillVersionError` and end the sequence. It is now a
+  public `package/renamed_repair` rejection that spends a repair and re-sends the
+  last recorded source, and every repair prompt names the skill to keep.
+- `BuilderOutcome.attempts` may be 0 when the learning budget is already spent
+  before the first call.
 - A reply that ends at its cap with no complete candidate stops the Builder
   with the new stop reason `truncated_reply`, distinct from `unusable_reply`.
 - The Builder stops before a call that would exceed the sequence's learning

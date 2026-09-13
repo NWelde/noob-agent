@@ -32,6 +32,7 @@ from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient
 from noob_agent.models.recording import ModelRole, RecordingModelClient
 from noob_agent.observability.tracing import TraceSink
+from noob_agent.prompts.builder import DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
 from noob_agent.runtime.heldout import HeldOutRunner, heldout_experiment
 from noob_agent.runtime.runner import Clock, EpisodeRunner, SystemClock
 from noob_agent.settings import (
@@ -46,6 +47,11 @@ from noob_agent.storage import EpisodeStore
 TRAINING_DECISION_BUDGET = 20
 TRAINING_PRIMITIVE_BUDGET = 40
 TRAINING_WALL_TIME_MS = 180_000
+
+# The per-sequence learning budget from eval_protocol.md: training Action calls
+# plus every Build and Repair call.
+LEARNING_TOKEN_BUDGET = 60_000
+LEARNING_CALL_BUDGET = 22
 
 ConnectorT = TypeVar("ConnectorT", bound=GameConnector)
 GradeT = TypeVar("GradeT")
@@ -235,15 +241,16 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._store.create_experiment(heldout_record)
 
         # Cold: primitives only, no skill runtime.
+        cold_agent = ActionAgent(
+            self._recording(training_record, role="action"),
+            manifest=manifest,
+            max_output_tokens=self._action_max_output_tokens,
+            thinking=self._action_thinking,
+        )
         cold = EpisodeRunner(
             connector=connector,
             store=self._store,
-            policy=ActionAgent(
-                self._recording(training_record, role="action"),
-                manifest=manifest,
-                max_output_tokens=self._action_max_output_tokens,
-                thinking=self._action_thinking,
-            ),
+            policy=cold_agent,
             clock=self._clock,
             trace=self._trace,
             close_connector=not self._persistent_connector,
@@ -272,6 +279,11 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             max_repairs=self._max_repairs,
             max_output_tokens=self._builder_max_output_tokens,
             thinking=self._builder_thinking,
+            repair_max_output_tokens=min(
+                self._builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
+            ),
+            learning_token_budget=LEARNING_TOKEN_BUDGET,
+            learning_call_budget=LEARNING_CALL_BUDGET,
         )
         outcome = await builder.build(
             select_evidence(training_stored),
@@ -279,6 +291,8 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             primitive_names=tuple(tool.name for tool in manifest.tools),
             authoring_model_id=self._model_id,
             created_at=self._clock.now(),
+            spent_tokens=cold_agent.input_tokens + cold_agent.output_tokens,
+            spent_calls=len(cold_agent.decisions),
         )
 
         reports: list[HeldOutEpisodeReport[GradeT]] = []

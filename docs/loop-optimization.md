@@ -67,6 +67,7 @@ Observations:
 | 22.A trimmed tool calls (superseded) | `loop-bench-22a-r2` | 0/100 | 620 | 0/5 | 5/5 | 47 | 53,360 (training Action tokens over ceiling) |
 | 22.A JSON-schema decisions | `loop-bench-22a-r3` | 0/100 | 561 | 0/5 | 5/5 | 45 | 32,251 (no ceiling exceeded) |
 | 22.B grounded Builder, thinking off | `loop-bench-22b` (stopped after 1 of 5 sequences) | 0/20 | 528 | 0/1 | 0/2 | 23 | 31,169 (no ceiling exceeded) |
+| 22.C converging repairs | `loop-bench-22c` | 0/190 | 517 | **4/5** | 0/9 | 42 | 32,623 (no ceiling exceeded) |
 
 22.A runs use Action thinking off and Builder thinking at the provider default
 (on), so every build still ends at its 6,000-token cap and no skill is accepted.
@@ -81,3 +82,11 @@ negative case. The repair fixed exactly that check in 2.2 s and 546 tokens, but
 renamed the skill in its metadata. The registry refused a repair whose parent
 has a different name and raised `UnknownSkillVersionError`, which ended the
 bench. Step 22.C makes a renamed repair a public rejection instead of a crash.
+
+`loop-bench-22c` is the first run where learning shows up in held-out results.
+Cold training completed its goal in 0 of 5 sequences. With the accepted skill,
+held-out episodes completed 9 of 24: 6 of 6 for sequence 1's skill, 1 of 6 for
+each of sequences 2, 4, and 5, and none run for sequence 3, whose repairs ran out
+(`repair_budget_exhausted`). Most held-out failures stopped at the primitive
+limit after three skill uses, so the accepted skills vary widely in quality. That
+is what step 22.D's practice rounds are meant to improve.
