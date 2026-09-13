@@ -70,6 +70,7 @@ class ActionStats(ScoreModel):
 class BuilderStats(ScoreModel):
     builds: int
     repairs: int
+    refines: int = 0
     capped_calls: int
     input_tokens: int
     output_tokens: int
@@ -384,6 +385,7 @@ def score_sequence(
     builder = BuilderStats(
         builds=sum(1 for call in builder_calls if call.purpose == "build"),
         repairs=sum(1 for call in builder_calls if call.purpose == "repair"),
+        refines=sum(1 for call in builder_calls if call.purpose == "refine"),
         capped_calls=sum(1 for call in builder_calls if call.finish_reason == CAPPED_FINISH_REASON),
         input_tokens=sum(call.input_tokens or 0 for call in builder_calls),
         output_tokens=sum(call.output_tokens or 0 for call in builder_calls),
@@ -475,7 +477,9 @@ def score_run(
             action_latency_p90_ms=_percentile(latencies, 0.9)
             if latencies
             else _max_or_none([s.action.latency_p90_ms for s in sequences]),
-            builder_calls=sum(s.builder.builds + s.builder.repairs for s in sequences),
+            builder_calls=sum(
+                s.builder.builds + s.builder.repairs + s.builder.refines for s in sequences
+            ),
             capped_builder_calls=sum(score.builder.capped_calls for score in sequences),
             median_wall_time_seconds=statistics.median(walls) if walls else None,
             max_learning_tokens=max((score.learning_tokens for score in sequences), default=0),
@@ -562,7 +566,7 @@ def render_markdown(score: RunScore, *, title: str) -> str:
             f" {_format(None if sequence.training is None else sequence.training.stop_reason)} |"
             f" {sequence.action.unusable_replies}/{sequence.action.decisions} |"
             f" {sequence.action.capped_calls}/{sequence.action.calls} |"
-            f" {sequence.builder.builds + sequence.builder.repairs}"
+            f" {sequence.builder.builds + sequence.builder.repairs + sequence.builder.refines}"
             f" ({sequence.builder.capped_calls}) |"
             f" {_format(sequence.wall_time_seconds)} | {sequence.learning_tokens} |"
             f" {', '.join(sequence.ceilings_exceeded) or 'none'} | {done} |"
