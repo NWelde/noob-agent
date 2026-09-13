@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 17:19 PDT | [ADDED] | Added ViZDoom environment groundwork for build-order step 7: a non-production `scaffolding/doom_env` check that maps all ten Doom BDP primitives to ViZDoom controls and verifies deterministic reset, tick-exact advancement, public-only observations, and the contract's Doom timeouts, plus `docs/doom-env.md` with the install, verification, and the three ViZDoom behaviors that fail silently. No connector, no new project dependency.
+
 2026-09-12 16:53 PDT | [ADDED] | Added the immutable skill version registry: the registry assigns each candidate its version and content hash, enforces the `proposed` -> `validating` -> `accepted`/`rejected` and `accepted` -> `retired` transitions, keeps a repair's parent version, and exposes only the single accepted version as an available skill.
 
 2026-09-12 16:26 PDT | [DOCUMENTED] | Removed the isolated-scaffolding-only default permission from CLAUDE.md; core-loop work now proceeds under the Mandatory Change Gate and protected-area rules alone.
