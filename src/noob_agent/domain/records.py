@@ -146,10 +146,8 @@ class ModelCallRecord(DurableRecord):
     latency_ms: int = Field(ge=0)
     error: str | None = None
     started_at: datetime
-    # Thinking, offered tool names, and tool-choice mode; absent before schema 5.
+    # Thinking and the reply schema the request asked for; absent before schema 5.
     request_options: dict[str, JsonValue] | None = None
-    # The tool call the provider returned, as {"name", "arguments"}.
-    tool_call: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def links_and_outcome_agree(self) -> Self:
