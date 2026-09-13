@@ -1,4 +1,11 @@
-"""ViZDoom implementation of the fixed public Doom connector surface."""
+"""ViZDoom implementation of the fixed public Doom connector surface.
+
+Scenarios are declared variations of the included `basic.cfg`: the seed places
+the target, and each scenario ID applies a fixed starting offset during reset,
+before observation zero. The kill count, player death, and timeout are kept on
+a harness-only outcome and never enter an observation, a step result, or a
+message.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,7 @@ import importlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 
 from noob_agent.connectors.protocol import ConnectorError
 from noob_agent.domain.model import (
@@ -20,11 +27,32 @@ from noob_agent.domain.model import (
 )
 
 GAME_ID = "doom-vizdoom"
-CONNECTOR_VERSION = "doom-vizdoom-v1"
-PUBLIC_GOAL = "Explore the visible area and survive the scenario."
+CONNECTOR_VERSION = "doom-vizdoom-v2"
+PUBLIC_GOAL = (
+    "Eliminate the hostile target in this area. Use visible results as evidence. "
+    "Finish within the action budget."
+)
 MAX_TICKS = 35
 MAX_DEGREES = 90
 START_TICKS = 14
+
+# Every reset spends the same ticks, so observation zero has the same logical
+# time in every scenario; only the held-out scenarios strafe during them.
+START_OFFSET_TICKS: Final = 12
+# Doom's friction keeps a strafing player sliding; this is enough for the
+# reset to be exactly repeatable, which is what the contract requires.
+SETTLE_TICKS: Final = 35
+
+StartOffset = Literal["left", "right"] | None
+SCENARIOS: Final[dict[str, StartOffset]] = {
+    "doom-basic-training": None,
+    "doom-basic-heldout-a": "left",
+    "doom-basic-heldout-b": "right",
+}
+SCENARIO_IDS: Final = tuple(SCENARIOS)
+
+_PLAYER_LABEL: Final = "DoomPlayer"
+_MAX_SCREEN_OFFSET: Final = 100
 
 
 def _tool(name: str, description: str, schema: dict[str, Any], changing: bool) -> ToolDefinition:
@@ -80,16 +108,28 @@ class DoomSettings:
     reset_timeout_seconds: float = 10.0
 
 
+@dataclass(frozen=True)
+class DoomEpisodeOutcome:
+    """Private end-of-episode facts for the grader. Never shown to a policy."""
+
+    kills: int
+    player_dead: bool
+    timed_out: bool
+    finished: bool
+
+
 class DoomConnector:
     """Headless ViZDoom connector; it exposes only HUD variables and labels."""
 
     def __init__(self, settings: DoomSettings | None = None) -> None:
         self._settings = settings or DoomSettings()
+        self._vzd: Any | None = None
         self._game: Any | None = None
         self._buttons: list[Any] = []
         self._scenario_id: str | None = None
         self._episode_id: str | None = None
         self._latest: Observation | None = None
+        self._outcome: DoomEpisodeOutcome | None = None
         self._sequence = 0
         self._resets = 0
 
@@ -97,15 +137,27 @@ class DoomConnector:
         return MANIFEST
 
     async def reset(self, scenario_id: str, seed: int) -> Observation:
-        game = self._ensure_game(scenario_id)
+        if scenario_id not in SCENARIOS:
+            raise ConnectorError(
+                f"Scenario {scenario_id!r} is undeclared by connector {CONNECTOR_VERSION}."
+            )
+        game = self._ensure_game()
         started = time.monotonic()
         game.set_seed(seed)
         game.new_episode()
+        self._outcome = None
+        offset = [0.0] * len(self._buttons)
+        direction = SCENARIOS[scenario_id]
+        if direction is not None:
+            offset[self._button_index("MOVE_LEFT" if direction == "left" else "MOVE_RIGHT")] = 1.0
+        game.make_action(offset, START_OFFSET_TICKS)
+        game.make_action([0.0] * len(self._buttons), SETTLE_TICKS)
         if time.monotonic() - started > self._settings.reset_timeout_seconds:
             raise ConnectorError("Doom reset exceeded its timeout.")
         self._resets += 1
         self._scenario_id, self._sequence = scenario_id, 0
-        self._episode_id = f"doom-{scenario_id}-s{seed}-r{self._resets:03d}"
+        self._episode_id = f"doom-{scenario_id}-r{self._resets:03d}"
+        self._capture_outcome()
         self._latest = self._observation(None)
         return self._latest
 
@@ -120,6 +172,7 @@ class DoomConnector:
         game = self._game
         assert game is not None
         game.make_action(values, ticks)
+        self._capture_outcome()
         elapsed = time.monotonic() - started
         self._sequence += 1
         if elapsed > self._settings.call_timeout_seconds:
@@ -140,11 +193,34 @@ class DoomConnector:
         return self._latest is not None and self._latest.terminal
 
     async def close(self) -> None:
+        if self._game is not None and self._latest is not None:
+            self._capture_outcome()
         game, self._game = self._game, None
         if game is not None:
             game.close()
 
-    def _ensure_game(self, scenario_id: str) -> Any:
+    def private_outcome(self) -> DoomEpisodeOutcome:
+        """Harness-only: the latest episode's private outcome, readable after close."""
+        if self._outcome is None:
+            raise ConnectorError("reset must succeed before a private outcome exists.")
+        return self._outcome
+
+    def _capture_outcome(self) -> None:
+        if self._outcome is not None and self._outcome.finished:
+            return
+        game, vzd = self._game, self._vzd
+        assert game is not None and vzd is not None
+        self._outcome = DoomEpisodeOutcome(
+            kills=int(game.get_game_variable(vzd.GameVariable.KILLCOUNT)),
+            player_dead=bool(game.is_player_dead()),
+            timed_out=bool(game.is_episode_timeout_reached()),
+            finished=bool(game.is_episode_finished()),
+        )
+
+    def _button_index(self, name: str) -> int:
+        return [button.name for button in self._buttons].index(name)
+
+    def _ensure_game(self) -> Any:
         if self._game is not None:
             return self._game
         try:
@@ -178,6 +254,7 @@ class DoomConnector:
         game.set_episode_timeout(2100)
         game.set_episode_start_time(START_TICKS)
         game.init()
+        self._vzd = vzd
         self._game = game
         return game
 
@@ -210,15 +287,36 @@ class DoomConnector:
             "use": "USE",
         }
         if request.tool_name in mapping:
-            action[[button.name for button in self._buttons].index(mapping[request.tool_name])] = (
-                1.0
-            )
+            action[self._button_index(mapping[request.tool_name])] = 1.0
         elif request.tool_name in {"turn_left", "turn_right"}:
-            action[[button.name for button in self._buttons].index("TURN_LEFT_RIGHT_DELTA")] = (
+            action[self._button_index("TURN_LEFT_RIGHT_DELTA")] = (
                 -1.0 if request.tool_name == "turn_left" else 1.0
             ) * value
             return action, 1, True
         return action, value, request.tool_name != "wait"
+
+    def _visible_objects(self, state: Any) -> tuple[VisibleObject, ...]:
+        game = self._game
+        assert game is not None
+        half_width = game.get_screen_width() / 2
+        placed: list[tuple[str, int, int]] = []
+        for label in state.labels:
+            name = str(label.object_name)
+            if name == _PLAYER_LABEL:
+                continue
+            center = label.x + label.width / 2
+            offset = round((center - half_width) / half_width * _MAX_SCREEN_OFFSET)
+            offset = max(-_MAX_SCREEN_OFFSET, min(_MAX_SCREEN_OFFSET, offset))
+            placed.append((name, offset, int(label.x)))
+        placed.sort()
+        return tuple(
+            VisibleObject(
+                object_id=f"obj_{index:03d}",
+                label=name,
+                properties={"screen_offset": offset},
+            )
+            for index, (name, offset, _) in enumerate(placed)
+        )
 
     def _observation(self, action_id: str | None) -> Observation:
         game = self._game
@@ -226,25 +324,15 @@ class DoomConnector:
         state = game.get_state()
         terminal = game.is_episode_finished() or state is None
         variables = list(state.game_variables) if state is not None else [None, None, None]
-        labels = (
-            ()
-            if state is None
-            else tuple(
-                VisibleObject(object_id=f"obj_{index:03d}", label=str(label.object_name))
-                for index, label in enumerate(
-                    sorted(state.labels, key=lambda item: item.object_name)
-                )
-            )
-        )
         return Observation(
             episode_id=self._episode_id or "doom-unset",
             sequence=self._sequence,
             game_id=GAME_ID,
-            scenario_id=self._scenario_id or self._settings.scenario,
+            scenario_id=self._scenario_id or SCENARIO_IDS[0],
             public_goal=PUBLIC_GOAL,
             status={"health": variables[0], "ammo": variables[1]},
             player=PublicPlayerState(orientation={"angle": variables[2]}),
-            visible_objects=labels,
+            visible_objects=() if state is None else self._visible_objects(state),
             last_action_id=action_id,
             terminal=terminal,
             terminal_reason="episode_finished" if terminal else None,
@@ -252,6 +340,11 @@ class DoomConnector:
         )
 
     def _rejected(self, request: ToolRequest, started: float) -> StepResult:
+        """Refuse a request that was never sent, charging no primitive call.
+
+        The harness records every result as a step with its own sequence, so a
+        rejection advances the public sequence exactly as a delivered action does.
+        """
         latest = self._latest
         if latest is None:
             raise ConnectorError("reset must succeed before an action is attempted.")
@@ -260,13 +353,17 @@ class DoomConnector:
             if request.tool_name not in {tool.name for tool in MANIFEST.tools}
             else "INVALID_ARGUMENT"
         )
+        self._sequence += 1
+        self._latest = latest.model_copy(
+            update={"sequence": self._sequence, "last_action_id": request.action_id}
+        )
         return StepResult(
             action_id=request.action_id,
             sequence=self._sequence,
             status="rejected",
             code=code,
             message="Tool name or arguments are invalid.",
-            observation=latest.model_copy(update={"last_action_id": request.action_id}),
+            observation=self._latest,
             state_changed=False,
             primitive_actions_charged=0,
             logical_duration=0,
