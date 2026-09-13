@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 23:14 PDT | [ADDED] | Added `scripts/replay_doom_episode.py` for step 19b, which lists the Doom episodes in a database or replays one in a visible, real-time ViZDoom window from a temporary copy of the store, checks every step against the record, stops with exit 1 at the first mismatch, refuses non-Doom episodes and other connector versions, and never calls a model, the Builder, a grader, or a skill executor. A headless replay of the first live Doom run matched all 20 steps.
+
 2026-09-12 23:09 PDT | [ADDED] | Added display-only `window_visible` and `realtime` settings to `DoomSettings` for step 19a: a visible ViZDoom window that renders every frame, and real-time pacing that advances accepted actions one tick at a time at 35 ticks per second and stops when the episode ends. Both default to off, the connector version stays `doom-vizdoom-v2`, and real-ViZDoom tests show paced step results identical to the default settings.
 
 2026-09-12 23:02 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 19, a Doom episode replay viewer: display-only `window_visible` and `realtime` settings for the Doom connector that change no recorded value, and `scripts/replay_doom_episode.py`, which replays a recorded episode's exact requests from a copy of the store in a visible ViZDoom window, verifies every step against the record, stops at the first mismatch, and never calls a model or grader, split into two reversible pull requests.
