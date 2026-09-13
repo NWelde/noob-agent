@@ -18,6 +18,22 @@ The central question:
 Self-improvement here means building and keeping tested code. It does **not**
 mean fine-tuning or changing model weights.
 
+## What it looks like
+
+**Doom:** the same model on a held-out seed it never saw while learning. On the
+left it has primitives only; on the right it also has a skill it wrote and
+validated from its own training attempt.
+
+![Doom held-out seed 101: cold DeepSeek fails at the decision limit; DeepSeek with learned skill s v1 completes the goal in 0.9 s](assets/doom-comparison.png)
+
+**Minecraft:** the redstone lamp exercise. The bot (`noobagentbot`) takes a
+redstone block from a barrel and places it beside the lamp. Its in-game chat
+narrates each step (`Seeing`, `Doing`, `Pressing`, `Learning`), and the lamp
+lights once Minecraft reports it powered. This frame comes from a screen
+recording of the run. It is a same-task demo, not a held-out benchmark result.
+
+![Minecraft redstone exercise: noobagentbot places the power block and the redstone lamp lights up](assets/redstone-lamp-lit.png)
+
 ## What is working today
 
 This is a hackathon prototype, not a finished benchmark. The shared learning
@@ -79,6 +95,63 @@ ability, skill-building, repair, transfer to unseen variations, defect discovery
 and reproduction (clean vs. faulty scenario twins), and cost in actions, model
 calls, tokens, time, and dollars. Every step is recorded in SQLite and mirrored
 to W&B Weave for inspection.
+
+## How we used W&B Weave, the sandbox, and traces
+
+**Traces are the record of every run.** SQLite is the source of truth. After
+each event is safely written there, `WeaveTraceSink`
+([`src/noob_agent/observability/tracing.py`](src/noob_agent/observability/tracing.py))
+mirrors it to W&B Weave as a nested call tree:
+
+- `noob_agent.episode`: one call per training, practice, or held-out attempt.
+- `noob_agent.step`: one child call per recorded step, holding the Action
+  agent's subgoal, expected evidence, chosen action, arguments, result,
+  latency, and tokens.
+- `noob_agent.model_call`: every model call. Action calls nest under their
+  episode. Builder and refinement calls sit at the top level, since no episode
+  is open while they run.
+
+Tracing is best effort. A slow or unreachable Weave backend can never change a
+recorded attempt. Concurrent held-out cells keep their own call trees, and
+tracing is flushed once after all cells finish.
+
+**Weave is also what we read from, not only what we write to.**
+
+- [`scripts/live_reasoning_view.py`](scripts/live_reasoning_view.py) polls
+  Weave (never SQLite) for one run's calls and serves a local page beside the
+  game. The page shows each decision's reasoning and result, the Builder's
+  generated code, episode outcomes, and a link to every call in Weave. In a
+  live demo, decisions appeared a median 2.0 s after the model replied.
+- [`scripts/doom_demo_log.py`](scripts/doom_demo_log.py) builds the Doom demo
+  transcript from Weave calls.
+- Model calls go through W&B Inference with the same `WANDB_API_KEY`.
+  Traces are how we debugged the loop. For example, they showed Action replies
+  that could not be parsed, a Builder reply cut off at its output cap, and a
+  Weave flush that deadlocked concurrent episodes. See
+  [`docs/loop-optimization.md`](docs/loop-optimization.md).
+
+**Sandbox: generated skills never run in the agent process.** A skill starts as
+untrusted, model-written Python. It goes through these checks:
+
+1. A static policy check parses the source with `ast` without running it, and
+   rejects forbidden imports and builtins
+   ([`src/noob_agent/skills/policy.py`](src/noob_agent/skills/policy.py)).
+2. The validator runs the candidate through replay, negative-case, and
+   variation phases in the configured executor. Only an accepted version is
+   saved, and saved versions are immutable.
+3. At run time the skill executes in a separate worker process
+   ([`src/noob_agent/skills/worker.py`](src/noob_agent/skills/worker.py)).
+   The worker loads it with guarded builtins and imports, and the skill can
+   only reach the game through a narrow `SkillContext` (`observe`, `call`,
+   `remaining_budget`, `log`) relayed as JSON Lines. It is time-limited, and
+   every primitive it uses counts against the same action budget.
+
+The executor interface is designed for CoreWeave Sandbox
+(`NOOB_AGENT_SANDBOX_MODE=serverless` or `cks`), but that backend is not
+implemented yet. Asking for it fails loudly rather than quietly falling back.
+Every recorded run so far used `NOOB_AGENT_SANDBOX_MODE=local`, the restricted
+local subprocess. Each of its results is labeled `local-subprocess` so a report
+cannot mistake it for a sandbox run. It enforces no network or memory limit.
 
 ## Terms used in this repository
 
