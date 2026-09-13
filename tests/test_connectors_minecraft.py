@@ -13,6 +13,8 @@ missing, and never hang or silently pass.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -30,6 +32,7 @@ from noob_agent.domain.model import Observation, StepResult, ToolRequest
 
 SCENARIO_ID = "resonator-training-v1"
 SEED = 20260912
+SIDECAR = Path("src/noob_agent/connectors/minecraft_sidecar")
 
 # One public snapshot shaped exactly as the Node sidecar reports it.
 SIDECAR_SNAPSHOT: dict[str, Any] = {
@@ -270,7 +273,9 @@ async def test_a_rejected_request_does_not_advance_the_public_sequence() -> None
 
 
 async def test_a_timeout_after_possible_delivery_is_unknown() -> None:
-    connector, _ = stubbed(observe_reply(), never_replies=True)
+    connector, transport = stubbed(observe_reply())
+    await connector.reset(SCENARIO_ID, SEED)
+    transport._never_replies = True
 
     # The request was written to the sidecar, so it may have changed the game.
     result = await connector.step(ToolRequest(action_id="a_0007", tool_name="observe"))
@@ -283,7 +288,9 @@ async def test_a_timeout_after_possible_delivery_is_unknown() -> None:
 
 
 async def test_a_timeout_before_delivery_is_a_confirmed_failure() -> None:
-    connector, _ = stubbed(observe_reply(), fail_on_send=True)
+    connector, transport = stubbed(observe_reply())
+    await connector.reset(SCENARIO_ID, SEED)
+    transport._fail_on_send = True
 
     result = await connector.step(ToolRequest(action_id="a_0008", tool_name="observe"))
 
@@ -363,10 +370,22 @@ async def live_connector() -> MinecraftConnector:
     connector = MinecraftConnector()
     try:
         await connector.start()
-    except (SidecarUnavailableError, ConnectorError, OSError) as unavailable:
+    except (SidecarUnavailableError, OSError) as unavailable:
         await connector.close()
         pytest.skip(f"live Minecraft server or Node sidecar unavailable: {unavailable}")
     return connector
+
+
+def test_sidecar_is_a_pinned_json_lines_mineflayer_package() -> None:
+    package = json.loads((SIDECAR / "package.json").read_text(encoding="utf-8"))
+    source = (SIDECAR / "index.js").read_text(encoding="utf-8")
+
+    assert package["private"] is True
+    assert package["dependencies"] == {"mineflayer": "4.39.0"}
+    assert package["scripts"]["start"] == "node index.js"
+    for operation in ('"connect"', '"reset"', '"observe"', '"close"'):
+        assert operation in source
+    assert "process.stdout.write" in source
 
 
 async def test_live_reset_is_repeatable_on_a_fixed_seed() -> None:
