@@ -5,9 +5,9 @@ page gets a ViZDoom environment running locally and verifies it can support the
 minimum Doom BDP primitive tool set in
 [`connector_contract.md`](../connector_contract.md).
 
-This is **environment groundwork for build-order step 7**
-([`hackathon_plan.md`](../hackathon_plan.md) §10). The `DoomConnector` itself is
-a separate, later issue.
+This began as environment groundwork for build-order step 7
+([`hackathon_plan.md`](../hackathon_plan.md) §10). The headless `DoomConnector`
+is now implemented in `src/noob_agent/connectors/doom.py`.
 
 ## Prerequisites
 
@@ -21,21 +21,14 @@ a separate, later issue.
 
 ## Install
 
-ViZDoom is **not** a project dependency. It is deliberately absent from
-`pyproject.toml`: nothing in `src/` imports it yet, and adding it to the manifest
-belongs with the connector milestone that actually needs it. Install it into your
-local environment only:
+ViZDoom is a project runtime dependency. Install the locked project environment:
 
 ```sh
-uv pip install "vizdoom>=1.3,<2"
+uv sync --group dev
 ```
 
-That pulls `gymnasium`, `numpy`, `pygame-ce`, `cloudpickle`, and
-`farama-notifications` alongside it. To undo it:
-
-```sh
-uv pip uninstall vizdoom
-```
+The manifest constrains it to `vizdoom>=1.3,<2`; `uv.lock` pins the resolved
+environment alongside its transitive packages.
 
 ## Verify
 
@@ -66,6 +59,20 @@ uv run python scaffolding/doom_env/check_env.py deadly_corridor.cfg
 The check and everything it covers are described in
 [`scaffolding/doom_env/README.md`](../scaffolding/doom_env/README.md).
 
+## Local verification record
+
+Verified on this WSL environment on 2026-09-12 (America/Los_Angeles):
+
+- Installed `vizdoom 1.3.0` through `uv pip` using the supported CPython 3.14.6
+  interpreter.
+- `uv run python scaffolding/doom_env/check_env.py` passed all 26 checks for
+  `basic.cfg` (seed `20260912`).
+- The measured headless run initialized in 0.17 seconds, reset plus five
+  actions took 0.29 seconds, and a 35-tick action took 2 ms.
+
+This verification first established local environment readiness. PR #32 later
+declared ViZDoom as a project dependency and added the `DoomConnector`.
+
 ## What the check confirms
 
 - **All ten Doom BDP primitives are reachable.** `observe` and `wait` need no
@@ -80,10 +87,10 @@ The check and everything it covers are described in
   structured-observation condition, not a pixels-only result.
 - **Both Doom timeouts have headroom**: 10s reset and 3s per call.
 
-## Three behaviors the connector must handle
+## Three behaviors the connector handles
 
 Measured locally, not taken from documentation. Each one fails quietly rather
-than loudly, so they are worth knowing before the connector is written.
+than loudly, so they are important implementation constraints for the connector.
 
 1. **A turn is one tick carrying the whole amount.** `TURN_LEFT_RIGHT_DELTA`
    applies once per tick, so holding it multiplies the turn — 4 ticks of 15
@@ -108,7 +115,7 @@ Any included scenario works. Three were verified:
 | `defend_the_center.cfg` | `DoomPlayer`, `MarineChainsawVzd` | Stationary; turning and firing |
 
 `deadly_corridor.cfg` gives the richest label set to summarize into an
-observation. The BDP scenario is the connector issue's decision.
+observation. The current connector freezes `basic.cfg` as its default scenario.
 
 ## Troubleshooting
 

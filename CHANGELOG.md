@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+2026-09-12 20:54 PDT | [DOCUMENTED] | Updated the implementation handoff after integrating held-out skill reuse, clean/faulty reproduction, and the concurrently merged Doom connector into `main`, including final test evidence and the remaining live Minecraft grading scope gap.
+
 2026-09-12 20:51 PDT | [ADDED] | Added the headless ViZDoom Doom connector with the ten frozen BDP primitives, public HUD/visible-label observations, fixed-seed reset, one-tick signed turns, contract argument rejection, and live connector acceptance tests. Declared ViZDoom as the Doom game-layer runtime dependency.
+
+2026-09-12 20:46 PDT | [DOCUMENTED] | Recorded the successful local ViZDoom 1.3.0 installation and 26-check headless Doom environment verification; no project dependency or Doom connector was added.
+
+2026-09-12 20:43 PDT | [DOCUMENTED] | Documented the verified local Minecraft server and world locations, tmux lifecycle, WSL/TLauncher connection requirements, live connector check, troubleshooting findings, current implementation map, stacked pull-request state, and next build-order steps.
 
 2026-09-12 19:20 PDT | [FIXED] | A rejected request now advances the Minecraft connector's public sequence like any other durable result, so the runner records the rejection as a step and continues instead of ending the episode as an unknown result.
 
