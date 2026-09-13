@@ -1,8 +1,9 @@
 """The Minecraft game connector.
 
-This is build-order step 1 from `hackathon_plan.md` section 13: reset a prepared
-scenario world and perform one hard-coded primitive action against the local
-development server described in `docs/minecraft-server.md`.
+This is build-order step 1 and the primitive-completion milestone from
+`hackathon_plan.md` sections 13 and 15: reset a prepared scenario world and
+expose the frozen Minecraft control surface against the local development
+server described in `docs/minecraft-server.md`.
 
 Following section 8, the game protocol is spoken by a small Node.js and
 Mineflayer sidecar. This module drives that sidecar over JSON Lines on its
@@ -18,15 +19,16 @@ state, and any other private field the sidecar might report are dropped rather
 than forwarded. Widening an allow-list changes the benchmark surface and
 therefore requires a connector version change.
 
-Only `observe` is implemented at this step. Every other primitive named in
-`connector_contract.md` is deferred, is absent from the manifest, and is
-rejected as an undeclared tool.
+All eight Minecraft primitives from `connector_contract.md` are implemented.
+Opaque object IDs resolve only against the latest confirmed public observation;
+invalid IDs and arguments are rejected before anything reaches the game.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
 import time
 from collections.abc import Mapping, Sequence
@@ -50,7 +52,7 @@ from noob_agent.domain.model import (
 )
 
 GAME_ID: Final = "minecraft"
-CONNECTOR_VERSION: Final = "minecraft-0.1.0"
+CONNECTOR_VERSION: Final = "minecraft-0.2.0"
 OBSERVATION_MODE: Final = "structured_nearby_state"
 TIMING_MODEL: Final = "game_ticks"
 
@@ -73,19 +75,6 @@ DEFAULT_OBSERVE_RADIUS: Final = 5
 SETTLE_TICKS: Final = 5
 CALL_TIMEOUT_SECONDS: Final = 10.0
 RESET_TIMEOUT_SECONDS: Final = 30.0
-
-# Primitives the contract requires of a complete Minecraft connector but which
-# this version does not implement. They are deliberately absent from the
-# manifest, so a request naming one is rejected as an undeclared tool.
-DEFERRED_TOOLS: Final = (
-    "move_to",
-    "look_at",
-    "inspect_object",
-    "collect_object",
-    "use_object",
-    "place_object",
-    "wait",
-)
 
 SIDECAR_DIRECTORY: Final = Path(__file__).parent / "minecraft_sidecar"
 
@@ -113,13 +102,156 @@ OBSERVE_TOOL: Final = ToolDefinition(
     state_changing=False,
 )
 
+_OBJECT_ID_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {"object_id": {"type": "string", "minLength": 1}},
+    "required": ["object_id"],
+    "additionalProperties": False,
+}
+
+MOVE_TO_TOOL: Final = ToolDefinition(
+    name="move_to",
+    description="Walk to a reachable public position within a tolerance of 1 or 2 blocks.",
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "z": {"type": "number"},
+            "tolerance": {"type": "integer", "enum": [1, 2]},
+        },
+        "required": ["x", "y", "z", "tolerance"],
+        "additionalProperties": False,
+    },
+    preconditions=("The destination is reachable by ordinary walking.",),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=True,
+)
+
+LOOK_AT_TOOL: Final = ToolDefinition(
+    name="look_at",
+    description="Face an object from the latest visible nearby state.",
+    argument_schema=_OBJECT_ID_SCHEMA,
+    preconditions=("The object ID is present in the latest observation.",),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=True,
+)
+
+INSPECT_OBJECT_TOOL: Final = ToolDefinition(
+    name="inspect_object",
+    description="Inspect the ordinary public name, state, or contents of a visible object.",
+    argument_schema=_OBJECT_ID_SCHEMA,
+    preconditions=("The object ID is present in the latest observation.",),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=False,
+)
+
+COLLECT_OBJECT_TOOL: Final = ToolDefinition(
+    name="collect_object",
+    description="Collect 1 to 8 units of a reachable visible item or resource.",
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "object_id": {"type": "string", "minLength": 1},
+            "count": {"type": "integer", "minimum": 1, "maximum": 8},
+        },
+        "required": ["object_id", "count"],
+        "additionalProperties": False,
+    },
+    preconditions=(
+        "The object ID is a collectible item in the latest observation.",
+        "The item is reachable.",
+    ),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=True,
+)
+
+USE_OBJECT_TOOL: Final = ToolDefinition(
+    name="use_object",
+    description=(
+        "Use or interact with a visible object, optionally while holding an inventory item."
+    ),
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "object_id": {"type": "string", "minLength": 1},
+            "held_item_id": {"type": "string", "minLength": 1},
+        },
+        "required": ["object_id"],
+        "additionalProperties": False,
+    },
+    preconditions=(
+        "The object ID is present in the latest observation.",
+        "Any held item ID is an inventory item in the latest observation.",
+    ),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=True,
+)
+
+PLACE_OBJECT_TOOL: Final = ToolDefinition(
+    name="place_object",
+    description="Place or drop a held inventory item at an adjacent public position.",
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "held_item_id": {"type": "string", "minLength": 1},
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "z": {"type": "number"},
+        },
+        "required": ["held_item_id", "x", "y", "z"],
+        "additionalProperties": False,
+    },
+    preconditions=(
+        "The held item ID is an inventory item in the latest observation.",
+        "The public position is adjacent and can receive the item.",
+    ),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=True,
+)
+
+WAIT_TOOL: Final = ToolDefinition(
+    name="wait",
+    description="Wait for 1 to 100 game ticks so visible processes can advance.",
+    argument_schema={
+        "type": "object",
+        "properties": {"ticks": {"type": "integer", "minimum": 1, "maximum": 100}},
+        "required": ["ticks"],
+        "additionalProperties": False,
+    },
+    preconditions=("The connector is connected to the game.",),
+    max_duration=int(CALL_TIMEOUT_SECONDS),
+    state_changing=False,
+)
+
 MANIFEST: Final = ConnectorManifest(
     connector_version=CONNECTOR_VERSION,
     game_id=GAME_ID,
     observation_mode=OBSERVATION_MODE,
     timing_model=TIMING_MODEL,
-    tools=(OBSERVE_TOOL,),
+    tools=(
+        OBSERVE_TOOL,
+        MOVE_TO_TOOL,
+        LOOK_AT_TOOL,
+        INSPECT_OBJECT_TOOL,
+        COLLECT_OBJECT_TOOL,
+        USE_OBJECT_TOOL,
+        PLACE_OBJECT_TOOL,
+        WAIT_TOOL,
+    ),
 )
+
+_TOOLS_BY_NAME: Final = {tool.name: tool for tool in MANIFEST.tools}
+_COLLECTIBLE_KINDS: Final = frozenset({"item", "container_item"})
+_INVENTORY_KINDS: Final = frozenset({"inventory_item", "held_item"})
+
+
+@dataclass(frozen=True)
+class _PreparedAction:
+    message: dict[str, Any]
+    state_changed: bool
+    success_message: str
+
 
 # Result codes defined by `connector_contract.md`. A new code requires a
 # connector version change, so an unrecognized code from the sidecar is
@@ -371,7 +503,7 @@ class _suppress_transport_errors:
 
 
 class MinecraftConnector:
-    """The public Minecraft adapter: reset a scenario and observe it.
+    """The public Minecraft adapter: reset, observe, and use ordinary controls.
 
     Implements `GameConnector`. The harness calls `reset` and `close`; an agent
     may call only the primitives the manifest declares.
@@ -444,31 +576,27 @@ class MinecraftConnector:
         if latest is None or self._episode_id is None:
             raise ConnectorError("reset must succeed before an action is attempted.")
 
-        if request.tool_name != OBSERVE_TOOL.name:
+        if request.tool_name not in _TOOLS_BY_NAME:
             return self._rejected(
                 request,
                 "INVALID_TOOL",
-                f"{request.tool_name!r} is not declared by connector {CONNECTOR_VERSION}."
-                + (
-                    " It is deferred to a later connector version."
-                    if request.tool_name in DEFERRED_TOOLS
-                    else ""
-                ),
+                f"{request.tool_name!r} is not declared by connector {CONNECTOR_VERSION}.",
                 started_ms,
             )
 
-        radius = _observe_radius(request.arguments, self._settings.observe_radius)
-        if radius is None:
+        prepared = self._prepare_action(request, latest)
+        if isinstance(prepared, tuple):
+            code, message = prepared
             return self._rejected(
                 request,
-                "INVALID_ARGUMENT",
-                f"radius must be an integer from {MIN_OBSERVE_RADIUS} to {MAX_OBSERVE_RADIUS}.",
+                code,
+                message,
                 started_ms,
             )
 
         try:
             reply = await self._exchange(
-                {"op": "observe", "radius": radius},
+                prepared.message,
                 timeout=self._settings.call_timeout_seconds,
             )
         except _NotDelivered as not_delivered:
@@ -498,7 +626,11 @@ class MinecraftConnector:
                 status="failed",
                 code=_result_code(reply.get("code")),
                 message=str(reply.get("error", "The game did not complete the action.")),
-                state_changed=False,
+                state_changed=(
+                    reply["state_changed"]
+                    if isinstance(reply.get("state_changed"), bool)
+                    else False
+                ),
                 started_ms=started_ms,
             )
 
@@ -509,14 +641,17 @@ class MinecraftConnector:
             last_action_id=request.action_id,
         )
         self._latest = observation
+        state_changed = reply.get("state_changed")
         return StepResult(
             action_id=request.action_id,
             sequence=self._sequence,
             status="succeeded",
             code="OK",
-            message="Visible nearby state refreshed.",
+            message=prepared.success_message,
             observation=observation,
-            state_changed=False,
+            state_changed=(
+                state_changed if isinstance(state_changed, bool) else prepared.state_changed
+            ),
             primitive_actions_charged=1,
             logical_duration=_logical_duration(observation, previous=latest),
             wall_time_ms=_elapsed_ms(started_ms),
@@ -551,6 +686,141 @@ class MinecraftConnector:
         self._started = True
 
     # --- Internals --------------------------------------------------------
+
+    def _prepare_action(
+        self, request: ToolRequest, latest: Observation
+    ) -> _PreparedAction | tuple[str, str]:
+        """Validate one public request and build its sidecar operation."""
+        name = request.tool_name
+        arguments = request.arguments
+        radius = _int_or(latest.status.get("observe_radius"), self._settings.observe_radius)
+        common = {"radius": radius}
+
+        if name == "observe":
+            observe_radius = _observe_radius(arguments, self._settings.observe_radius)
+            if observe_radius is None:
+                return (
+                    "INVALID_ARGUMENT",
+                    f"radius must be an integer from {MIN_OBSERVE_RADIUS} to {MAX_OBSERVE_RADIUS}.",
+                )
+            return _PreparedAction(
+                {"op": name, "radius": observe_radius},
+                False,
+                "Visible nearby state refreshed.",
+            )
+
+        if name == "move_to":
+            position = _coordinate_arguments(arguments, extra_keys={"tolerance"})
+            tolerance = arguments.get("tolerance")
+            if position is None or isinstance(tolerance, bool) or tolerance not in {1, 2}:
+                return (
+                    "INVALID_ARGUMENT",
+                    "x, y, and z must be finite numbers; tolerance is 1 or 2.",
+                )
+            return _PreparedAction(
+                {
+                    "op": name,
+                    **position,
+                    "tolerance": tolerance,
+                    "settle_ticks": self._settings.settle_ticks,
+                    **common,
+                },
+                True,
+                "Movement completed within the requested tolerance.",
+            )
+
+        if name == "wait":
+            ticks = arguments.get("ticks")
+            if (
+                set(arguments) != {"ticks"}
+                or isinstance(ticks, bool)
+                or not isinstance(ticks, int)
+                or not 1 <= ticks <= 100
+            ):
+                return "INVALID_ARGUMENT", "ticks must be an integer from 1 to 100."
+            return _PreparedAction(
+                {"op": name, "ticks": ticks, **common},
+                False,
+                "The requested game ticks elapsed.",
+            )
+
+        if name == "place_object":
+            position = _coordinate_arguments(arguments, extra_keys={"held_item_id"})
+            held_id = arguments.get("held_item_id")
+            if position is None or not _nonempty_string(held_id):
+                return (
+                    "INVALID_ARGUMENT",
+                    "held_item_id and finite x, y, and z coordinates are required.",
+                )
+            held = _object_by_id(latest, held_id)
+            if held is None:
+                return "NO_VISIBLE_TARGET", "The held item ID is not in the latest observation."
+            if _object_kind(held) not in _INVENTORY_KINDS:
+                return "PRECONDITION_FAILED", "The selected object is not an inventory item."
+            return _PreparedAction(
+                {
+                    "op": name,
+                    "held_item": _target_payload(held),
+                    "position": position,
+                    "settle_ticks": self._settings.settle_ticks,
+                    **common,
+                },
+                True,
+                "The held item was placed at the adjacent position.",
+            )
+
+        allowed = {"object_id"}
+        if name == "collect_object":
+            allowed.add("count")
+        if name == "use_object":
+            allowed.add("held_item_id")
+        object_id = arguments.get("object_id")
+        if set(arguments) - allowed or not _nonempty_string(object_id):
+            return "INVALID_ARGUMENT", "A valid object_id and no unknown arguments are required."
+        if name in {"look_at", "inspect_object"} and set(arguments) != {"object_id"}:
+            return "INVALID_ARGUMENT", "object_id is the only accepted argument."
+
+        target = _object_by_id(latest, object_id)
+        if target is None:
+            return "NO_VISIBLE_TARGET", "The object ID is not in the latest observation."
+        message: dict[str, Any] = {"op": name, "target": _target_payload(target), **common}
+
+        if name == "look_at":
+            return _PreparedAction(message, True, "The player now faces the visible object.")
+        if name == "inspect_object":
+            message["settle_ticks"] = self._settings.settle_ticks
+            return _PreparedAction(message, False, "The visible object was inspected.")
+        if name == "collect_object":
+            count = arguments.get("count")
+            if (
+                set(arguments) != {"object_id", "count"}
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or not 1 <= count <= 8
+            ):
+                return "INVALID_ARGUMENT", "count must be an integer from 1 to 8."
+            if _object_kind(target) not in _COLLECTIBLE_KINDS:
+                return "PRECONDITION_FAILED", "The selected object is not collectible."
+            message.update(count=count, settle_ticks=self._settings.settle_ticks)
+            return _PreparedAction(message, True, "The requested item count was collected.")
+        if name == "use_object":
+            held_id = arguments.get("held_item_id")
+            if held_id is not None:
+                if not _nonempty_string(held_id):
+                    return "INVALID_ARGUMENT", "held_item_id must be a non-empty string."
+                held = _object_by_id(latest, held_id)
+                if held is None:
+                    return "NO_VISIBLE_TARGET", "The held item ID is not in the latest observation."
+                if _object_kind(held) not in _INVENTORY_KINDS:
+                    return (
+                        "PRECONDITION_FAILED",
+                        "The selected held object is not an inventory item.",
+                    )
+                message["held_item"] = _target_payload(held)
+            message["settle_ticks"] = self._settings.settle_ticks
+            return _PreparedAction(message, True, "The normal interaction control was used.")
+
+        raise AssertionError(f"Unhandled declared Minecraft tool: {name}")
 
     async def _exchange(self, message: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         """Send one request and read its reply, distinguishing the two timeouts."""
@@ -648,9 +918,7 @@ class MinecraftConnector:
         if scenario_id is None or episode_id is None:
             raise ConnectorError("reset must succeed before an observation is built.")
         player_raw = raw.get("player")
-        player_mapping: Mapping[str, object] = (
-            player_raw if isinstance(player_raw, Mapping) else {}
-        )
+        player_mapping: Mapping[str, object] = player_raw if isinstance(player_raw, Mapping) else {}
         status = _public_mapping(raw.get("status"), _PUBLIC_STATUS_KEYS)
         status["observe_radius"] = _int_or(raw.get("radius"), self._settings.observe_radius)
         terminal = raw.get("terminal") is True
@@ -805,6 +1073,50 @@ def _observe_radius(arguments: Mapping[str, Any], default: int) -> int | None:
     if not MIN_OBSERVE_RADIUS <= raw <= MAX_OBSERVE_RADIUS:
         return None
     return int(raw)
+
+
+def _coordinate_arguments(
+    arguments: Mapping[str, Any], *, extra_keys: set[str]
+) -> dict[str, float] | None:
+    """Return finite public coordinates only when the exact schema is present."""
+    if set(arguments) != {"x", "y", "z", *extra_keys}:
+        return None
+    coordinates: dict[str, float] = {}
+    for key in ("x", "y", "z"):
+        raw = arguments.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
+            return None
+        value = float(raw)
+        if not math.isfinite(value):
+            return None
+        coordinates[key] = value
+    return coordinates
+
+
+def _nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _object_by_id(observation: Observation, object_id: object) -> VisibleObject | None:
+    if not isinstance(object_id, str):
+        return None
+    return next(
+        (item for item in observation.visible_objects if item.object_id == object_id),
+        None,
+    )
+
+
+def _object_kind(item: VisibleObject) -> str | None:
+    kind = item.properties.get("kind")
+    return kind if isinstance(kind, str) else None
+
+
+def _target_payload(item: VisibleObject) -> dict[str, Any]:
+    """Send only ordinary public identity fields needed to find the target."""
+    payload: dict[str, Any] = {"label": item.label, "kind": _object_kind(item)}
+    if item.position is not None:
+        payload["position"] = item.position.model_dump()
+    return payload
 
 
 def _result_code(raw: object) -> str:

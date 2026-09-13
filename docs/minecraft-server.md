@@ -143,9 +143,10 @@ cd /home/nathan/noob-agent
 uv run pytest tests/test_connectors_minecraft.py -rs
 ```
 
-The verified 2026-09-12 run passed all 23 tests, including both live tests. A
-live test reported as skipped means the server or sidecar was unavailable; it
-is not equivalent to a passing integration check.
+The verified 2026-09-12 primitive-completion run passed all 47 tests, including
+repeatable live reset, live observe, and a live flow through all seven
+additional primitives. A live test reported as skipped means the server or
+sidecar was unavailable; it is not equivalent to a passing integration check.
 
 Useful independent checks are:
 
@@ -156,6 +157,31 @@ powershell.exe -NoProfile -Command \
 ```
 
 The PowerShell result must show `TcpTestSucceeded : True`.
+
+## Connector primitive surface
+
+Connector version `minecraft-0.2.0` exposes the complete frozen Minecraft
+surface: `observe`, `move_to`, `look_at`, `inspect_object`, `collect_object`,
+`use_object`, `place_object`, and `wait`.
+
+Object IDs are opaque and episode-local. An action may use an ID only from the
+latest confirmed observation; after every successful action, use the IDs in
+the returned observation rather than retaining older ones. Inspecting a nearby
+barrel or hopper adds its ordinary visible contents to that observation as
+`container_item` objects. Collected items appear as `inventory_item` objects,
+whose IDs can be supplied as `held_item_id` to `use_object` or `place_object`.
+
+`place_object` places a block item when the target block position has ordinary
+support. For non-block inventory items, it performs the normal drop control
+toward the supplied adjacent public position. This is the operation used to
+put a collected shard onto the Resonator basin; it does not issue a server
+command or read scenario-private state.
+
+The Python connector validates tool names, exact argument sets, numeric bounds,
+finite coordinates, latest-observation IDs, and collectible/inventory object
+preconditions before delivery. A rejected call is recorded but consumes no
+primitive action. Delivered interactions settle for five game ticks before
+the sidecar returns a fresh public snapshot.
 
 ## TLauncher troubleshooting
 
@@ -172,7 +198,11 @@ The PowerShell result must show `TcpTestSucceeded : True`.
 The resettable Resonator training data pack is implemented in
 `scenarios/minecraft/resonator-training-v1` and deployed under the world's
 `datapacks/noob_agent_resonator_v1` directory. Its executable two-run oracle
-passes, and the connector can reset and observe the room through Mineflayer.
+passes, and the connector can reset the room and execute all eight frozen
+Minecraft primitives through Mineflayer. The live acceptance flow walks to the
+supply barrel, inspects its public contents, collects shards, returns to the
+basin, places a shard, activates the nearby control, and waits for visible
+processing.
 
 This is still the training world, not a complete evaluation set. Separate
 validation, held-out-clean, and held-out-faulty snapshots with frozen seeds and

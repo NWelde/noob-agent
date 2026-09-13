@@ -419,6 +419,63 @@ async def test_place_object_resolves_a_public_inventory_item_id() -> None:
     assert sent["position"] == {"x": 0.5, "y": 101.0, "z": 0.5}
 
 
+async def test_use_object_can_select_an_optional_public_inventory_item() -> None:
+    inventory_snapshot = {
+        **SIDECAR_SNAPSHOT,
+        "visible_objects": [
+            *SIDECAR_SNAPSHOT["visible_objects"],
+            {
+                "label": "Slate Chip",
+                "position": None,
+                "distance": 0,
+                "properties": {"kind": "inventory_item", "count": 1},
+            },
+        ],
+    }
+    connector, transport = stubbed(observe_reply(inventory_snapshot), observe_reply())
+    observation = await connector.reset(SCENARIO_ID, SEED)
+    held = next(
+        item
+        for item in observation.visible_objects
+        if item.properties.get("kind") == "inventory_item"
+    )
+    target = next(item for item in observation.visible_objects if item.label == "Resonator")
+
+    result = await connector.step(
+        ToolRequest(
+            action_id="a_use_held",
+            tool_name="use_object",
+            arguments={"object_id": target.object_id, "held_item_id": held.object_id},
+        )
+    )
+
+    assert result.status == "succeeded"
+    sent = transport.sent[-1]
+    assert sent["target"] == {
+        "label": "Resonator",
+        "kind": "block",
+        "position": {"x": -2.0, "y": 100.0, "z": 2.0},
+    }
+    assert sent["held_item"] == {"label": "Slate Chip", "kind": "inventory_item"}
+
+
+async def test_success_uses_the_sidecars_confirmed_state_change_value() -> None:
+    reply = {**observe_reply(), "state_changed": False}
+    connector, _ = stubbed(observe_reply(), reply)
+    await connector.reset(SCENARIO_ID, SEED)
+
+    result = await connector.step(
+        ToolRequest(
+            action_id="a_already_there",
+            tool_name="move_to",
+            arguments={"x": 0.5, "y": 100, "z": -5.5, "tolerance": 1},
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert result.state_changed is False
+
+
 @pytest.mark.parametrize(
     ("tool_name", "arguments"),
     [
