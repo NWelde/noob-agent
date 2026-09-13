@@ -185,6 +185,33 @@ step 8a:
 
 Verify with `uv run pytest tests/test_connectors_doom.py -v`.
 
+## Watching the model's reasoning live from Weave
+
+`scripts/live_reasoning_view.py` (`hackathon_plan.md` §23, step 23b) serves a
+local page beside the game that shows the run's reasoning as it reaches Weave:
+each Action decision's subgoal, expected evidence, action, arguments, result,
+latency, and tokens; any provider reasoning; each Builder call's finish reason
+and code; episode outcomes; and a link from every entry to its Weave call. It
+reads Weave only, never SQLite, and never serves prompt or system text.
+
+Start it with the live demo (Weave tracing must be enabled):
+
+```sh
+NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
+  scripts/run_doom_learning_sequence.py --live-demo --live-view
+```
+
+The command prints `http://127.0.0.1:8765`. Open it next to the Doom window.
+The view stops 10 seconds after the run's final trace flush. To watch an
+existing or still-running sequence on its own:
+
+```sh
+uv run --env-file .env python scripts/live_reasoning_view.py --run-id <sequence-id>
+```
+
+In a live demo on 2026-09-13, each decision appeared in the view a median 2.0 s
+(p90 2.9 s) after the model replied.
+
 ## Watching a recorded episode
 
 `scripts/replay_doom_episode.py` (`hackathon_plan.md` §19, step 19b) replays a
