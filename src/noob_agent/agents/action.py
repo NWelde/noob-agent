@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -22,13 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from noob_agent.domain.findings import FindingReport, parse_finding_report
 from noob_agent.domain.model import ConnectorManifest, Observation, StepResult, ToolRequest
 from noob_agent.domain.skills import SkillVersion
-from noob_agent.models.client import ModelClient, ModelRequest, ToolCall, ToolSpec
-from noob_agent.prompts.action import (
-    ACTION_SYSTEM,
-    SKILL_RESULT_SHAPE,
-    HistoryEntry,
-    render_action_prompt,
-)
+from noob_agent.models.client import ModelClient, ModelRequest
+from noob_agent.prompts.action import ACTION_SYSTEM, HistoryEntry, render_action_prompt
 from noob_agent.skills.runtime import SkillInvocation, SkillRequest
 
 DEFAULT_HISTORY_LIMIT = 6
@@ -43,24 +38,6 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 DecisionKind = Literal["primitive", "skill", "unusable"]
 
 CAPPED_FINISH_REASON = "length"
-
-# Carried by every offered tool beside its own arguments, then removed before the
-# request is built, so the connector and skills only ever see their own arguments.
-_INTENT_PROPERTIES: dict[str, JsonValue] = {
-    "subgoal": {"type": "string", "description": "Your current subgoal."},
-    "expected_evidence": {
-        "type": "string",
-        "description": "The visible evidence you expect this action to produce.",
-    },
-    "finding": {
-        "type": "object",
-        "description": (
-            "Only when a visible result contradicts evidence established earlier in this "
-            "attempt, in the finding shape the instructions describe."
-        ),
-    },
-}
-_REQUIRED_INTENT = ["subgoal", "expected_evidence"]
 
 
 class ParsedDecision(BaseModel):
@@ -111,8 +88,12 @@ def _first_json_object(reply: str) -> dict[str, JsonValue] | None:
     return None
 
 
-def parse_decision(reply: str) -> ParsedDecision:
-    """Read one decision out of a reply, fenced or bare; unusable when absent."""
+def parse_decision(reply: str, *, skill_names: frozenset[str] = frozenset()) -> ParsedDecision:
+    """Read one decision out of a reply, fenced or bare; unusable when absent.
+
+    The structured reply names its choice under `action`, which is a skill when
+    it names an offered skill. The earlier `tool` and `skill` shapes still parse.
+    """
     parsed = _first_json_object(reply)
     if parsed is None:
         return ParsedDecision(kind="unusable")
@@ -123,6 +104,17 @@ def parse_decision(reply: str) -> ParsedDecision:
     stated_evidence = expected if isinstance(expected, str) else ""
     finding = parse_finding_report(parsed.get("finding"))
 
+    action = parsed.get("action")
+    if isinstance(action, str) and action:
+        arguments = parsed.get("arguments")
+        return ParsedDecision(
+            kind="skill" if action in skill_names else "primitive",
+            name=action,
+            arguments=arguments if isinstance(arguments, dict) else {},
+            subgoal=stated_subgoal,
+            expected_evidence=stated_evidence,
+            finding=finding,
+        )
     skill = parsed.get("skill")
     if isinstance(skill, str) and skill:
         inputs = parsed.get("inputs")
@@ -153,74 +145,28 @@ def parse_decision(reply: str) -> ParsedDecision:
     )
 
 
-def parse_tool_call(call: ToolCall, *, skill_names: frozenset[str]) -> ParsedDecision:
-    """Read one decision out of a native tool call; unusable unless its arguments are an object."""
-    if not call.name:
-        return ParsedDecision(kind="unusable")
-    try:
-        loaded: object = json.loads(call.arguments or "{}")
-    except json.JSONDecodeError:
-        return ParsedDecision(kind="unusable")
-    if not isinstance(loaded, dict):
-        return ParsedDecision(kind="unusable")
-    arguments: dict[str, JsonValue] = {str(key): value for key, value in loaded.items()}
-    subgoal = arguments.pop("subgoal", "")
-    expected = arguments.pop("expected_evidence", "")
-    finding = parse_finding_report(arguments.pop("finding", None))
-    return ParsedDecision(
-        kind="skill" if call.name in skill_names else "primitive",
-        name=call.name,
-        arguments=arguments,
-        subgoal=subgoal if isinstance(subgoal, str) else "",
-        expected_evidence=expected if isinstance(expected, str) else "",
-        finding=finding,
-    )
-
-
-def _tool_parameters(schema: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    """A tool's own argument schema with the intent fields added and required."""
-    own = schema.get("properties")
-    properties: dict[str, JsonValue] = dict(own) if isinstance(own, dict) else {}
-    properties.update(_INTENT_PROPERTIES)
-    own_required = schema.get("required")
-    required: list[JsonValue] = list(own_required) if isinstance(own_required, list) else []
-    parameters: dict[str, JsonValue] = {
-        "type": "object",
-        "properties": properties,
-        "required": [*required, *_REQUIRED_INTENT],
-    }
-    if schema.get("additionalProperties") is False:
-        parameters["additionalProperties"] = False
-    return parameters
-
-
-def offered_tools(
+def decision_schema(
     manifest: ConnectorManifest, skills: Sequence[SkillVersion]
-) -> tuple[ToolSpec, ...]:
-    """Every primitive, then every skill whose name no primitive already uses."""
-    specs = [
-        ToolSpec(
-            name=tool.name,
-            description=tool.description,
-            parameters=_tool_parameters(tool.argument_schema),
-        )
-        for tool in manifest.tools
-    ]
-    taken = {tool.name for tool in manifest.tools}
-    for skill in skills:
-        if skill.name in taken:
-            continue
-        metadata = skill.package.metadata
-        purpose = metadata.get("purpose", "")
-        input_schema = metadata.get("input_schema", {})
-        specs.append(
-            ToolSpec(
-                name=skill.name,
-                description=f"Learned skill. {purpose} {SKILL_RESULT_SHAPE}".strip(),
-                parameters=_tool_parameters(input_schema if isinstance(input_schema, dict) else {}),
-            )
-        )
-    return tuple(specs)
+) -> dict[str, JsonValue]:
+    """The strict JSON Schema of one decision: only offered names, and every field present.
+
+    Argument shapes differ per action, so `arguments` is any object here; the
+    prompt lists each action's arguments, and the connector or skill checks them.
+    """
+    names: list[JsonValue] = [tool.name for tool in manifest.tools]
+    names.extend(skill.name for skill in skills if skill.name not in names)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["subgoal", "expected_evidence", "action", "arguments", "finding"],
+        "properties": {
+            "subgoal": {"type": "string"},
+            "expected_evidence": {"type": "string"},
+            "action": {"type": "string", "enum": names},
+            "arguments": {"type": "object"},
+            "finding": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+        },
+    }
 
 
 class ActionAgent:
@@ -250,7 +196,7 @@ class ActionAgent:
         self._history_limit = history_limit
         self._max_output_tokens = max_output_tokens
         self._thinking = thinking
-        self._tools = offered_tools(manifest, self._skills)
+        self._schema = decision_schema(manifest, self._skills)
         self._skill_names = frozenset(skill.name for skill in self._skills)
         self._history: list[HistoryEntry] = []
         self._decisions: list[Decision] = []
@@ -295,17 +241,13 @@ class ActionAgent:
                 prompt=prompt,
                 max_output_tokens=self._max_output_tokens,
                 thinking=self._thinking,
-                tools=self._tools,
+                response_schema=self._schema,
             )
         )
         self._input_tokens += response.input_tokens
         self._output_tokens += response.output_tokens
 
-        parsed = (
-            parse_decision(response.text)
-            if response.tool_call is None
-            else parse_tool_call(response.tool_call, skill_names=self._skill_names)
-        )
+        parsed = parse_decision(response.text, skill_names=self._skill_names)
         self._issued += 1
         action_id = f"a_{self._issued:04d}"
 
