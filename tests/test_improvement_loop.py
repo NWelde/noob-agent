@@ -273,23 +273,76 @@ async def test_held_out_runs_only_after_the_last_builder_call(store: EpisodeStor
     assert heldout and min(heldout) > last_builder
 
 
-async def test_a_refinement_that_does_not_improve_is_rejected_and_the_loop_stops(
-    store: EpisodeStore,
-) -> None:
-    worse = _candidate(
-        LOOK_SOURCE.replace("Looked at the post.", "Looked again."), tools=["observe"]
-    )
+def _look_variant(label: str) -> str:
+    return _candidate(LOOK_SOURCE.replace("Looked at the post.", label), tools=["observe"])
+
+
+async def test_one_round_without_improvement_does_not_stop_the_loop(store: EpisodeStore) -> None:
     registry = SkillRegistry()
 
-    result = await _run(_loop(store, Provider(LOOK, worse), registry=registry))
+    result = await _run(
+        _loop(store, Provider(LOOK, _look_variant("Looked again."), USE), registry=registry)
+    )
 
-    assert [r.decision for r in result.rounds] == ["incumbent", "not_improved"]
-    assert result.stop_reason == "no_improvement"
+    assert [r.decision for r in result.rounds] == ["incumbent", "not_improved", "kept"]
+    assert result.stop_reason == "perfect_practice"
     statuses = {v.version: v.status for v in registry.versions(SKILL)}
-    assert statuses[1] == "accepted" and statuses[2] == "rejected"
+    assert statuses == {1: "retired", 2: "rejected", 3: "accepted"}
+    # The next refinement after a rejection still starts from the incumbent.
+    assert registry.get(SKILL, 3).parent_version == 1
     rejected = registry.get(SKILL, 2)
     assert "did not improve practice score" in rejected.status_reason
+
+
+async def test_two_rounds_in_a_row_without_improvement_stop_the_loop(store: EpisodeStore) -> None:
+    provider = Provider(LOOK, _look_variant("Looked again."), _look_variant("Looked once more."))
+
+    result = await _run(_loop(store, provider))
+
+    assert [r.decision for r in result.rounds] == ["incumbent", "not_improved", "not_improved"]
+    assert result.stop_reason == "no_improvement"
     assert result.final_version is not None and result.final_version.version == 1
+
+
+async def test_a_failed_validation_counts_as_a_round_without_improvement(
+    store: EpisodeStore,
+) -> None:
+    provider = Provider(LOOK, "No code this time.", _look_variant("Looked again."))
+
+    result = await _run(_loop(store, provider))
+
+    assert [r.decision for r in result.rounds] == ["incumbent", "not_validated", "not_improved"]
+    assert result.stop_reason == "no_improvement"
+
+
+async def test_a_kept_version_resets_the_patience_count(store: EpisodeStore) -> None:
+    provider = Provider(
+        LOOK,
+        _look_variant("Looked again."),
+        USE,
+        _candidate(USE_SOURCE.replace("Used the post.", "Used it."), tools=["use_object"]),
+        _candidate(USE_SOURCE.replace("Used the post.", "Used it once."), tools=["use_object"]),
+    )
+
+    result = await _run(
+        _loop(store, provider, finishing_seeds=frozenset({PRACTICE[0].seed}), max_rounds=5)
+    )
+
+    assert [r.decision for r in result.rounds] == [
+        "incumbent",
+        "not_improved",
+        "kept",
+        "not_improved",
+        "not_improved",
+    ]
+    assert result.stop_reason == "no_improvement"
+
+
+async def test_refinement_calls_are_recorded_with_the_refine_purpose(store: EpisodeStore) -> None:
+    await _run(_loop(store, Provider(LOOK, USE)))
+
+    purposes = [call.purpose for call in store.read_model_calls() if call.purpose != "action"]
+    assert purposes == ["build", "refine"]
 
 
 async def test_the_loop_stops_after_its_maximum_rounds(store: EpisodeStore) -> None:
