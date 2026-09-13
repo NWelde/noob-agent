@@ -19,6 +19,7 @@ from noob_agent.models.client import (
 )
 from noob_agent.prompts.builder import render_builder_prompt, render_repair_prompt
 from noob_agent.skills import SkillRegistry, SkillValidationIssue
+from noob_agent.skills.executor import LocalSubprocessSkillExecutor
 from noob_agent.storage import EpisodeStore
 
 AUTHORED_AT = datetime(2026, 9, 12, 18, 0, 0, tzinfo=UTC)
@@ -31,6 +32,8 @@ from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
     """Record one fresh public observation without changing the environment."""
+    if inputs:
+        return SkillResult(status="failed", summary="Unexpected input.", primitive_actions_used=0)
     observation = await context.observe()
     return SkillResult(
         status="inconclusive",
@@ -135,10 +138,16 @@ async def build(
     *,
     max_repairs: int = 1,
 ) -> object:
-    agent = BuilderAgent(client, registry, max_repairs=max_repairs)
+    agent = BuilderAgent(
+        client,
+        registry,
+        executor=LocalSubprocessSkillExecutor(),
+        max_repairs=max_repairs,
+    )
     evidence = select_evidence(store.read_episode(episode_id))
     return await agent.build(
         evidence,
+        training_trace=store.read_episode(episode_id),
         primitive_names=PRIMITIVE_NAMES,
         authoring_model_id="fake-model-a",
         created_at=AUTHORED_AT,
@@ -158,6 +167,8 @@ async def test_accepts_a_valid_candidate(
     assert outcome.version is not None
     assert outcome.version.version == 1
     assert outcome.version.status == "accepted"
+    assert outcome.validation is not None
+    assert outcome.validation.repeatability_runs == 3
     assert registry.accepted_skill(SKILL_NAME) == outcome.version
     assert outcome.version.authoring_episode_id == episode.episode_id
 
@@ -176,6 +187,48 @@ async def test_records_the_candidate_even_when_validation_rejects_it(
     assert "os" in recorded.status_reason
     assert outcome.accepted is False
     assert registry.accepted_skill(SKILL_NAME) is None
+
+
+async def test_runtime_contract_failure_is_rejected_before_acceptance(
+    stored_episode: EpisodeStore, registry: SkillRegistry, episode: EpisodeRecord
+) -> None:
+    source = """from noob_agent.skills.contract import SkillContext, SkillResult
+
+
+async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
+    await context.attack(target="nearest")
+    return SkillResult(status="failed", summary="Done.", primitive_actions_used=0)
+"""
+    client = ScriptedModelClient(candidate(source))
+
+    outcome = await build(client, registry, stored_episode, episode.episode_id, max_repairs=0)
+
+    assert outcome.accepted is False
+    assert registry.get(SKILL_NAME, 1).status == "rejected"
+    assert "SKILL_RAISED" in registry.get(SKILL_NAME, 1).status_reason
+    assert registry.available_skills() == ()
+
+
+async def test_runtime_failure_evidence_is_returned_to_the_bounded_repair(
+    stored_episode: EpisodeStore, registry: SkillRegistry, episode: EpisodeRecord
+) -> None:
+    source = """from noob_agent.skills.contract import SkillContext, SkillResult
+
+
+async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
+    await context.attack(target="nearest")
+    return SkillResult(status="failed", summary="Done.", primitive_actions_used=0)
+"""
+    client = ScriptedModelClient(candidate(source), candidate(VALID_SOURCE))
+
+    outcome = await build(client, registry, stored_episode, episode.episode_id, max_repairs=1)
+
+    assert outcome.accepted is True
+    repair = client.requests[1].prompt
+    assert '"fixture": "training_replay"' in repair
+    assert '"public_inputs": {}' in repair
+    assert "SKILL_RAISED" in repair
+    assert "attack" in repair
 
 
 async def test_a_repair_keeps_its_parent_and_leaves_the_rejection_intact(
