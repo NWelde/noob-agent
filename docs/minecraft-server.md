@@ -209,3 +209,80 @@ validation, held-out-clean, and held-out-faulty snapshots with frozen seeds and
 build fingerprints remain required before a real campaign. Follow
 [`minecraft_scenario.md`](../minecraft_scenario.md) for the fixed mechanic,
 private predicates, reset requirements, and leakage constraints.
+
+## Live learning-loop smoke run
+
+To inspect the real Minecraft loop and its Weave trace together, start the
+local server, install the sidecar dependencies, and run:
+
+```sh
+NOOB_AGENT_SANDBOX_MODE=local \
+  uv run --env-file .env python scripts/run_minecraft_live_smoke.py --live-smoke
+```
+
+The command refuses to start unless `NOOB_AGENT_TRACE_MODE=weave` and
+`WEAVE_DISABLED=false` are configured. It writes to a fresh Git-ignored
+`.noob-agent/<run-id>.sqlite3` database and prints its Weave run prefix.
+It has a fixed 10-minute deadline, 2,000,000-token limit, 500 model-call limit,
+1,000 delivered primitive actions across the run, five Builder repairs, and a
+3,000-token Action cap. Each rapid cycle gives cold exploration at most 12
+decisions, 24 primitives, and 90 seconds. It ends sooner after two stale-target
+failures or five actions with no visible state change, then immediately gives
+the bounded public trace to the Builder before same-room skill reuse.
+
+This is a real-server diagnostic, not a Minecraft evaluation: it resets only
+the training room for both the cold and accepted-skill reuse attempts. Do not
+put its records in a comparison, report, or held-out result set.
+
+## Easy-mode live diagnostic (non-benchmark)
+
+Before asking a model to discover the Resonator mechanic, check that it can
+do something trivial in first person: press the clearly visible nearby button
+so the iron bars open. This controls for task difficulty and isolates basic
+perception, action selection, JSON compliance, and connector execution. It is
+a local diagnostic only; its records are not evaluation, held-out,
+clean/faulty, grading, learning-transfer, or model-performance evidence.
+
+Install the separate data pack once (vanilla rejects symlinks), then reload
+from the server console:
+
+```sh
+cp -r scenarios/minecraft/easy-button-gate-v1 \
+  /home/nathan/.local/share/noob-agent/minecraft-server/noob-agent-training/datapacks/noob_agent_easy_button_gate_v1
+tmux send-keys -t noob-agent-minecraft 'reload' Enter
+```
+
+`reload` also runs the Resonator pack's load function, which resets that room
+and teleports online players into it. The easy pack has no load function.
+
+Run the diagnostic:
+
+```sh
+NOOB_AGENT_SANDBOX_MODE=local \
+  uv run --env-file .env python scripts/run_minecraft_easy_live_smoke.py --live-easy-smoke
+```
+
+- Scenario `easy-button-gate-v1` resets with `function noob_agent_easy:reset`
+  in a room at `x=24..34`, away from the Resonator room. Every reset gives
+  players infinite Night Vision (plus Saturation and Resistance) and starts
+  them facing the gateway with the labelled `Gate Button` in reach.
+- The public goal states the task directly. The harness ends the episode when
+  the room's public message `The iron-bar gateway opens.` appears. The frozen
+  manifest, primitives, connector behavior, and Resonator goal are unchanged.
+- It runs one cold episode, one Builder pass, and a same-room reuse only if a
+  skill is accepted. There is no wall-clock deadline. Action calls may use
+  32,000 output tokens and Builder calls 100,000, with five repairs. Finite
+  guards remain only against runaway loops: 500 decisions and 1,000 primitives
+  per episode, 2,000 model calls and 50,000,000 tokens per run, and the
+  runner's standard stop after three identical failed calls.
+- Every Action and Builder system prompt, prompt, reasoning, reply, and
+  provider error is mirrored to Minecraft chat through the same `[noob:...]`
+  transcript as the Resonator smoke run, and is excluded from observations.
+- Press `Ctrl-C` to stop. The open episode is recorded as `unknown_result`,
+  Weave is flushed, and the summary reports status `interrupted`.
+- The terminal summary names the scenario, run status, stop reason, decisions,
+  primitives, model calls, tokens, accepted skill, and the Git-ignored
+  `.noob-agent/non-benchmark-minecraft-easy-<timestamp>.sqlite3` database.
+
+To remove it, delete the world's `datapacks/noob_agent_easy_button_gate_v1`
+directory, run `reload`, then `forceload remove 24 -4 34 4`.
