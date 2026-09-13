@@ -12,9 +12,9 @@ Builder discussion, validation fixtures, grader state, or clean/faulty identity.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from noob_agent.domain.model import Observation, ToolDefinition
 from noob_agent.domain.skills import SkillVersion
@@ -28,20 +28,18 @@ _ROLE = (
     "the action to produce, so that a repeated guess is visible as one."
 )
 
-_REPLY_FORMAT = """Call exactly one of the offered tools. Every call carries "subgoal" and
-"expected_evidence" beside the tool's own arguments. Use a tool or skill exactly as
-listed. Do not invent controls.
+_REPLY_FORMAT = """Reply with exactly one JSON object and nothing else:
 
-If you cannot call a tool, reply with exactly one JSON object and nothing else, in
-one of these two shapes:
+{"subgoal": "...", "expected_evidence": "...", "action": "<primitive or skill name>",
+ "arguments": {...}, "finding": null}
 
-{"subgoal": "...", "expected_evidence": "...", "tool": "<primitive name>", "arguments": {...}}
-
-{"subgoal": "...", "expected_evidence": "...", "skill": "<skill name>", "inputs": {...}}
+"subgoal" is your current subgoal and "expected_evidence" the visible evidence you
+expect the action to produce. "action" is one primitive or learned skill exactly as
+listed, and "arguments" holds that action's arguments. Do not invent controls.
 
 If a visible result contradicts evidence you established earlier in this attempt,
-add a "finding" object to the same call or reply, describing expected and observed
-behavior separately, with counts and references to public records from this attempt:
+replace null with a "finding" object describing expected and observed behavior
+separately, with counts and references to public records from this attempt:
 
 "finding": {"expected_behavior": "...", "expected_basis": "...", "actual_behavior": "...",
             "expected_count": <int>, "actual_count": <int>,
@@ -71,6 +69,27 @@ class HistoryEntry(BaseModel):
     outcome: str = Field(min_length=1)
 
 
+def _argument_hint(schema: Mapping[str, JsonValue]) -> str:
+    """A compact signature, such as `degrees: integer 1-90, ticks?: integer`."""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return ""
+    required = schema.get("required")
+    needed = set(required) if isinstance(required, list) else set()
+    parts = []
+    for name, spec in properties.items():
+        hint = f"{name}{'' if name in needed else '?'}"
+        if isinstance(spec, dict):
+            kind = spec.get("type")
+            if isinstance(kind, str):
+                hint += f": {kind}"
+            low, high = spec.get("minimum"), spec.get("maximum")
+            if low is not None and high is not None:
+                hint += f" {low}-{high}"
+        parts.append(hint)
+    return ", ".join(parts)
+
+
 def _render_tools(tools: Sequence[ToolDefinition]) -> str:
     lines = []
     for tool in tools:
@@ -78,8 +97,8 @@ def _render_tools(tools: Sequence[ToolDefinition]) -> str:
             f" Preconditions: {'; '.join(tool.preconditions)}" if tool.preconditions else ""
         )
         lines.append(
-            f"- {tool.name}: {tool.description} Arguments: "
-            f"{json.dumps(tool.argument_schema, sort_keys=True)}.{preconditions}"
+            f"- {tool.name}({_argument_hint(tool.argument_schema)}): "
+            f"{tool.description}{preconditions}"
         )
     return "\n".join(lines)
 
@@ -120,7 +139,8 @@ def render_action_prompt(
     history: Sequence[HistoryEntry],
 ) -> str:
     """Render one decision's prompt from public information only."""
-    snapshot = observation.model_dump(mode="json")
+    # The goal is already the prompt's first line.
+    snapshot = observation.model_dump(mode="json", exclude={"public_goal"})
     return f"""Task: {public_goal}
 
 Primitive tools:
