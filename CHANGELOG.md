@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 17:21 PDT | [ADDED] | Added the best-effort Weave trace mirror for recorded episodes: the runner mirrors an episode, each durable step, and the final outcome as one nested call tree, only after SQLite has committed the record, only when `TraceSettings.enabled` is true, and never in a way that a failing or mismatched trace backend can change or end an episode.
+
 2026-09-12 16:53 PDT | [ADDED] | Added the immutable skill version registry: the registry assigns each candidate its version and content hash, enforces the `proposed` -> `validating` -> `accepted`/`rejected` and `accepted` -> `retired` transitions, keeps a repair's parent version, and exposes only the single accepted version as an available skill.
 
 2026-09-12 16:26 PDT | [DOCUMENTED] | Removed the isolated-scaffolding-only default permission from CLAUDE.md; core-loop work now proceeds under the Mandatory Change Gate and protected-area rules alone.
