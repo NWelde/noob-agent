@@ -136,6 +136,7 @@ class EpisodeRunner:
         skills: SkillRuntime | None = None,
         close_connector: bool = True,
         on_episode_started: Callable[[str], None] | None = None,
+        flush_trace: bool = True,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -151,6 +152,9 @@ class EpisodeRunner:
         # Told the episode ID once the episode row exists, for callers that must
         # attribute work to it while other episodes of the experiment are open.
         self._on_episode_started = on_episode_started
+        # A Weave client's flush blocks the event loop until in-flight calls finish,
+        # so a caller running episodes concurrently flushes once they have all ended.
+        self._flush_trace = flush_trace
 
     def _mirror(self, event: TraceEvent) -> None:
         """Mirror one event that the store has already made durable.
@@ -361,8 +365,9 @@ class EpisodeRunner:
         )
         self._store.finalize_episode(outcome)
         self._mirror(episode_finished_event(outcome))
-        with suppress(Exception):
-            self._trace.flush()
+        if self._flush_trace:
+            with suppress(Exception):
+                self._trace.flush()
         if cancellation is not None:
             raise cancellation
         return EpisodeResult(
