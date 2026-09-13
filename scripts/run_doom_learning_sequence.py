@@ -230,6 +230,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                 trace=trace,
                 action_max_output_tokens=settings.model.action_max_output_tokens,
                 builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                action_thinking=settings.model.action_thinking,
                 condition=_condition_for(args),
                 keep_training_connector_open_during_builder=args.live_demo,
             )
