@@ -113,7 +113,7 @@ class EpisodeOutcome(DurableRecord):
     finished_at: datetime
 
 
-ModelCallPurpose = Literal["action", "build", "repair"]
+ModelCallPurpose = Literal["action", "build", "repair", "refine"]
 
 
 class ModelCallRecord(DurableRecord):
