@@ -282,6 +282,7 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
     meta: dict[str, Any] = {"run_id": run_id, "model_id": model_id, "pairs": []}
     try:
         with EpisodeStore.open(capture_dir / f"{run_id}.sqlite3") as store:
+            best: tuple[int, Any, Any, dict[str, Any]] | None = None
             for attempt in range(1, args.max_attempts + 1):
                 print(
                     f"{run_id}: learning attempt {attempt} of {args.max_attempts} "
@@ -339,11 +340,20 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
                 }
                 meta.setdefault("attempts", []).append(meta["learning"])
                 print(json.dumps(meta["learning"]), file=sys.stderr, flush=True)
+                if version is not None and (best is None or heldout_goals > best[0]):
+                    best = (heldout_goals, version, registry, meta["learning"])
                 if version is not None and heldout_goals >= args.min_heldout_goals:
                     break
-            if version is None or heldout_goals < args.min_heldout_goals:
-                print("No attempt met the skill threshold; rerun to try again.", file=sys.stderr)
+            if best is None:
+                print("No attempt accepted a skill; rerun to try again.", file=sys.stderr)
                 return None
+            heldout_goals, version, registry, meta["learning"] = best
+            if heldout_goals < args.min_heldout_goals:
+                print(
+                    "No attempt met the threshold; filming the best attempt.",
+                    file=sys.stderr,
+                    flush=True,
+                )
             for cell in demo_cells:
                 common = {
                     "cell": cell,
@@ -517,8 +527,8 @@ def render(capture_dir: Path, output: Path | None = None) -> Path:
                 f"Learning loop: {learning['seconds']} s, {learning['tokens']:,} tokens, "
                 f"{learning['calls']} model calls -> {learning['skill']} "
                 f"(learning attempt {learning.get('attempt', 1)} of "
-                f"{learning.get('max_attempts', 1)}, kept the first reaching "
-                f"{learning.get('min_heldout_goals', 0)} held-out goals)",
+                f"{learning.get('max_attempts', 1)}; target "
+                f"{learning.get('min_heldout_goals', 0)} held-out goals, else best attempt)",
                 canvas.small,
             ),
             (
