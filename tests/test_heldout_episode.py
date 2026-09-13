@@ -279,7 +279,7 @@ async def test_reset_clears_the_model_conversation(
     )
     await runner.run(experiment=experiment(), scenario_id=LAYOUT_A, seed=11)
     second_prompt_of_first_episode = client.requests[1].prompt
-    assert LAYOUT_A in second_prompt_of_first_episode
+    assert "ep_layout_a" in second_prompt_of_first_episode
     assert "a_0001" in second_prompt_of_first_episode
 
     second = ScriptedConnector(
@@ -296,6 +296,7 @@ async def test_reset_clears_the_model_conversation(
     await runner.run(experiment=experiment(), scenario_id=LAYOUT_B, seed=12)
 
     fresh_prompt = client.requests[2].prompt
+    assert "ep_layout_b" in fresh_prompt
     assert LAYOUT_B in fresh_prompt
     assert LAYOUT_A not in fresh_prompt
     assert "ep_layout_a" not in fresh_prompt
