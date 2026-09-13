@@ -4,6 +4,27 @@
 
 2026-09-12 17:13 PDT | [DOCUMENTED] | Approved the core-loop milestone for build-order steps 1-3 (Minecraft connector reset/action, cold episode recording, hand-written skill validation and registry), tracked as issues #13-#15.
 
+2026-09-13 00:12 UTC | [FIXED] | Static skill policy scanning now rejects aliased forbidden builtins like `open` and `__import__`.
+2026-09-13 00:10 UTC | [FIXED] | Tightened static skill import policy to reject private member imports from allowlisted modules (for example, `from dataclasses import _create_fn`).
+
+2026-09-12 17:02 PDT | [ADDED] | Added the resettable vanilla Minecraft Resonator training scenario, exact public feedback, and executable two-run oracle.
+
+2026-09-12 16:53 PDT | [ADDED] | Added the immutable skill version registry: the registry assigns each candidate its version and content hash, enforces the `proposed` -> `validating` -> `accepted`/`rejected` and `accepted` -> `retired` transitions, keeps a repair's parent version, and exposes only the single accepted version as an available skill.
+
+2026-09-12 16:47 PDT | [ADDED] | Added the non-executing validation boundary for generated skill packages: typed `noob-agent.skill.v1` metadata, package size/name/schema checks, and an AST-based static policy check rejecting forbidden imports and constructs.
+
+2026-09-12 16:26 PDT | [DOCUMENTED] | Removed the isolated-scaffolding-only default permission from CLAUDE.md; core-loop work now proceeds under the Mandatory Change Gate and protected-area rules alone.
+
+2026-09-12 16:14 PDT | [FIXED] | Closed the SQLite episode store's remaining validation gaps: `create_experiment` and `finalize_episode` now re-validate before writing, steps can no longer be appended after an episode is finalized, `read_episode` wraps a corrupted row as a `StorageError` instead of leaking `ValidationError`, and non-uniqueness integrity failures are no longer misclassified as duplicates.
+
+2026-09-12 16:07 PDT | [ADDED] | Added the public GameConnector protocol and a deterministic bounded cold-episode runner that records every step through the SQLite store and always ends with a recorded stop reason, including when a connector returns a result the harness cannot durably record.
+
+2026-09-12 15:55 PDT | [ADDED] | Added durable local records and a SQLite episode store as the local source of truth, with explicit transactions and duplicate-identity rejection.
+
+2026-09-12 15:23 PDT | [ADDED] | Added isolated fake-connector scaffolding with a deterministic scripted transcript and a standalone contract validator.
+
+2026-09-12 15:16 PDT | [ADDED] | Defined immutable public connector data models and contract validation tests.
+
 2026-09-12 14:40 PDT | [ADDED] | Added offline W&B, Weave, and CoreWeave Sandbox configuration seams with disabled local adapters.
 
 2026-09-12 14:35 PDT | [DOCUMENTED] | Added the TypeSafe headline model strategy, W&B Inference baseline and fallback, and operational go/no-go gate.
