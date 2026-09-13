@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 22:14 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 18 after diagnosing the failed live Doom sequence, where reasoning tokens exhaust the output cap and leave empty or cut-off replies: persisted and traced Model call records with finish reason, reasoning text, and unknown-usage handling under schema version 3; per-role maximum output token settings of 1,024 for Action and 6,000 for Builder, validated against the protocol token ceilings; and a second recorded live run, split into three reversible pull requests.
+
 2026-09-12 22:10 PDT | [DOCUMENTED] | Recorded the first live Doom learning sequence with W&B Inference `deepseek-ai/DeepSeek-V4-Flash-0731` and the labeled local-subprocess executor: cold training hit its decision limit with 13 of 20 unusable Action replies and no kill, the Builder's reply was unusable at its 2,048-token cap, and held-out episodes were skipped because no skill was accepted.
 
 2026-09-12 22:10 PDT | [ADDED] | Added the game-neutral `LearningSequence` for build-order step 8c, which runs one cold training episode under the frozen training budgets, one Builder run on that episode's public evidence, and fresh-connector held-out episodes with the accepted skill, grading each after it ends. Added `scripts/run_doom_learning_sequence.py`, which refuses to run with a disabled model provider, model ID, or sandbox mode.
