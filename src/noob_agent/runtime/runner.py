@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -134,6 +135,7 @@ class EpisodeRunner:
         trace: TraceSink | None = None,
         skills: SkillRuntime | None = None,
         close_connector: bool = True,
+        on_episode_started: Callable[[str], None] | None = None,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -146,6 +148,9 @@ class EpisodeRunner:
         self._skills = skills
         # An explicit external owner may retain a display between phases.
         self._close_connector = close_connector
+        # Told the episode ID once the episode row exists, for callers that must
+        # attribute work to it while other episodes of the experiment are open.
+        self._on_episode_started = on_episode_started
 
     def _mirror(self, event: TraceEvent) -> None:
         """Mirror one event that the store has already made durable.
@@ -215,6 +220,8 @@ class EpisodeRunner:
             started_at=started_at,
         )
         self._store.create_episode(episode)
+        if self._on_episode_started is not None:
+            self._on_episode_started(episode_id)
         self._mirror(episode_started_event(episode))
 
         decisions_used = 0
