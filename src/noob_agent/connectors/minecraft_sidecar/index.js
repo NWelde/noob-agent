@@ -14,6 +14,8 @@ const PUBLIC_BLOCKS = new Set([
   "iron_bars",
   "lodestone",
   "stone_button",
+  "redstone_lamp",
+  "redstone_block",
 ]);
 
 let bot = null;
@@ -154,6 +156,7 @@ function nearbyPublicBlocks(radius) {
             facing: block.getProperties().facing ?? null,
             open: block.getProperties().open ?? null,
             powered: block.getProperties().powered ?? null,
+            lit: block.getProperties().lit ?? null,
             enabled: block.getProperties().enabled ?? null,
           },
         });
