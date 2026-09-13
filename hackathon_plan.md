@@ -2875,6 +2875,185 @@ grader, validation rule, held-out scenario, or seed. Each needs its own approval
 Each step reverts alone. Reverting 24b restores the one-round stop and `basic-v2`;
 `basic-v3` becomes unused.
 
+## 25. Proposed core-loop milestone: a live smoke harness that runs the real loop
+
+**Status: proposed, not approved.** The requester asked on 2026-09-13 for a plan
+section to improve the harness after a live Doom smoke test. No step below may
+begin until the requester approves this section. Several steps touch protected
+components (the episode runner, its stop-reason record, and tracing), so the
+approval must be explicit.
+
+### Evidence
+
+On 2026-09-13, four live Doom smoke runs used the uncommitted Minecraft smoke
+runner `scripts/run_minecraft_live_smoke.py`. They ran from the main checkout's
+`feature/doom-token-budget-summary` working tree, where only the connector,
+scenario, and run labels were swapped. The model was
+`deepseek-ai/DeepSeek-V4-Flash-0731` through W&B Inference. The databases are
+Git-ignored at `.noob-agent/doom-live-smoke-20260913T181412Z`,
+`…T181656Z`, `…T181808Z`, and `…T182334Z`.
+
+- **The smoke harness did not run the loop on `main`.** That working tree is
+  based on `e81e756`, which predates sections 22-24. The smoke runs therefore
+  had thinking on, free-text replies, no Builder API reference, and no repair
+  cap. No summary, log, or Weave record showed this. It was found only by
+  comparing the plan with `git log`. The same-day Minecraft smoke runs used the
+  same tree.
+- **Its failures are ones `main` already fixed.**
+  - With a 3,000-token Action cap, 3 of 5 cold decisions ended at the cap with
+    no reply. An 8,000 cap still cut one off, and a 32,000 cap produced a
+    146-second, 32,000-token decision with no reply.
+  - Every Builder build (3 of 3) ended at its 6,000-token cap as
+    `unusable_reply`.
+  - With a 64,000 cap, a first build did finish (23,851 tokens). It was rejected
+    for six `getattr` calls. Its repair then looped in its reasoning ("Need maybe
+    'dead' in 'dead' returns false. Good.") until it hit 64,000 tokens with no
+    code. That was about 55% of that run's tokens at the time.
+  - On `main`'s own benches (`loop-bench-24a`, `-24b`, `-24b-r2`, `-24c`), 0 of
+    51 Builder calls ended at their cap and no repair cited `getattr`. The 24c
+    bench had 0 of 268 unusable Action replies.
+- **The only live smoke runner supports one game and is off `main`.** It exists
+  only as uncommitted work that is Minecraft-specific. Its cold, Builder, and
+  reuse cycle is hand-built rather than using `LearningSequence`, so it cannot
+  pick up loop changes.
+- **"State changed" missed a miss loop.** In one cold Doom episode the agent
+  attacked 7 times without aiming. The Cacodemon stayed at `screen_offset` 20
+  and ammunition stayed at 48, yet every step reported `state_changed=True`
+  from the bullet-puff effect, so the five-unchanged-actions stop never fired.
+- **Wall-time cycle limits count model latency, not play.** Doom Action
+  latency ranged from 1.5 to 146 seconds per decision, so a 90-second cycle
+  allowed 5 decisions in one run and 10 in another.
+- **Loop health is invisible in Weave.** Unusable-reply rate, Builder calls at
+  cap, Builder stop reason, and rejection checks exist only in
+  `loop_scorecard.py`'s JSON and Markdown files, after the run. The live
+  demo's Weave trace does not show them.
+
+### What this approves (once approved)
+
+- Recording loop provenance (commit, dirty tree, and loop settings) for every
+  bench and smoke run (step 25a).
+- One game-agnostic live smoke runner built on `LearningSequence` for Doom and
+  Minecraft. It replaces the uncommitted Minecraft-only runner. It adds an
+  opt-in public stop hook in the episode runner, a `no_progress` stop reason,
+  and a decision-counted cycle budget (step 25b).
+- Emitting the loop scorecard to Weave through the existing trace sink
+  (step 25c).
+
+It does not approve changing prompts, Builder or Action caps, thinking settings,
+validation rules, the connector contract, observations, the private grader,
+`eval_protocol.md`, held-out scenarios or seeds, dependencies, CI, or the
+database schema. It also does not approve raising limits above those recorded in
+`main` to pass a smoke run. The limits used in the 2026-09-13 exploratory runs,
+up to 64,000 Builder tokens, are evidence only.
+
+### Invariants
+
+- **A smoke run is never evaluation evidence.** Its summary and every Weave
+  record are labeled `non-benchmark`, and nothing reads a smoke database into a
+  comparison or report.
+- **The stop hook uses public signals only.** No private outcome, grade, or
+  hidden state reaches the stop decision, the Action agent, or the Builder.
+  Private Doom outcomes may appear only in the harness's terminal summary.
+- **Ordinary policies are unchanged.** The stop hook is opt-in, and bench and
+  learning-sequence commands never enable it.
+
+### Step 25a - Loop provenance
+
+- Files: new `src/noob_agent/observability/provenance.py`,
+  `scripts/loop_bench.py`, new `tests/test_provenance.py`,
+  `tests/test_loop_bench.py`, `CHANGELOG.md`.
+- `provenance.py` returns the commit, a dirty-tree flag, and the loop settings
+  in effect: role thinking, Action and Builder caps, repair cap, and reply mode.
+- `loop_bench.py run` writes provenance into the scorecard JSON and Markdown,
+  and records it on the run's Weave root call.
+- A run from a dirty tree is labeled `dirty` in both places. No run is refused.
+- Tests first: provenance on a clean and a dirty temporary repository; settings
+  values match `IntegrationSettings`; the scorecard carries provenance; a
+  missing Git binary yields `unknown` rather than an error.
+- Validation: focused tests, then the full test, Ruff, and strict mypy suites.
+- Acceptance: a 1-sequence bench scorecard names its commit and settings.
+
+### Step 25b - One live smoke runner for both games
+
+- Files: new `scripts/run_live_smoke.py`, new `tests/test_live_smoke.py`,
+  `src/noob_agent/runtime/runner.py` (opt-in stop hook),
+  `src/noob_agent/domain/records.py` (`no_progress` stop reason),
+  `tests/test_episode_runner.py`, `docs/doom-env.md`,
+  `docs/minecraft-server.md`, `CHANGELOG.md`.
+- `uv run --env-file .env python scripts/run_live_smoke.py --game doom|minecraft
+  --live-smoke` repeats fresh cycles. Each cycle is a cold training episode, then
+  a Builder build with validation, then a reuse episode when a skill is accepted.
+  It uses the same agents, settings, and validation as `loop_bench.py`, taken
+  from `LearningSequence` rather than a hand-built copy. Minecraft reuse is
+  reset to the training room and labeled a smoke attempt. Doom reuse uses a
+  training-split practice seed from the manifest, never a held-out cell.
+- Run-wide limits: a 600-second deadline, 2,000,000 tokens, 500 calls, and
+  1,000 primitives. Each cycle's cold episode gets 12 decisions and 24
+  primitives, with a 600-second wall-time safety bound. Tracing is required.
+  Provenance from step 25a is printed at start and included in the terminal
+  summary.
+- **Public stop hook.** `EpisodeRunner` accepts a policy that exposes a stop
+  reason, as the uncommitted runner change already does. The smoke policy stops
+  after 2 consecutive `NO_VISIBLE_TARGET` results (`repeated_failure`). It also
+  stops after 5 consecutive actions (`no_progress`) whose public status values
+  and visible objects (label and properties) match the previous observation.
+  An effect-only object such as a newly appearing bullet puff does not count as
+  progress. No step reports `state_changed` as progress on its own.
+- The Minecraft chat mirror stays Minecraft-only and is skipped for Doom.
+- The uncommitted `scripts/run_minecraft_live_smoke.py`, its test, and its
+  section 22 draft on `feature/doom-token-budget-summary` are superseded. That
+  work is not deleted or edited by this step, and the requester decides whether
+  to discard it.
+- Tests first, with fake connectors and a scripted provider:
+  - both games run a cycle through the shared loop components;
+  - the miss-loop trace from the evidence stops as `no_progress` after 5
+    decisions;
+  - a changing `screen_offset` does not stop;
+  - a bullet-puff-only change does not reset the count;
+  - the hook is off in `EpisodeRunner`'s default;
+  - disabled tracing is refused;
+  - no private field reaches the policy or the Builder.
+- Validation: focused tests, the full suites, then one live Doom smoke run and,
+  with the local server up, one live Minecraft smoke run.
+- Acceptance, Doom live smoke:
+  - unusable Action replies below 5%;
+  - 0 Builder calls ending at their cap;
+  - at least one accepted skill used in a reuse episode;
+  - provenance shows a clean tree at the PR commit.
+
+  Minecraft live smoke: reported as observed, with the section 24c token result
+  alongside.
+
+### Step 25c - Loop scorecard in Weave
+
+- Files: `src/noob_agent/observability/loop_scorecard.py`,
+  `src/noob_agent/observability/tracing.py`, `scripts/loop_bench.py`,
+  `scripts/run_live_smoke.py`, `tests/test_loop_scorecard.py`,
+  `tests/test_trace_flush.py`, `CHANGELOG.md`.
+- `RunScore` gains a JSON-safe trace payload. At the end of every bench run and
+  every smoke cycle, the payload is recorded as a `loop_scorecard` trace event
+  through the existing `TraceSink`. It carries unusable replies, Action calls at
+  cap, Action p50 and p90 latency, Builder calls by purpose, Builder calls at
+  cap, the Builder stop reason, the top three rejection checks, skill accepted,
+  tokens, and provenance. No new dependency is added.
+- Tests first: the payload round-trips through a fake Weave client; it contains
+  no private grade or hidden field; a failing sink never changes the run
+  result; the null sink records nothing.
+- Acceptance: the Weave run for the step 25b Doom smoke shows one scorecard per
+  cycle next to its episode calls.
+
+### Order and pull requests
+
+25a, then 25b, then 25c, one pull request each, stacked. Each pull request
+reports its initial test failure and live results.
+
+### Rollback
+
+Each step reverts alone. Reverting 25a removes provenance fields. Reverting 25b
+removes the new runner and the opt-in hook; no stored `no_progress` row exists
+outside Git-ignored smoke databases. Reverting 25c removes the scorecard trace
+event. None changes the database schema.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
