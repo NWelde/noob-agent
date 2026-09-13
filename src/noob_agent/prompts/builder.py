@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from typing import get_args
 
 from noob_agent.agents.evidence import TraceEvidence
+from noob_agent.skills.contract import EvidenceKind, SkillStatusClaim
 from noob_agent.skills.errors import SkillValidationIssue
 from noob_agent.skills.metadata import API_VERSION
 
@@ -24,7 +26,39 @@ BUILDER_SYSTEM = (
     "scenario, or the rules by which your skill is accepted."
 )
 
-_REPLY_FORMAT = f"""Reply with exactly two fenced blocks and nothing that contradicts them.
+
+def _quoted(values: tuple[str, ...]) -> str:
+    return ", ".join(f'"{value}"' for value in values)
+
+
+# A live repair once spent its entire output cap guessing this API, so the
+# prompt states the complete contract rather than leaving it to inference.
+_CONTRACT = f"""The skill contract is the only API; no other methods or fields exist.
+
+- `observation = await context.observe()` returns the latest public snapshot.
+  Read `observation.visible_objects` (each has `object_id`, `label`, `position`
+  with `x`, `y`, `z` or `None`, `distance`, and `properties`),
+  `observation.messages` (each has `text`), `observation.sequence`, and
+  `observation.terminal`. Object IDs are valid only in the latest observation.
+- `result = await context.call("<primitive name>", **arguments)` performs one
+  listed primitive with the argument names shown in the recorded steps, for
+  example `await context.call("use_object", object_id=button.object_id)`.
+  It returns `result.status` ({_quoted(("succeeded", "rejected", "failed", "unknown"))}),
+  `result.code`, `result.message`, `result.action_id`, and the fresh
+  `result.observation`. There is no `context.use_object` or similar shortcut.
+- `context.remaining_budget()` returns `primitive_actions` and
+  `wall_time_seconds`; `context.log("event", {{"field": "value"}})` records a
+  public event.
+- Return `SkillResult(status=..., summary="...", evidence=(EvidenceRef(kind=...,
+  value="..."),), outputs={{}}, primitive_actions_used=<number of calls made>)`.
+  `status` is one of {_quoted(get_args(SkillStatusClaim))}. `kind` is one of
+  {_quoted(get_args(EvidenceKind))}, and `value` is a non-empty string such as
+  an action ID, observation sequence, object ID, or message text. A
+  "succeeded" result must cite at least one `EvidenceRef`."""
+
+_REPLY_FORMAT = f"""{_CONTRACT}
+
+Reply with exactly two fenced blocks and nothing that contradicts them.
 
 First, the skill source:
 
