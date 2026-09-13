@@ -147,6 +147,7 @@ class BuilderAgent:
         repair_max_output_tokens: int = DEFAULT_REPAIR_MAX_OUTPUT_TOKENS,
         learning_token_budget: int | None = None,
         learning_call_budget: int | None = None,
+        validation_concurrency: int = 1,
     ) -> None:
         if max_repairs < 0:
             raise ValueError("max_repairs cannot be negative.")
@@ -159,6 +160,7 @@ class BuilderAgent:
         self._repair_max_output_tokens = repair_max_output_tokens
         self._learning_token_budget = learning_token_budget
         self._learning_call_budget = learning_call_budget
+        self._validation_concurrency = validation_concurrency
 
     def _over_budget(self, request: ModelRequest, *, spent_tokens: int, spent_calls: int) -> bool:
         """Whether this call could push the sequence past its learning budget.
@@ -299,6 +301,7 @@ class BuilderAgent:
                     known_primitive_names=names,
                     training_trace=training_trace,
                     executor=self._executor,
+                    concurrency=self._validation_concurrency,
                 )
             except SkillValidationError as error:
                 issues = tuple(error.issues)

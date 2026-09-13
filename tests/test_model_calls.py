@@ -683,7 +683,8 @@ def test_the_weave_mirror_nests_action_calls_under_their_episode() -> None:
 
     sink.record(started)
     sink.record(model_call_event(_record()))
-    sink.flush()
+    # Ending the episode's trace is `close`; `flush` only delivers (section 22.E).
+    sink.close()
     sink.record(model_call_event(_record(call_id="mc_0002", purpose="build", action_id=None)))
 
     assert weave.calls == [

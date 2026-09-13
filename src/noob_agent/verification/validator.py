@@ -8,9 +8,10 @@ public data, and creates one deterministic object-ID variation locally.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Collection
-from typing import Literal, cast
+from collections.abc import Awaitable, Collection
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -214,13 +215,20 @@ async def validate_candidate(
     known_primitive_names: Collection[str],
     training_trace: StoredEpisode,
     executor: SkillExecutor,
+    concurrency: int = 1,
 ) -> SkillValidationReport:
     """Run every mandatory validation stage and return public pass evidence.
 
     A failure raises ``SkillValidationError`` with only candidate-owned data and
-    public fixture evidence.  Validation stops at the first failing stage so a
+    public fixture evidence.  Validation reports the first failing stage so a
     bounded repair gets one concrete hypothesis to address.
+
+    With `concurrency` above 1, every execution starts up front, at most that
+    many at a time, and the checks are then applied in the same stage order, so
+    the verdict and the first reported failure never depend on concurrency.
     """
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1.")
     package = validate_skill_package(
         source, metadata_json, known_primitive_names=known_primitive_names
     )
@@ -248,22 +256,14 @@ async def validate_candidate(
     responses = training_trace.steps
     inputs = _fixture_inputs(metadata, training_trace)
 
-    base_runs = [
-        await _run(
-            source,
-            metadata,
-            executor,
-            observation=training_trace.episode.reset_observation,
-            responses=responses,
-            manifest_tools=manifest_tools,
-            inputs=inputs,
-        )
-        for _ in range(3)
-    ]
-    _require_completed(base_runs[0], check="load", fixture="training_replay", inputs=inputs)
-    _require_contract(base_runs[0], fixture="training_replay", inputs=inputs)
-    _require_replay(base_runs[0], inputs=inputs)
-    _require_repeatable(base_runs, fixture="training_replay", inputs=inputs)
+    gate = asyncio.Semaphore(concurrency)
+
+    async def bounded(**options: Any) -> _Run:
+        async with gate:
+            return await _run(source, metadata, executor, manifest_tools=manifest_tools, **options)
+
+    def three(**options: Any) -> list[Awaitable[_Run]]:
+        return [bounded(**options) for _ in range(3)]
 
     negative_specs: tuple[
         tuple[
@@ -317,41 +317,50 @@ async def validate_candidate(
             False,
         ),
     )
-    for fixture, observation, case_inputs, forced, limit, targets_missing in negative_specs:
-        runs = [
-            await _run(
-                source,
-                metadata,
-                executor,
+    variation_observation, variation_responses, variation_inputs, ids = _variation(
+        training_trace.episode.reset_observation, responses, inputs
+    )
+    # Three phases, each run concurrently and checked in stage order; a failing
+    # phase stops validation before the next one spends any executions.
+    base_runs = await asyncio.gather(
+        *three(
+            observation=training_trace.episode.reset_observation,
+            responses=responses,
+            inputs=inputs,
+        )
+    )
+    _require_completed(base_runs[0], check="load", fixture="training_replay", inputs=inputs)
+    _require_contract(base_runs[0], fixture="training_replay", inputs=inputs)
+    _require_replay(base_runs[0], inputs=inputs)
+    _require_repeatable(base_runs, fixture="training_replay", inputs=inputs)
+
+    negative_runs = await asyncio.gather(
+        *(
+            run
+            for _, observation, case_inputs, forced, limit, targets_missing in negative_specs
+            for run in three(
                 observation=observation,
                 responses=responses,
-                manifest_tools=manifest_tools,
                 inputs=case_inputs,
                 forced_status=forced,
                 primitive_limit=limit,
                 targets_missing=targets_missing,
             )
-            for _ in range(3)
-        ]
-        _require_completed(runs[0], check="negative_case", fixture=fixture, inputs=case_inputs)
-        _require_negative(runs[0], fixture=fixture, inputs=case_inputs)
-        _require_repeatable(runs, fixture=fixture, inputs=case_inputs)
-
-    variation_observation, variation_responses, variation_inputs, ids = _variation(
-        training_trace.episode.reset_observation, responses, inputs
+        )
     )
-    variation_runs = [
-        await _run(
-            source,
-            metadata,
-            executor,
+    for index, (fixture, _, case_inputs, _, _, _) in enumerate(negative_specs):
+        case_runs = negative_runs[3 * index : 3 * index + 3]
+        _require_completed(case_runs[0], check="negative_case", fixture=fixture, inputs=case_inputs)
+        _require_negative(case_runs[0], fixture=fixture, inputs=case_inputs)
+        _require_repeatable(case_runs, fixture=fixture, inputs=case_inputs)
+
+    variation_runs = await asyncio.gather(
+        *three(
             observation=variation_observation,
             responses=variation_responses,
-            manifest_tools=manifest_tools,
             inputs=variation_inputs,
         )
-        for _ in range(3)
-    ]
+    )
     _require_completed(
         variation_runs[0],
         check="validation_variation",

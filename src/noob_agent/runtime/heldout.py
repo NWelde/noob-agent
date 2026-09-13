@@ -13,6 +13,7 @@ asking for more is refused before the world is touched.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -108,6 +109,8 @@ class HeldOutRunner:
         action_max_output_tokens: int | None = None,
         action_thinking: bool | None = None,
         close_connector: bool = True,
+        on_episode_started: Callable[[str], None] | None = None,
+        flush_trace: bool = True,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -120,6 +123,8 @@ class HeldOutRunner:
         self._action_max_output_tokens = action_max_output_tokens
         self._action_thinking = action_thinking
         self._close_connector = close_connector
+        self._on_episode_started = on_episode_started
+        self._flush_trace = flush_trace
 
     async def run(
         self, *, experiment: ExperimentRecord, scenario_id: str, seed: int
@@ -154,6 +159,8 @@ class HeldOutRunner:
             trace=self._trace,
             skills=runtime,
             close_connector=self._close_connector,
+            on_episode_started=self._on_episode_started,
+            flush_trace=self._flush_trace,
         )
         episode = await runner.run(
             experiment=experiment, scenario_id=scenario_id, seed=seed, split="held-out"

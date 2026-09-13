@@ -35,7 +35,7 @@ from noob_agent.observability.loop_scorecard import (
     score_run,
     score_sequence,
 )
-from noob_agent.observability.tracing import NullTraceSink, TraceSink, build_trace_sink
+from noob_agent.observability.tracing import NullTraceSink, TraceSink, build_trace_sink, close_trace
 from noob_agent.runtime.sequence import HeldOutCell, LearningSequence, LearningSequenceResult
 from noob_agent.settings import IntegrationSettings
 from noob_agent.skills.executor import SkillExecutor, build_skill_executor
@@ -45,6 +45,7 @@ from noob_agent.storage import EpisodeStore
 DEFAULT_MANIFEST = Path("scenarios/doom/basic-v1/manifest.json")
 DEFAULT_OUTPUT_DIR = Path(".noob-agent/loop-bench")
 BENCH_CONDITION = "loop-bench"
+DEFAULT_HELDOUT_CONCURRENCY = 6
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     run.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     run.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     run.add_argument("--run-id", default=None)
+    run.add_argument(
+        "--heldout-concurrency",
+        type=int,
+        default=DEFAULT_HELDOUT_CONCURRENCY,
+        help="Held-out cells played at once (1 plays them one after another).",
+    )
 
     score = commands.add_parser("score", help="Score an existing database, read-only.")
     score.add_argument("--database", type=Path, required=True)
@@ -76,6 +83,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parsed = parser.parse_args(argv)
     if parsed.command == "run" and parsed.sequences < 1:
         parser.error("--sequences must be at least 1")
+    if parsed.command == "run" and parsed.heldout_concurrency < 1:
+        parser.error("--heldout-concurrency must be at least 1")
     return parsed
 
 
@@ -182,6 +191,7 @@ def _run(
                     action_thinking=settings.model.action_thinking,
                     builder_thinking=settings.model.builder_thinking,
                     condition=BENCH_CONDITION,
+                    heldout_concurrency=args.heldout_concurrency,
                 )
                 try:
                     result = asyncio.run(
@@ -202,7 +212,7 @@ def _run(
                 outcomes[sequence_id] = _outcome(result)
     finally:
         with suppress(Exception):
-            trace.flush()
+            close_trace(trace)
 
     records = load_sequences(database)
     score = score_run(

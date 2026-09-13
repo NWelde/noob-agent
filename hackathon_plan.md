@@ -2577,6 +2577,19 @@ never worked around by changing budgets, seeds, or grading.
   concurrent validation reports the same first failure as sequential
   validation for every existing rejection fixture.
 - Acceptance: single-pass sequence wall time at most 4 minutes in the bench.
+- **Implementation details (2026-09-13).**
+  - Validation runs in three concurrent phases (training replay, the five
+    negative cases, the variation) so a failing phase still stops validation
+    before the next one starts.
+  - The Weave sink nests calls per episode ID. `flush()` only delivers, and a new
+    `close()` ends any open episode calls at run exit.
+  - The first live run deadlocked. A Weave client's `flush()` blocks the event
+    loop until in-flight traced calls finish, and those were other episodes'
+    model calls awaiting replies. Concurrent cells therefore skip the
+    per-episode flush, and the sequence flushes once after all cells end.
+  - The file list also includes `observability/tracing.py`,
+    `runtime/runner.py`, `runtime/heldout.py`, `agents/builder.py`,
+    `tests/test_trace_flush.py`, and `tests/test_model_calls.py`.
 
 ### Step 22.D - Multi-round improvement loop
 
