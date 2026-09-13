@@ -232,7 +232,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                 builder_max_output_tokens=settings.model.builder_max_output_tokens,
                 action_thinking=settings.model.action_thinking,
                 condition=_condition_for(args),
-                keep_training_connector_open_during_builder=args.live_demo,
+                persistent_connector=args.live_demo,
             )
             run = sequence.run(
                 sequence_id=sequence_id,
