@@ -115,7 +115,8 @@ Any included scenario works. Three were verified:
 | `defend_the_center.cfg` | `DoomPlayer`, `MarineChainsawVzd` | Stationary; turning and firing |
 
 `deadly_corridor.cfg` gives the richest label set to summarize into an
-observation. The current connector freezes `basic.cfg` as its default scenario.
+observation. The connector freezes `basic.cfg` as the base of its declared
+scenarios; see Connector below.
 
 ## Troubleshooting
 
@@ -131,7 +132,38 @@ observation. The current connector freezes `basic.cfg` as its default scenario.
 
 `src/noob_agent/connectors/doom.py` implements the ten declared Doom BDP
 primitives against the included `basic.cfg` scenario. It uses the one-tick,
-signed delta behavior above for turns; emits only HUD health/ammunition, player
-angle, and visible object labels; and is exercised by
-`uv run pytest tests/test_connectors_doom.py -v`. ViZDoom is now a declared
-runtime dependency because the connector imports it when a game starts.
+signed delta behavior above for turns and emits only HUD health/ammunition,
+player angle, and visible object labels. ViZDoom is a declared runtime
+dependency because the connector imports it when a game starts.
+
+Connector version `doom-vizdoom-v2` implements `hackathon_plan.md` section 17,
+step 8a:
+
+- **Declared scenarios.** `doom-basic-training`, `doom-basic-heldout-a`, and
+  `doom-basic-heldout-b`. Any other scenario ID fails reset. The seed places the
+  target. During reset, before observation zero, every scenario spends 12 ticks
+  on its starting offset (no movement for training, a strafe left for
+  `heldout-a`, a strafe right for `heldout-b`) and then 35 idle ticks. Doom's
+  friction keeps a strafing player sliding for a long time. The idle ticks don't
+  stop that, but they make each reset exactly repeatable for a fixed scenario
+  and seed.
+- **Seeds.** Committed in `scenarios/doom/basic-v1/manifest.json`: one
+  training seed and three for each held-out scenario, all distinct, and every
+  one shows the target at observation zero. Agent-facing code never reads this
+  file.
+- **Aiming signal.** Each visible object has `properties.screen_offset`, an
+  integer from -100 (left edge of the screen) to 100 (right edge), where 0 is
+  the center. Turning right lowers a target's offset. The player's own
+  `DoomPlayer` label is not listed.
+- **Public goal.** "Eliminate the hostile target in this area. Use visible
+  results as evidence. Finish within the action budget."
+- **Private outcome.** `DoomConnector.private_outcome()` returns the kill
+  count, player death, timeout, and whether the episode finished. The values
+  freeze when the episode ends and stay readable after `close()`. It is not
+  part of `GameConnector`, and none of these values, nor the seed, appears in an
+  observation, a step result, a message, or `episode_id`. `terminal_reason` is
+  `episode_finished` for every ending.
+- **Rejected requests.** A rejected request advances the public sequence, like
+  any other durable result, and charges no primitive.
+
+Verify with `uv run pytest tests/test_connectors_doom.py -v`.

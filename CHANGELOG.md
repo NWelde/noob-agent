@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+2026-09-12 21:46 PDT | [FIXED] | A rejected Doom request now advances the public sequence like any other durable result, so the episode runner records it as a step instead of ending the episode on a sequence mismatch.
+
+2026-09-12 21:46 PDT | [ADDED] | Added Doom connector `doom-vizdoom-v2` for build-order step 8a: declared training and held-out `basic.cfg` scenarios with repeatable reset-time starting offsets, precommitted seeds in `scenarios/doom/basic-v1/manifest.json`, the public target-elimination goal, a bounded `screen_offset` aiming property on visible objects without the player's own label, seed-free episode IDs, and a harness-only private outcome for kills, death, and timeout.
+
 2026-09-12 21:36 PDT | [DOCUMENTED] | Proposed the core-loop milestone for build-order step 8 in `hackathon_plan.md` section 17: Doom connector `doom-vizdoom-v2` with declared training and held-out scenario variations, a public target-elimination goal, a screen-offset aiming property, and a harness-only private outcome; an independent Doom grader; and a game-neutral single learning sequence with a live Doom run, split into three reversible pull requests.
 
 2026-09-12 21:29 PDT | [DOCUMENTED] | Proposed the core-loop milestone for live Minecraft clean/faulty grading in `hackathon_plan.md` section 16: an evaluation data pack with validation and matched held-out builds, private build selection and predicate reads over a localhost-only RCON channel that bypasses the unchanged public connector, a clean-twin replay, and a live end-to-end verification and reproduction check, split into three reversible pull requests.
