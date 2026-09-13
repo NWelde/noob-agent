@@ -8,7 +8,9 @@ is not by default.
 
 The mirror is shaped as a nested call tree: one episode call with one child call
 per recorded step, which is what makes an attempt readable as a single trace
-rather than a flat event log.
+rather than a flat event log. A model call made while an episode is open, which
+is every Action call, nests under that episode; a Builder call has no open
+episode and is mirrored as its own top-level call.
 """
 
 from __future__ import annotations
@@ -20,16 +22,18 @@ from typing import Protocol, cast
 
 from pydantic import BaseModel, JsonValue
 
-from noob_agent.domain.records import EpisodeOutcome, EpisodeRecord, StepRecord
+from noob_agent.domain.records import EpisodeOutcome, EpisodeRecord, ModelCallRecord, StepRecord
 from noob_agent.settings import TraceSettings, WandbSettings
 
 EPISODE_STARTED = "episode.started"
 EPISODE_STEP = "episode.step"
 EPISODE_FINISHED = "episode.finished"
+MODEL_CALL = "model.call"
 
 # The names the mirrored calls carry in the remote trace tree.
 EPISODE_OP_NAME = "noob_agent.episode"
 STEP_OP_NAME = "noob_agent.step"
+MODEL_CALL_OP_NAME = "noob_agent.model_call"
 
 
 class TraceEvent(BaseModel):
@@ -120,6 +124,11 @@ def episode_finished_event(outcome: EpisodeOutcome) -> TraceEvent:
     )
 
 
+def model_call_event(record: ModelCallRecord) -> TraceEvent:
+    """Describe one model call record that is already durable in the local store."""
+    return TraceEvent(name=MODEL_CALL, attributes=record.model_dump(mode="json"))
+
+
 class WeaveClient(Protocol):
     """The small part of a Weave client this mirror uses.
 
@@ -164,6 +173,11 @@ class WeaveTraceSink:
                 # A recorded step is already complete, so its call opens and
                 # closes together, nested under the episode.
                 call = self._client.create_call(STEP_OP_NAME, event.attributes, self._episode_call)
+                self._client.finish_call(call, event.attributes)
+            elif event.name == MODEL_CALL:
+                call = self._client.create_call(
+                    MODEL_CALL_OP_NAME, event.attributes, self._episode_call
+                )
                 self._client.finish_call(call, event.attributes)
             elif event.name == EPISODE_FINISHED:
                 self._finish_episode(event.attributes)
