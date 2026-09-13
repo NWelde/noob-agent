@@ -82,39 +82,29 @@ from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult
 
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
-    """Press the visible switch until its light property turns on."""
-    if inputs:
-        return SkillResult(status="failed", summary="This skill takes no inputs.",
-                           primitive_actions_used=0)
+    """Press the visible switch until its light property reads on."""
     used = 0
+    if inputs:
+        return SkillResult(status="failed", summary="Takes no inputs.",
+                           primitive_actions_used=used)
     observation = await context.observe()
-    for _ in range(4):
+    while context.remaining_budget().primitive_actions > 0:
         switches = [o for o in observation.visible_objects if o.label == "switch"]
         if not switches:
-            return SkillResult(status="failed", summary="No switch is visible.",
+            return SkillResult(status="failed", summary="No switch visible.",
                                primitive_actions_used=used)
-        switch = switches[0]
-        if switch.properties.get("light") == "on":
-            return SkillResult(
-                status="succeeded",
-                summary="The switch light is on.",
-                evidence=(EvidenceRef(kind="observation_sequence",
-                                      value=str(observation.sequence)),
-                          EvidenceRef(kind="object_id", value=switch.object_id)),
-                primitive_actions_used=used,
-            )
-        if context.remaining_budget().primitive_actions < 1:
-            break
-        result = await context.call("press_switch", object_id=switch.object_id)
+        if switches[0].properties.get("light") == "on":
+            proof = (EvidenceRef(kind="observation_sequence", value=str(observation.sequence)),)
+            return SkillResult(status="succeeded", summary="Light is on.", evidence=proof,
+                               primitive_actions_used=used)
+        result = await context.call("press_switch", object_id=switches[0].object_id)
         used += result.primitive_actions_charged
-        if result.status == "unknown":
-            return SkillResult(status="inconclusive", summary=result.code,
-                               primitive_actions_used=used)
         if result.status != "succeeded":
-            return SkillResult(status="failed", summary=result.code,
+            status = "inconclusive" if result.status == "unknown" else "failed"
+            return SkillResult(status=status, summary=result.code,
                                primitive_actions_used=used)
         observation = result.observation
-    return SkillResult(status="failed", summary="The light did not turn on.",
+    return SkillResult(status="failed", summary="Budget spent; light still off.",
                        primitive_actions_used=used)
 '''
 
@@ -251,14 +241,13 @@ Name the capability that was missing and write one skill that supplies it.
 {_REPLY_FORMAT}"""
 
 
-def render_repair_prompt(*, previous_source: str, issues: Iterable[SkillValidationIssue]) -> str:
-    """Ask for one repair, given only the public validation errors.
+MAX_REPAIR_ISSUES = 3
+MAX_ISSUE_EVIDENCE_CHARS = 300
 
-    The rejected candidate receives its own failing checks and nothing else: no
-    private grader predicate and no held-out data ever reaches a repair.
-    """
+
+def _issue_lines(issues: Iterable[SkillValidationIssue]) -> list[str]:
     listed = []
-    for issue in issues:
+    for issue in list(issues)[:MAX_REPAIR_ISSUES]:
         line = f"- [{issue.check}/{issue.code}] {issue.message}"
         evidence = {
             key: value
@@ -271,11 +260,41 @@ def render_repair_prompt(*, previous_source: str, issues: Iterable[SkillValidati
             if value is not None
         }
         if evidence:
-            line += f"\n  Public failure evidence: {json.dumps(evidence, sort_keys=True)}"
+            text = json.dumps(evidence, sort_keys=True, default=str)
+            if len(text) > MAX_ISSUE_EVIDENCE_CHARS:
+                text = text[: MAX_ISSUE_EVIDENCE_CHARS - 3] + "..."
+            line += f"\n  Public failure evidence: {text}"
         listed.append(line)
+    return listed
+
+
+def render_repair_prompt(
+    *,
+    previous_source: str,
+    issues: Iterable[SkillValidationIssue],
+    evidence: TraceEvidence | None = None,
+    primitive_names: Iterable[str] = (),
+    tools: Sequence[ToolDefinition] = (),
+    skill_name: str | None = None,
+) -> str:
+    """Ask for one repair, given only public validation errors and public evidence.
+
+    The rejected candidate receives its own failing checks, the primitive
+    definitions, and the same bounded public trace the build saw, and nothing
+    else: no private grader predicate and no held-out data ever reaches a
+    repair. The source and failing checks are always included; the primitive
+    definitions and then the trace are added only while the whole prompt, with
+    the system prompt, stays within `PROMPT_TOKEN_LIMIT`.
+    """
+    listed = _issue_lines(issues)
     if not listed:
         raise ValueError("A repair prompt needs at least one validation issue.")
-    return f"""Your candidate was rejected by automated validation.
+    keep_name = (
+        f"Keep the skill name `{skill_name}` in the metadata; a repair may not rename it.\n\n"
+        if skill_name
+        else ""
+    )
+    required = f"""Your candidate was rejected by automated validation.
 
 Failing checks:
 
@@ -289,5 +308,22 @@ The rejected source was:
 
 Fix exactly these problems and return the whole skill again. Do not work around a
 check, and do not change what the skill claims to do in order to pass.
-
+{keep_name}
 {_REPLY_FORMAT}"""
+    optional: list[str] = []
+    names = tuple(primitive_names)
+    if tools or names:
+        optional.append(f"Primitive tools:\n{_render_tools(tools, names)}")
+    if evidence is not None:
+        optional.append(
+            f"Public state at the start: {_render_observation(evidence.reset_observation)}\n\n"
+            "What happened in the attempt the skill was written from, with the public state "
+            f"after each action:\n\n{_render_steps(evidence)}"
+        )
+    budget = PROMPT_TOKEN_LIMIT - estimated_tokens(BUILDER_SYSTEM)
+    context: list[str] = []
+    for section in optional:
+        candidate = "\n\n".join([*context, section, required])
+        if estimated_tokens(candidate) <= budget:
+            context.append(section)
+    return "\n\n".join([*context, required])
