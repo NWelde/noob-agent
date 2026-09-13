@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 17:58 PDT | [ADDED] | Added the Builder agent that turns a bounded selection of public trace evidence into one skill candidate: the candidate is recorded in the registry as `proposed` before validation runs, a rejection produces a repair carrying its parent version, the repair budget is finite, and repairs receive only the public validation errors. Added the provider-neutral model client, disabled by default, with a lazily imported W&B Inference adapter.
+
 2026-09-12 17:55 PDT | [DOCUMENTED] | Approved the core-loop milestone for build-order steps 4-6 in `hackathon_plan.md` section 14, covering the Builder-generated candidate, held-out reset and skill reuse, and the clean/faulty pair with independent reproduction, plus the narrow skill-runtime milestone that permits executing a generated candidate only through the sandbox seam.
 
 2026-09-12 17:36 PDT | [ADDED] | Added the Minecraft reset/observe connector and pinned Mineflayer JSON Lines sidecar for the dedicated 1.21.1 training server.
