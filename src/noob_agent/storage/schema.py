@@ -10,11 +10,13 @@ recorded episodes are untouched.
 
 Version 3 adds the model_call table, one row per model request. It is additive
 in the same way: a version-2 database gains the table and keeps every row.
+
+Version 4 adds a compact, harness-only learning-sequence summary.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -127,6 +129,24 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         latency_ms        INTEGER NOT NULL,
         error             TEXT,
         started_at        TEXT    NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sequence_summary (
+        sequence_id               TEXT PRIMARY KEY,
+        run_kind                  TEXT NOT NULL,
+        training_episode_id       TEXT NOT NULL REFERENCES episode (episode_id),
+        training_goal_completed   INTEGER NOT NULL,
+        builder_stop_reason       TEXT NOT NULL,
+        builder_truncated         INTEGER NOT NULL,
+        accepted_skill_name       TEXT,
+        accepted_skill_version    INTEGER,
+        heldout_total             INTEGER NOT NULL,
+        heldout_completed         INTEGER NOT NULL,
+        heldout_skipped_reason    TEXT,
+        input_tokens              INTEGER NOT NULL,
+        output_tokens             INTEGER NOT NULL,
+        finished_at               TEXT NOT NULL
     )
     """,
     """

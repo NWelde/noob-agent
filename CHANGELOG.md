@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 00:00 PDT | [ADDED] | Added the non-benchmark full-screen Doom token-budget demo loop, including a 500,000-token cap, 32,000-token Builder calls with up to three repairs, a 3,600-second safety deadline, and a Weave-derived Markdown transcript.
+
 2026-09-13 00:14 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 21, a non-benchmark token-budget Doom demo loop: `--live-demo --token-budget 500000` runs fresh learning sequences until the budget is spent, with demo-only Builder caps up to 32,000 output tokens and 3 repairs, a 3,600-second safety deadline, a full-screen display setting for the live demo and replay viewer, a `doom-demo-log.md` written live from the Weave trace, and one paid demo run, split into four reversible pull requests.
 
 2026-09-12 23:57 PDT | [ADDED] | Kept the visible live-demo training window open and paused on its final frame throughout Builder authoring, then closed it before any fresh held-out connector opens. `EpisodeRunner` retains its close-on-finish default, while explicit external ownership now has tested normal and Builder-error cleanup paths.

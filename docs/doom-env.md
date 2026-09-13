@@ -208,3 +208,16 @@ Add `--headless` to check a replay without a display. The script refuses (exit
 with a connector version other than the current one. A replay also depends on
 the ViZDoom build and bundled scenario files matching the recording, which the
 record does not store; a difference shows up as a mismatch.
+## Non-benchmark token-budget demo
+
+After the live-demo token-budget implementation is installed, run the visible,
+full-screen diagnostic with Weave tracing enabled:
+
+```sh
+NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
+  scripts/run_doom_learning_sequence.py --live-demo --token-budget 500000
+```
+
+This is not benchmark evidence. It uses a 32,000-token Builder cap, up to three
+repairs, a 3,600-second safety deadline, and writes the Weave-derived transcript
+to `.noob-agent/doom-demo-log.md` after trace delivery.

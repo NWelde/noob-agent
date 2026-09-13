@@ -118,6 +118,8 @@ class DoomSettings:
     window_visible: bool = False
     # Display only: advance accepted actions one tick at a time in real time.
     realtime: bool = False
+    # Display only: ask ZDoom for a full-screen window when one is visible.
+    fullscreen: bool = False
 
 
 def _pace(tick_started: float) -> None:
@@ -263,6 +265,8 @@ class DoomConnector:
             )
         game = vzd.DoomGame()
         game.load_config(str(scenario))
+        if self._settings.window_visible and self._settings.fullscreen:
+            game.add_game_args("+fullscreen 1")
         game.set_window_visible(self._settings.window_visible)
         if self._settings.window_visible:
             game.set_render_all_frames(True)

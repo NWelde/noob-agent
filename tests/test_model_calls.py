@@ -592,11 +592,11 @@ def test_a_version_2_database_upgrades_to_version_3_with_its_episodes_intact(
     connection.close()
 
     with EpisodeStore.open(database_path) as upgraded:
-        assert SCHEMA_VERSION == 3
+        assert SCHEMA_VERSION == 4
         assert upgraded.read_episode(episode.episode_id) == before
         assert upgraded.read_model_calls() == ()
         version = upgraded._connection.execute("SELECT version FROM schema_version").fetchone()
-        assert version["version"] == 3
+        assert version["version"] == 4
         upgraded.record_model_call(_record())
         assert [r.call_id for r in upgraded.read_model_calls()] == ["mc_0001"]
 

@@ -40,6 +40,7 @@ from noob_agent.domain.records import (
     EpisodeRecord,
     ExperimentRecord,
     ModelCallRecord,
+    SequenceSummaryRecord,
     StepRecord,
     StoredEpisode,
 )
@@ -579,6 +580,54 @@ class EpisodeStore:
         except ValidationError as error:
             raise InconsistentRecordError(
                 f"A recorded model call is not internally consistent: {error}"
+            ) from error
+
+    # --- Learning sequence summaries ---------------------------------------
+
+    def record_sequence_summary(self, record: SequenceSummaryRecord) -> None:
+        """Write one immutable, harness-only sequence summary."""
+        record = _revalidate(record, f"Sequence summary {record.sequence_id!r}")
+        with self._transaction():
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO sequence_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.sequence_id, record.run_kind, record.training_episode_id,
+                        int(record.training_goal_completed), record.builder_stop_reason,
+                        int(record.builder_truncated), record.accepted_skill_name,
+                        record.accepted_skill_version, record.heldout_total,
+                        record.heldout_completed, record.heldout_skipped_reason,
+                        record.input_tokens, record.output_tokens, record.finished_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise _classify(error, f"Sequence summary {record.sequence_id!r}") from error
+
+    def read_sequence_summary(self, sequence_id: str) -> SequenceSummaryRecord:
+        row = self._connection.execute(
+            "SELECT * FROM sequence_summary WHERE sequence_id = ?", (sequence_id,)
+        ).fetchone()
+        if row is None:
+            raise UnknownRecordError(f"Sequence summary {sequence_id!r} is not recorded.")
+        try:
+            return SequenceSummaryRecord(
+                sequence_id=row["sequence_id"], run_kind=row["run_kind"],
+                training_episode_id=row["training_episode_id"],
+                training_goal_completed=bool(row["training_goal_completed"]),
+                builder_stop_reason=row["builder_stop_reason"],
+                builder_truncated=bool(row["builder_truncated"]),
+                accepted_skill_name=row["accepted_skill_name"],
+                accepted_skill_version=row["accepted_skill_version"],
+                heldout_total=row["heldout_total"], heldout_completed=row["heldout_completed"],
+                heldout_skipped_reason=row["heldout_skipped_reason"],
+                input_tokens=row["input_tokens"], output_tokens=row["output_tokens"],
+                finished_at=row["finished_at"],
+            )
+        except ValidationError as error:
+            raise InconsistentRecordError(
+                f"Sequence summary {sequence_id!r} is internally inconsistent: {error}"
             ) from error
 
     @staticmethod
