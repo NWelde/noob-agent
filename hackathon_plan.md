@@ -1660,8 +1660,10 @@ budgets fixed, so no fix could be made under it.
 
 It authorizes: persisted and traced Model call records; capture of the finish
 reason, provider reasoning text, and whether usage was reported; per-role
-maximum output token settings that are recorded with every call; one storage
-schema upgrade; and one more live Doom learning sequence.
+maximum output token settings that are recorded with every call; a trace flush
+when the run script exits and a non-empty `WANDB_BASE_URL` default in
+`.env.example` (the trace-delivery fixes in step 18b); one storage schema
+upgrade; and one more live Doom learning sequence.
 
 It does not authorize changes to the Action or Builder prompt text or reply
 formats, decision, primitive, or wall-time budgets, stop rules, connectors,
@@ -1736,6 +1738,51 @@ the model. Each of those needs its own approval.
 - Acceptance: both caps are configurable, validated, identical across models,
   and visible on every recorded call.
 
+#### Step 18b trace delivery: flush at exit and W&B base URL
+
+This part of 18b makes sure the step 18a traces reach Weave from the second
+live run.
+
+- Evidence:
+  - **Nothing flushes Weave's upload queue.** `WeaveTraceSink.flush()` only closes
+    an open episode call. It never calls the Weave client's own `flush()`, which the
+    installed `weave` 0.53.9 client provides.
+  - **The run script never flushes at exit.** `EpisodeRunner` calls `flush()` at the
+    end of each episode, but Builder calls happen after the cold episode closes. When
+    no skill is accepted, as in the first live run, no later episode runs, so the
+    Builder calls are never flushed before the process exits.
+  - **The base URL is blank.** `.env.example` sets `WANDB_BASE_URL=`. Run through
+    `uv run --env-file .env`, that exports an empty string rather than leaving the
+    variable unset, so W&B and Weave clients that read it can see a blank host.
+    `IntegrationSettings` already treats an empty value as unset.
+- Files (in addition to the 18b list above):
+  - `src/noob_agent/observability/tracing.py`: `WeaveTraceSink.flush()` also calls
+    the client's `flush()` when the client has one. This stays best effort and never
+    raises.
+  - `scripts/run_doom_learning_sequence.py`: calls the trace sink's `flush()` in a
+    `finally` block after the sequence, whether it returned or raised. The
+    18b file list above already names this file.
+  - `.env.example`: `WANDB_BASE_URL=https://api.wandb.ai`. The 18b file list
+    above already names this file.
+  - New `tests/test_trace_flush.py`.
+- Not authorized: changing the `TraceSink` or `WeaveClient` protocol methods,
+  enabling tracing by default, changing Weave settings other than the base URL, or
+  adding dependencies.
+- Tests first:
+  - `WeaveTraceSink.flush()` closes an open episode call and then calls the client's
+    `flush()`.
+  - A client without `flush()`, or whose `flush()` raises, does not raise.
+  - The run script's last call to the sink is `flush()`, both after a sequence
+    that returns and after one that raises. When it raises, the original error
+    still propagates.
+  - `.env.example` gives `WANDB_BASE_URL` a non-empty `https://` value.
+  - Settings still read an empty `WANDB_BASE_URL` as unset.
+- Validation: `uv run pytest tests/test_trace_flush.py -v`, then the full test,
+  Ruff, and strict mypy suites.
+- Acceptance: after the 18c run, every Model call record, including Builder calls
+  when no skill is accepted, appears in Weave. If one does not, 18c reports the gap
+  and does not retry.
+
 ### Step 18c - Second live Doom learning sequence
 
 - Files: `docs/current-status.md` and `CHANGELOG.md`. No code changes.
@@ -1760,7 +1807,9 @@ reverted, the version-2 code refuses any database already upgraded to version
 3 (`EpisodeStore` rejects newer schemas rather than misread them). Keep a copy
 of any database from before the upgrade, or start new Git-ignored
 `.noob-agent/` databases. There is no automatic downgrade. Reverting 18b
-restores the 512 and 2,048 code defaults. 18c changes only documentation.
+restores the 512 and 2,048 code defaults, the per-episode-only Weave flush, and
+the blank `WANDB_BASE_URL` example; a local `.env` copied from the new example
+keeps its base URL value until edited. 18c changes only documentation.
 
 ## References
 
