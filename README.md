@@ -35,6 +35,9 @@ recording of the exercise. It is not a graded model result; see
 
 ![Minecraft redstone exercise: noobagentbot places the power block and the redstone lamp lights up](assets/redstone-lamp-lit.png)
 
+Want to try it with your own W&B account? See
+[Run the demo yourself](#run-the-demo-yourself).
+
 ## What is working today
 
 This is a hackathon prototype, not a finished benchmark. The shared learning
@@ -71,8 +74,7 @@ proven yet.**
   the cold attempt lit the lamp in 9 decisions, including one rejected block
   placement. The Builder's reply was unusable, so no skill was learned and
   there was no skill-reuse attempt. A second run ran out of decisions without
-  lighting the lamp and then timed out. That redstone runner is not on `main`
-  yet.
+  lighting the lamp and then timed out.
 - Minecraft observations are large. A 20-decision training episode used 43,752
   tokens, over the 40,000-token ceiling. PR #68 cuts the observation size but
   has not met its target.
@@ -272,33 +274,105 @@ Specifications:
 - [`eval_protocol.md`](eval_protocol.md): conditions, budgets, metrics, and publication rules
 - [`docs/current-status.md`](docs/current-status.md) and [`docs/loop-optimization.md`](docs/loop-optimization.md): implementation status and loop scorecards
 
-## Getting started
+## Run the demo yourself
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+### 1. Install (once)
 
-```sh
-uv sync --group dev
-uv run pytest
-```
-
-Copy `.env.example` to `.env` and fill in only the credentials for the
-integrations you enable (W&B Inference, Weave, CoreWeave Sandbox). All
-integrations are disabled by default, and tests don't need credentials.
+You need Python 3.11+, [uv](https://docs.astral.sh/uv/), and a
+[W&B account](https://wandb.ai/). Model calls go through W&B Inference and are
+billed to your account, and traces land in your own Weave project.
 
 ```sh
-# One live Doom learning sequence: cold training, Builder, graded held-out cells.
-NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_doom_learning_sequence.py
-
-# Benchmark the loop on fixed seeds and write a scorecard.
-NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/loop_bench.py run --sequences 5
-
-# Watch a run's reasoning live from Weave.
-uv run --env-file .env python scripts/live_reasoning_view.py --run-id <sequence-id>
+git clone https://github.com/NWelde/noob-agent.git
+cd noob-agent
+uv sync --group dev --group integrations
+cp .env.demo.example .env
 ```
 
-`NOOB_AGENT_SANDBOX_MODE=local` uses a labeled local subprocess executor, which
-is weaker isolation than CoreWeave Sandbox. Generated code is time-limited and
-gets a narrow API, but this prototype makes no production security claim.
+Open `.env` and fill in two values: `WANDB_API_KEY` (from
+<https://wandb.ai/authorize>) and `NOOB_AGENT_INFERENCE_PROJECT` (your W&B
+username or team, followed by `/noob-agent`). Everything else is already set.
+To check the install without credentials, run `uv run pytest`.
+
+### 2. Doom: a full learning sequence (no game install needed)
+
+ViZDoom installs with the Python packages. This runs one cold training attempt,
+lets the Builder write and validate a skill, then plays unseen held-out
+variations with that skill. Each attempt is graded independently:
+
+```sh
+uv run --env-file .env python scripts/run_doom_learning_sequence.py
+```
+
+To watch it, add `--live-demo --live-view`. A Doom window opens, and a live page
+at <http://127.0.0.1:8765> shows each decision's reasoning read back from Weave.
+On Linux this needs a desktop session (WSLg works on Windows).
+
+```sh
+uv run --env-file .env python scripts/run_doom_learning_sequence.py --live-demo --live-view
+```
+
+What you get:
+
+- **A JSON summary** printed at the end: the training result, whether a skill
+  was accepted, and each held-out grade.
+- **Weave traces** at `https://wandb.ai/<your-entity>/noob-agent/weave`: one
+  call tree per episode, with every step and model call.
+- **A replay** of any recorded episode in a visible window, with no model calls.
+  Use `.noob-agent/doom-live-demo.sqlite3` for `--live-demo` runs:
+
+  ```sh
+  uv run python scripts/replay_doom_episode.py --database .noob-agent/doom-learning.sqlite3
+  uv run python scripts/replay_doom_episode.py --database .noob-agent/doom-learning.sqlite3 --episode-id <episode-id>
+  ```
+
+To benchmark the loop on fixed seeds and write a scorecard, run
+`uv run --env-file .env python scripts/loop_bench.py run --sequences 5`.
+
+Results vary between runs because the model writes a different skill each
+time. See [What is working today](#what-is-working-today) for typical numbers.
+
+### 3. Minecraft: the redstone lamp (needs Java 21 and Node.js 22+)
+
+Set up a local vanilla 1.21.1 server with every scenario data pack and the
+connector's Mineflayer dependency. First read the
+[Minecraft EULA](https://aka.ms/MinecraftEULA); passing `--accept-eula` confirms
+you accept it.
+
+```sh
+uv run python scripts/setup_minecraft_server.py --accept-eula --player <your-minecraft-name>
+```
+
+Start the server in its own terminal, and wait for `Done`:
+
+```sh
+cd .noob-agent/minecraft-server && java -Xms1G -Xmx2G -jar server.jar nogui
+```
+
+In another terminal, run the demo: a cold attempt, the Builder, then a fresh
+attempt with the skill if one is accepted.
+
+```sh
+uv run --env-file .env python scripts/run_minecraft_redstone_demo.py
+```
+
+To watch, join `127.0.0.1:25566` from a Minecraft Java 1.21.1 client, using the
+player name you passed to `--player`. The scenario reset moves you to a
+spectator viewpoint over the room. The run prints a JSON summary and also
+writes to Weave. The server runs in offline mode on 127.0.0.1 only, so never
+expose it to a network. Details are in
+[`docs/redstone-demo.md`](docs/redstone-demo.md) and
+[`docs/minecraft-server.md`](docs/minecraft-server.md).
+
+### Notes
+
+- Generated skills run in the labeled local subprocess
+  (`NOOB_AGENT_SANDBOX_MODE=local`). It is weaker isolation than CoreWeave
+  Sandbox: the code is time-limited and gets a narrow API, but this prototype
+  makes no production security claim.
+- The runner stops before starting if something is missing, such as the API
+  key or the integration packages, and says what to fix.
+- `.env.example` documents every setting, including those the demo doesn't use.
 
 ## Contributing
 
