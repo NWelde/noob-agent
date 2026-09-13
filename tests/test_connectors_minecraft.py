@@ -1,7 +1,7 @@
-"""Acceptance tests for the Minecraft connector's reset and one primitive.
+"""Acceptance tests for the complete Minecraft primitive connector.
 
-These cover build-order step 1 from `hackathon_plan.md` section 13: a real
-Minecraft connector that resets a scenario and performs one hard-coded action.
+These cover build-order step 1 and the primitive-completion milestone from
+`hackathon_plan.md` sections 13 and 15.
 
 Most tests drive the connector through a substituted sidecar transport, so
 schema validity, tool rejection, private-state filtering, and timeout
@@ -23,7 +23,7 @@ from fakes.connector import ScriptedPolicy
 
 from noob_agent.connectors import ConnectorError
 from noob_agent.connectors.minecraft import (
-    DEFERRED_TOOLS,
+    CONNECTOR_VERSION,
     GAME_ID,
     MAX_OBSERVE_RADIUS,
     MinecraftConnector,
@@ -128,7 +128,7 @@ def repeatable_public_state(observation: Observation) -> dict[str, Any]:
 # --- Manifest and frozen public surface ------------------------------------
 
 
-async def test_manifest_declares_observe_and_defers_the_remaining_primitives() -> None:
+async def test_manifest_declares_the_exact_frozen_minecraft_primitives() -> None:
     connector, _ = stubbed()
 
     manifest = await connector.manifest()
@@ -136,12 +136,101 @@ async def test_manifest_declares_observe_and_defers_the_remaining_primitives() -
     assert manifest.game_id == GAME_ID
     assert manifest.observation_mode == "structured_nearby_state"
     assert manifest.timing_model == "game_ticks"
-    assert [tool.name for tool in manifest.tools] == ["observe"]
-    observe = manifest.tools[0]
-    assert observe.state_changing is False
-    # A tool name must never describe the unfamiliar mechanic's solution.
-    assert "resonator" not in observe.description.lower()
-    assert "move_to" in DEFERRED_TOOLS and "use_object" in DEFERRED_TOOLS
+    assert manifest.connector_version == CONNECTOR_VERSION == "minecraft-0.2.0"
+    assert [tool.name for tool in manifest.tools] == [
+        "observe",
+        "move_to",
+        "look_at",
+        "inspect_object",
+        "collect_object",
+        "use_object",
+        "place_object",
+        "wait",
+    ]
+    assert {tool.name: tool.state_changing for tool in manifest.tools} == {
+        "observe": False,
+        "move_to": True,
+        "look_at": True,
+        "inspect_object": False,
+        "collect_object": True,
+        "use_object": True,
+        "place_object": True,
+        "wait": False,
+    }
+    serialized = manifest.model_dump_json().lower()
+    assert "resonator" not in serialized
+    assert "gateway" not in serialized
+
+
+async def test_manifest_freezes_each_primitive_argument_schema() -> None:
+    connector, _ = stubbed()
+    manifest = await connector.manifest()
+
+    schemas = {tool.name: tool.argument_schema for tool in manifest.tools}
+    assert schemas == {
+        "observe": {
+            "type": "object",
+            "properties": {"radius": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5}},
+            "additionalProperties": False,
+        },
+        "move_to": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "z": {"type": "number"},
+                "tolerance": {"type": "integer", "enum": [1, 2]},
+            },
+            "required": ["x", "y", "z", "tolerance"],
+            "additionalProperties": False,
+        },
+        "look_at": _object_id_schema(),
+        "inspect_object": _object_id_schema(),
+        "collect_object": {
+            "type": "object",
+            "properties": {
+                "object_id": {"type": "string", "minLength": 1},
+                "count": {"type": "integer", "minimum": 1, "maximum": 8},
+            },
+            "required": ["object_id", "count"],
+            "additionalProperties": False,
+        },
+        "use_object": {
+            "type": "object",
+            "properties": {
+                "object_id": {"type": "string", "minLength": 1},
+                "held_item_id": {"type": "string", "minLength": 1},
+            },
+            "required": ["object_id"],
+            "additionalProperties": False,
+        },
+        "place_object": {
+            "type": "object",
+            "properties": {
+                "held_item_id": {"type": "string", "minLength": 1},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "z": {"type": "number"},
+            },
+            "required": ["held_item_id", "x", "y", "z"],
+            "additionalProperties": False,
+        },
+        "wait": {
+            "type": "object",
+            "properties": {"ticks": {"type": "integer", "minimum": 1, "maximum": 100}},
+            "required": ["ticks"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _object_id_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"object_id": {"type": "string", "minLength": 1}},
+        "required": ["object_id"],
+        "additionalProperties": False,
+    }
 
 
 def test_default_player_name_matches_the_offline_server_whitelist() -> None:
@@ -198,7 +287,7 @@ async def test_reset_assigns_opaque_object_ids_that_do_not_encode_purpose() -> N
         assert item.label.lower().split()[0] not in item.object_id.lower()
 
 
-# --- One hard-coded primitive action ---------------------------------------
+# --- Primitive actions ------------------------------------------------------
 
 
 async def test_observe_round_trips_one_schema_valid_step_result() -> None:
@@ -239,16 +328,229 @@ async def test_unknown_tool_is_rejected_before_anything_reaches_the_game() -> No
     assert len(transport.sent) == sent_during_reset
 
 
-async def test_a_deferred_contract_tool_is_rejected_as_an_undeclared_tool() -> None:
-    connector, _ = stubbed(observe_reply())
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected"),
+    [
+        (
+            "move_to",
+            {"x": 1.5, "y": 100, "z": -2.5, "tolerance": 1},
+            {"x": 1.5, "y": 100.0, "z": -2.5, "tolerance": 1},
+        ),
+        ("look_at", {"object_id": "obj_0002"}, {"target": "Resonator"}),
+        ("inspect_object", {"object_id": "obj_0002"}, {"target": "Resonator"}),
+        (
+            "collect_object",
+            {"object_id": "obj_0001", "count": 1},
+            {"target": "Dull Shard", "count": 1},
+        ),
+        ("use_object", {"object_id": "obj_0002"}, {"target": "Resonator"}),
+        ("wait", {"ticks": 20}, {"ticks": 20}),
+    ],
+)
+async def test_each_primitive_maps_to_one_sidecar_operation(
+    tool_name: str, arguments: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    connector, transport = stubbed(observe_reply(), observe_reply())
     await connector.reset(SCENARIO_ID, SEED)
 
     result = await connector.step(
-        ToolRequest(action_id="a_0003", tool_name="use_object", arguments={"object_id": "obj_0001"})
+        ToolRequest(action_id=f"a_{tool_name}", tool_name=tool_name, arguments=arguments)
+    )
+
+    assert result.status == "succeeded"
+    assert result.code == "OK"
+    assert result.primitive_actions_charged == 1
+    assert (
+        result.state_changed
+        is {
+            "move_to": True,
+            "look_at": True,
+            "inspect_object": False,
+            "collect_object": True,
+            "use_object": True,
+            "wait": False,
+        }[tool_name]
+    )
+    sent = transport.sent[-1]
+    assert sent["op"] == tool_name
+    assert sent["radius"] == 5
+    if tool_name not in {"observe", "wait", "look_at"}:
+        assert sent["settle_ticks"] == 5
+    for key, value in expected.items():
+        if key == "target":
+            assert sent[key]["label"] == value
+        else:
+            assert sent[key] == value
+
+
+async def test_place_object_resolves_a_public_inventory_item_id() -> None:
+    inventory_snapshot = {
+        **SIDECAR_SNAPSHOT,
+        "visible_objects": [
+            *SIDECAR_SNAPSHOT["visible_objects"],
+            {
+                "label": "Slate Chip",
+                "position": None,
+                "distance": 0,
+                "properties": {"kind": "inventory_item", "count": 1},
+            },
+        ],
+    }
+    connector, transport = stubbed(observe_reply(inventory_snapshot), observe_reply())
+    observation = await connector.reset(SCENARIO_ID, SEED)
+    held_id = next(
+        item.object_id
+        for item in observation.visible_objects
+        if item.properties.get("kind") == "inventory_item"
+    )
+
+    result = await connector.step(
+        ToolRequest(
+            action_id="a_place",
+            tool_name="place_object",
+            arguments={"held_item_id": held_id, "x": 0.5, "y": 101, "z": 0.5},
+        )
+    )
+
+    assert result.status == "succeeded"
+    sent = transport.sent[-1]
+    assert sent["op"] == "place_object"
+    assert sent["held_item"]["label"] == "Slate Chip"
+    assert sent["position"] == {"x": 0.5, "y": 101.0, "z": 0.5}
+
+
+async def test_use_object_can_select_an_optional_public_inventory_item() -> None:
+    inventory_snapshot = {
+        **SIDECAR_SNAPSHOT,
+        "visible_objects": [
+            *SIDECAR_SNAPSHOT["visible_objects"],
+            {
+                "label": "Slate Chip",
+                "position": None,
+                "distance": 0,
+                "properties": {"kind": "inventory_item", "count": 1},
+            },
+        ],
+    }
+    connector, transport = stubbed(observe_reply(inventory_snapshot), observe_reply())
+    observation = await connector.reset(SCENARIO_ID, SEED)
+    held = next(
+        item
+        for item in observation.visible_objects
+        if item.properties.get("kind") == "inventory_item"
+    )
+    target = next(item for item in observation.visible_objects if item.label == "Resonator")
+
+    result = await connector.step(
+        ToolRequest(
+            action_id="a_use_held",
+            tool_name="use_object",
+            arguments={"object_id": target.object_id, "held_item_id": held.object_id},
+        )
+    )
+
+    assert result.status == "succeeded"
+    sent = transport.sent[-1]
+    assert sent["target"] == {
+        "label": "Resonator",
+        "kind": "block",
+        "position": {"x": -2.0, "y": 100.0, "z": 2.0},
+    }
+    assert sent["held_item"] == {"label": "Slate Chip", "kind": "inventory_item"}
+
+
+async def test_success_uses_the_sidecars_confirmed_state_change_value() -> None:
+    reply = {**observe_reply(), "state_changed": False}
+    connector, _ = stubbed(observe_reply(), reply)
+    await connector.reset(SCENARIO_ID, SEED)
+
+    result = await connector.step(
+        ToolRequest(
+            action_id="a_already_there",
+            tool_name="move_to",
+            arguments={"x": 0.5, "y": 100, "z": -5.5, "tolerance": 1},
+        )
+    )
+
+    assert result.status == "succeeded"
+    assert result.state_changed is False
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("move_to", {"x": True, "y": 100, "z": 0, "tolerance": 1}),
+        ("move_to", {"x": 0, "y": 100, "z": 0, "tolerance": 3}),
+        ("look_at", {"object_id": "obj_0001", "extra": 1}),
+        ("inspect_object", {}),
+        ("collect_object", {"object_id": "obj_0001", "count": 0}),
+        ("use_object", {"object_id": 1}),
+        (
+            "place_object",
+            {"held_item_id": "obj_0001", "x": float("inf"), "y": 100, "z": 0},
+        ),
+        ("wait", {"ticks": 101}),
+    ],
+)
+async def test_invalid_primitive_arguments_are_rejected_without_delivery(
+    tool_name: str, arguments: dict[str, Any]
+) -> None:
+    connector, transport = stubbed(observe_reply())
+    await connector.reset(SCENARIO_ID, SEED)
+    sent_during_reset = len(transport.sent)
+
+    result = await connector.step(
+        ToolRequest(action_id=f"bad_{tool_name}", tool_name=tool_name, arguments=arguments)
     )
 
     assert result.status == "rejected"
-    assert result.code == "INVALID_TOOL"
+    assert result.code == "INVALID_ARGUMENT"
+    assert result.primitive_actions_charged == 0
+    assert len(transport.sent) == sent_during_reset
+
+
+@pytest.mark.parametrize("tool_name", ["look_at", "inspect_object", "collect_object", "use_object"])
+async def test_unknown_object_ids_are_rejected_without_delivery(tool_name: str) -> None:
+    connector, transport = stubbed(observe_reply())
+    await connector.reset(SCENARIO_ID, SEED)
+    sent_during_reset = len(transport.sent)
+    arguments: dict[str, Any] = {"object_id": "obj_missing"}
+    if tool_name == "collect_object":
+        arguments["count"] = 1
+
+    result = await connector.step(
+        ToolRequest(action_id=f"missing_{tool_name}", tool_name=tool_name, arguments=arguments)
+    )
+
+    assert result.status == "rejected"
+    assert result.code == "NO_VISIBLE_TARGET"
+    assert result.primitive_actions_charged == 0
+    assert len(transport.sent) == sent_during_reset
+
+
+async def test_collect_and_place_enforce_public_object_preconditions() -> None:
+    connector, transport = stubbed(observe_reply())
+    await connector.reset(SCENARIO_ID, SEED)
+    sent_during_reset = len(transport.sent)
+
+    collect = await connector.step(
+        ToolRequest(
+            action_id="bad_collect",
+            tool_name="collect_object",
+            arguments={"object_id": "obj_0002", "count": 1},
+        )
+    )
+    place = await connector.step(
+        ToolRequest(
+            action_id="bad_place",
+            tool_name="place_object",
+            arguments={"held_item_id": "obj_0001", "x": 0, "y": 101, "z": 0},
+        )
+    )
+
+    assert collect.code == "PRECONDITION_FAILED"
+    assert place.code == "PRECONDITION_FAILED"
+    assert len(transport.sent) == sent_during_reset
 
 
 @pytest.mark.parametrize("radius", [0, MAX_OBSERVE_RADIUS + 1, "five", None])
@@ -429,7 +731,19 @@ def test_sidecar_is_a_pinned_json_lines_mineflayer_package() -> None:
     assert package["private"] is True
     assert package["dependencies"] == {"mineflayer": "4.39.0"}
     assert package["scripts"]["start"] == "node index.js"
-    for operation in ('"connect"', '"reset"', '"observe"', '"close"'):
+    for operation in (
+        '"connect"',
+        '"reset"',
+        '"observe"',
+        '"move_to"',
+        '"look_at"',
+        '"inspect_object"',
+        '"collect_object"',
+        '"use_object"',
+        '"place_object"',
+        '"wait"',
+        '"close"',
+    ):
         assert operation in source
     assert "process.stdout.write" in source
 
@@ -461,3 +775,113 @@ async def test_live_observe_performs_one_hard_coded_action() -> None:
     assert result.action_id == "live_0001"
     assert result.sequence == 1
     assert result.observation.player.position is not None
+
+
+async def test_live_complete_primitive_surface() -> None:
+    connector = await live_connector()
+    try:
+        observation = await connector.reset(SCENARIO_ID, SEED)
+        move = await connector.step(
+            ToolRequest(
+                action_id="live_move",
+                tool_name="move_to",
+                arguments={"x": -3.5, "y": 100, "z": -0.5, "tolerance": 1},
+            )
+        )
+        assert move.status == "succeeded"
+
+        observed = await connector.step(
+            ToolRequest(action_id="live_wide", tool_name="observe", arguments={"radius": 8})
+        )
+        supply = next(
+            item
+            for item in observed.observation.visible_objects
+            if item.label == "Barrel"
+            and item.position is not None
+            and item.position.x == -4
+            and item.position.z == 0
+        )
+        looked = await connector.step(
+            ToolRequest(
+                action_id="live_look",
+                tool_name="look_at",
+                arguments={"object_id": supply.object_id},
+            )
+        )
+        assert looked.status == "succeeded"
+
+        inspected = await connector.step(
+            ToolRequest(
+                action_id="live_inspect",
+                tool_name="inspect_object",
+                arguments={"object_id": supply.object_id},
+            )
+        )
+        assert inspected.status == "succeeded"
+        shard = next(
+            item
+            for item in inspected.observation.visible_objects
+            if item.label == "Dull Shard" and item.properties.get("kind") == "container_item"
+        )
+
+        collected = await connector.step(
+            ToolRequest(
+                action_id="live_collect",
+                tool_name="collect_object",
+                arguments={"object_id": shard.object_id, "count": 2},
+            )
+        )
+        assert collected.status == "succeeded"
+        held = next(
+            item
+            for item in collected.observation.visible_objects
+            if item.label == "Dull Shard" and item.properties.get("kind") == "inventory_item"
+        )
+
+        moved_back = await connector.step(
+            ToolRequest(
+                action_id="live_move_back",
+                tool_name="move_to",
+                arguments={"x": 0.5, "y": 100, "z": -0.5, "tolerance": 1},
+            )
+        )
+        assert moved_back.status == "succeeded"
+        held = next(
+            item
+            for item in moved_back.observation.visible_objects
+            if item.label == "Dull Shard" and item.properties.get("kind") == "inventory_item"
+        )
+        placed = await connector.step(
+            ToolRequest(
+                action_id="live_place",
+                tool_name="place_object",
+                arguments={"held_item_id": held.object_id, "x": 0.5, "y": 101.25, "z": 0.5},
+            )
+        )
+        assert placed.status == "succeeded"
+
+        button = next(
+            item
+            for item in placed.observation.visible_objects
+            if item.label == "Stone Button"
+            and item.position is not None
+            and item.position.x == 0
+            and item.position.z == 2
+        )
+        used = await connector.step(
+            ToolRequest(
+                action_id="live_use",
+                tool_name="use_object",
+                arguments={"object_id": button.object_id},
+            )
+        )
+        assert used.status == "succeeded"
+
+        waited = await connector.step(
+            ToolRequest(action_id="live_wait", tool_name="wait", arguments={"ticks": 5})
+        )
+        assert waited.status == "succeeded"
+        assert waited.sequence == 9
+        assert observation.sequence == 0
+    finally:
+        await connector.close()
