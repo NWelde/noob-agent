@@ -15,7 +15,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from noob_agent.settings import ModelSettings, WandbSettings
 
@@ -24,8 +24,31 @@ class ModelUnavailableError(RuntimeError):
     """No model provider is configured, or the configured one cannot be reached."""
 
 
+class ToolSpec(BaseModel):
+    """One callable tool offered to the model, with a JSON Schema for its arguments."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    description: str
+    parameters: dict[str, JsonValue]
+
+
+class ToolCall(BaseModel):
+    """The tool call a model returned, with its arguments as the raw JSON text sent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    arguments: str
+
+
 class ModelRequest(BaseModel):
-    """One bounded completion request."""
+    """One bounded completion request.
+
+    `thinking` is `None` to leave the provider's reasoning default untouched.
+    When `tools` are given, the provider is asked for exactly one tool call.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -33,6 +56,16 @@ class ModelRequest(BaseModel):
     prompt: str = Field(min_length=1)
     max_output_tokens: int = Field(gt=0)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    thinking: bool | None = None
+    tools: tuple[ToolSpec, ...] = ()
+
+    def options(self) -> dict[str, JsonValue]:
+        """The request settings a Model call record keeps beside the prompt."""
+        return {
+            "thinking": self.thinking,
+            "tools": [tool.name for tool in self.tools],
+            "tool_choice": "required" if self.tools else None,
+        }
 
 
 class ModelResponse(BaseModel):
@@ -53,6 +86,7 @@ class ModelResponse(BaseModel):
     finish_reason: str | None = None
     reasoning: str | None = None
     usage_reported: bool = True
+    tool_call: ToolCall | None = None
 
 
 class ModelClient(Protocol):
@@ -114,6 +148,24 @@ class WandbInferenceClient:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         """Run one completion against W&B Inference."""
         client = self._client()
+        options: dict[str, Any] = {}
+        if request.thinking is not None:
+            # W&B Inference passes this to the model's chat template; verified for
+            # DeepSeek-V4-Flash on 2026-09-13 (hackathon_plan.md section 22).
+            options["extra_body"] = {"chat_template_kwargs": {"thinking": request.thinking}}
+        if request.tools:
+            options["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+                for tool in request.tools
+            ]
+            options["tool_choice"] = "required"
         completion = await client.chat.completions.create(
             model=self._model.inference_model,
             messages=[
@@ -122,6 +174,7 @@ class WandbInferenceClient:
             ],
             max_tokens=request.max_output_tokens,
             temperature=request.temperature,
+            **options,
         )
         choice = completion.choices[0]
         usage = completion.usage
@@ -135,7 +188,21 @@ class WandbInferenceClient:
             finish_reason=getattr(choice, "finish_reason", None),
             reasoning=_reasoning_text(choice.message),
             usage_reported=isinstance(input_tokens, int) and isinstance(output_tokens, int),
+            tool_call=_first_tool_call(choice.message),
         )
+
+
+def _first_tool_call(message: Any) -> ToolCall | None:
+    """The first tool call in a reply; later calls are ignored, as one turn is one action."""
+    calls = getattr(message, "tool_calls", None)
+    if not calls:
+        return None
+    function = getattr(calls[0], "function", None)
+    name = getattr(function, "name", None)
+    arguments = getattr(function, "arguments", None)
+    if not isinstance(name, str):
+        return None
+    return ToolCall(name=name, arguments=arguments if isinstance(arguments, str) else "")
 
 
 def _reasoning_text(message: Any) -> str | None:
