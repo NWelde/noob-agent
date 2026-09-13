@@ -525,8 +525,8 @@ class EpisodeStore:
                         provider, model_id, system_text, prompt_text,
                         max_output_tokens, temperature, response_text, reasoning,
                         finish_reason, input_tokens, output_tokens, latency_ms,
-                        error, started_at, request_options_json, tool_call_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        error, started_at, request_options_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.call_id,
@@ -549,7 +549,6 @@ class EpisodeStore:
                         record.error,
                         record.started_at.isoformat(),
                         _json_or_none(record.request_options),
-                        _json_or_none(record.tool_call),
                     ),
                 )
             except sqlite3.IntegrityError as error:
@@ -590,7 +589,6 @@ class EpisodeStore:
                     error=row["error"],
                     started_at=row["started_at"],
                     request_options=_loads_or_none(row["request_options_json"]),
-                    tool_call=_loads_or_none(row["tool_call_json"]),
                 )
                 for row in rows
             )
