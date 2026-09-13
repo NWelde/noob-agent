@@ -1,7 +1,10 @@
 """Bounded public-trace selection for the Builder.
 
 The Builder sees a small, fixed selection of what a player could have seen:
-observations, actions, errors, and the outcome. It never sees private grader
+observations, actions, errors, and the outcome. Since `hackathon_plan.md`
+section 22 each step also carries the public state after it (status values and
+the first visible objects), because a Builder that never sees, for example, a
+target's screen offset cannot write a skill that aims. It never sees private grader
 state, held-out configuration, clean/faulty identity, or a scenario answer —
 none of which the durable records carry in the first place, which is what makes
 this selection safe rather than merely careful.
@@ -13,11 +16,62 @@ same prompt.
 
 from __future__ import annotations
 
+import json
+
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from noob_agent.domain.model import Observation
 from noob_agent.domain.records import StopReason, StoredEpisode
 
 DEFAULT_MAX_STEPS = 8
+MAX_OBJECTS_PER_OBSERVATION = 5
+MAX_TEXT_CHARS = 200
+
+
+def _bounded_text(text: str) -> str:
+    return text if len(text) <= MAX_TEXT_CHARS else text[: MAX_TEXT_CHARS - 3] + "..."
+
+
+def _bounded_mapping(values: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Keep a public mapping whole when it is small, and say so when it is not."""
+    if len(json.dumps(values, sort_keys=True, default=str)) <= MAX_TEXT_CHARS:
+        return values
+    return {"omitted": "too large for the evidence summary"}
+
+
+class EvidenceObject(BaseModel):
+    """One visible object as a player saw it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    object_id: str
+    label: str
+    properties: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class EvidenceObservation(BaseModel):
+    """The public state after an action: status values and the first visible objects."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: dict[str, JsonValue] = Field(default_factory=dict)
+    visible_objects: tuple[EvidenceObject, ...] = ()
+    terminal: bool = False
+
+    @classmethod
+    def of(cls, observation: Observation) -> EvidenceObservation:
+        return cls(
+            status=_bounded_mapping(dict(observation.status)),
+            visible_objects=tuple(
+                EvidenceObject(
+                    object_id=item.object_id,
+                    label=_bounded_text(item.label),
+                    properties=_bounded_mapping(dict(item.properties)),
+                )
+                for item in observation.visible_objects[:MAX_OBJECTS_PER_OBSERVATION]
+            ),
+            terminal=observation.terminal,
+        )
 
 
 class EvidenceStep(BaseModel):
@@ -33,6 +87,7 @@ class EvidenceStep(BaseModel):
     message: str
     state_changed: bool | None
     primitive_actions_charged: int = Field(ge=0)
+    observation: EvidenceObservation | None = None
 
 
 class TraceEvidence(BaseModel):
@@ -45,6 +100,7 @@ class TraceEvidence(BaseModel):
     scenario_id: str = Field(min_length=1)
     public_goal: str = Field(min_length=1)
     primitive_names: tuple[str, ...] = Field(min_length=1)
+    reset_observation: EvidenceObservation = Field(default_factory=EvidenceObservation)
     steps: tuple[EvidenceStep, ...] = ()
     stop_reason: StopReason | None = None
     terminal: bool = False
@@ -75,6 +131,7 @@ def select_evidence(stored: StoredEpisode, *, max_steps: int = DEFAULT_MAX_STEPS
         scenario_id=stored.episode.scenario_id,
         public_goal=stored.episode.reset_observation.public_goal,
         primitive_names=tuple(tool.name for tool in stored.episode.manifest.tools),
+        reset_observation=EvidenceObservation.of(stored.episode.reset_observation),
         steps=tuple(
             EvidenceStep(
                 sequence=step.sequence,
@@ -82,9 +139,10 @@ def select_evidence(stored: StoredEpisode, *, max_steps: int = DEFAULT_MAX_STEPS
                 arguments=step.request.arguments,
                 status=step.result.status,
                 code=step.result.code,
-                message=step.result.message,
+                message=_bounded_text(step.result.message),
                 state_changed=step.result.state_changed,
                 primitive_actions_charged=step.result.primitive_actions_charged,
+                observation=EvidenceObservation.of(step.result.observation),
             )
             for step in kept
         ),

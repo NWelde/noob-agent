@@ -169,6 +169,13 @@ predicates or held-out data.
 One repair is allowed. It creates a new candidate with `parent_version` pointing
 to the rejected version. Nothing is overwritten.
 
+In the multi-round condition (`hackathon_plan.md` section 22, step 22.D), a
+refinement creates a new candidate with `parent_version` pointing to the accepted
+incumbent. The refinement is validated like any candidate and then plays public
+training-split practice. It is accepted, and the incumbent retired, only if its
+public practice score is better; otherwise it is rejected with that reason.
+Practice uses no held-out data, and no private grade decides it.
+
 Registry states are `proposed`, `validating`, `rejected`, `accepted`, and
 `retired`. Only `accepted` versions appear in held-out tool lists. Every version
 stores its source, content hash, parent, authoring episode and model, evidence

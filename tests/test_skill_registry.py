@@ -333,3 +333,21 @@ def test_reading_an_unrecorded_version_is_refused(registry: SkillRegistry) -> No
         registry.accept("never_proposed", 1, reason="Nothing to accept.")
 
     assert registry.versions(SKILL_NAME) == ()
+
+
+def test_a_refinement_may_parent_the_accepted_version(
+    registry: SkillRegistry,
+    package_factory: Callable[..., SkillPackage],
+    accepted: SkillVersion,
+) -> None:
+    """Section 22.D: a refinement extends the accepted incumbent's lineage."""
+    refinement = registry.propose(
+        package_factory(source="def run(context):\n    return 'refined'\n"),
+        authoring_episode_id="ep_0002",
+        authoring_model_id="fake-model-a",
+        created_at=AUTHORED_AT,
+        parent_version=accepted.version,
+    )
+
+    assert refinement.parent_version == accepted.version
+    assert registry.get(accepted.name, accepted.version).status == "accepted"

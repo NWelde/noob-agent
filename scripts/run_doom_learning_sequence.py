@@ -16,7 +16,9 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -27,7 +29,7 @@ from noob_agent.connectors.doom import DoomConnector, DoomSettings
 from noob_agent.domain.records import StoredEpisode
 from noob_agent.grading.doom import DoomEpisodeGrade, DoomPrivateOutcome, grade_doom_episode
 from noob_agent.models.client import build_model_client
-from noob_agent.observability.tracing import build_trace_sink
+from noob_agent.observability.tracing import build_trace_sink, close_trace
 from noob_agent.runtime.sequence import HeldOutCell, LearningSequence, LearningSequenceResult
 from noob_agent.settings import IntegrationSettings
 from noob_agent.skills.executor import build_skill_executor
@@ -39,6 +41,10 @@ DEFAULT_DATABASE = Path(".noob-agent/doom-learning.sqlite3")
 LIVE_DEMO_DATABASE = Path(".noob-agent/doom-live-demo.sqlite3")
 LIVE_DEMO_CONDITION = "non-benchmark-live-demo"
 LIVE_DEMO_DEADLINE_SECONDS = 600.0
+LIVE_VIEW_SCRIPT = Path(__file__).with_name("live_reasoning_view.py")
+LIVE_VIEW_PORT = 8765
+# Keeps the view up briefly after the final flush so the last calls reach it.
+LIVE_VIEW_LINGER_SECONDS = 10.0
 
 
 class RunOptions(NamedTuple):
@@ -47,6 +53,8 @@ class RunOptions(NamedTuple):
     sequence_id: str | None
     live_demo: bool
     deadline_seconds: float | None
+    live_view: bool = False
+    live_view_port: int = LIVE_VIEW_PORT
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
@@ -60,8 +68,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
         help="Show real-time Doom under an explicit non-benchmark 10-minute deadline.",
     )
     parser.add_argument("--deadline-seconds", type=float, default=None)
+    parser.add_argument(
+        "--live-view",
+        action="store_true",
+        help="Serve the live Weave reasoning view beside the game (requires --live-demo).",
+    )
+    parser.add_argument("--live-view-port", type=int, default=LIVE_VIEW_PORT)
     parsed = parser.parse_args(argv)
     live_demo = bool(parsed.live_demo)
+    if parsed.live_view and not live_demo:
+        parser.error("--live-view requires --live-demo")
     deadline = parsed.deadline_seconds
     if deadline is not None and not live_demo:
         parser.error("--deadline-seconds requires --live-demo")
@@ -78,6 +94,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
         sequence_id=parsed.sequence_id,
         live_demo=live_demo,
         deadline_seconds=deadline,
+        live_view=bool(parsed.live_view),
+        live_view_port=int(parsed.live_view_port),
     )
 
 
@@ -174,17 +192,50 @@ def _summary(
     }
 
 
+def _start_live_view(
+    args: RunOptions, sequence_id: str, environment: Mapping[str, str]
+) -> subprocess.Popen[bytes]:
+    view = subprocess.Popen(
+        [
+            sys.executable,
+            str(LIVE_VIEW_SCRIPT),
+            "--run-id",
+            sequence_id,
+            "--port",
+            str(args.live_view_port),
+        ],
+        env=dict(environment),
+    )
+    print(
+        f"Live reasoning view (from Weave): http://127.0.0.1:{args.live_view_port}",
+        flush=True,
+    )
+    return view
+
+
+def _stop_live_view(view: subprocess.Popen[bytes]) -> None:
+    time.sleep(LIVE_VIEW_LINGER_SECONDS)
+    view.terminate()
+    with suppress(Exception):
+        view.wait(timeout=5)
+
+
 def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None = None) -> int:
     args = _parse_args(argv)
     environment = os.environ if environ is None else environ
 
-    if args.live_demo and not (
-        environment.get("DISPLAY") or environment.get("WAYLAND_DISPLAY")
-    ):
+    if args.live_demo and not (environment.get("DISPLAY") or environment.get("WAYLAND_DISPLAY")):
         print("Refusing live demo: no graphical display is available.", file=sys.stderr)
         return 2
 
     settings = IntegrationSettings.from_environ(environment)
+    if args.live_view and not settings.trace.enabled:
+        print(
+            "Refusing live view: it reads from Weave, and Weave tracing is disabled "
+            "(set NOOB_AGENT_TRACE_MODE=weave and WEAVE_DISABLED=false).",
+            file=sys.stderr,
+        )
+        return 2
     if settings.model.provider == "disabled":
         print("Refusing to run: NOOB_AGENT_MODEL_PROVIDER is disabled.", file=sys.stderr)
         return 2
@@ -216,6 +267,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         )
 
     trace = build_trace_sink(settings.trace, wandb=settings.wandb)
+    view = _start_live_view(args, sequence_id, environment) if args.live_view else None
     timed_out = False
     try:
         with EpisodeStore.open(database) as store:
@@ -231,6 +283,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                 action_max_output_tokens=settings.model.action_max_output_tokens,
                 builder_max_output_tokens=settings.model.builder_max_output_tokens,
                 action_thinking=settings.model.action_thinking,
+                builder_thinking=settings.model.builder_thinking,
                 condition=_condition_for(args),
                 persistent_connector=args.live_demo,
             )
@@ -242,15 +295,15 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
             )
             try:
                 result = asyncio.run(
-                    asyncio.wait_for(run, timeout=args.deadline_seconds)
-                    if args.live_demo
-                    else run
+                    asyncio.wait_for(run, timeout=args.deadline_seconds) if args.live_demo else run
                 )
             except TimeoutError:
                 timed_out = True
     finally:
         with suppress(Exception):
-            trace.flush()
+            close_trace(trace)
+        if view is not None:
+            _stop_live_view(view)
 
     if timed_out:
         print(

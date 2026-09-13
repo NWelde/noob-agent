@@ -36,6 +36,7 @@ from noob_agent.domain.records import (
 
 TRAINING_SUFFIX = "-training"
 HELDOUT_SUFFIX = "-heldout"
+PRACTICE_SUFFIX = "-practice"
 
 # Per-sequence learning ceilings from eval_protocol.md, Budgets.
 TRAINING_ACTION_TOKEN_CEILING = 40_000
@@ -43,6 +44,9 @@ BUILD_TOKEN_CEILING = 12_000
 REPAIR_TOKEN_CEILING = 8_000
 LEARNING_TOKEN_CEILING = 60_000
 LEARNING_CALL_CEILING = 22
+# The multi-round condition's learning budget (eval_protocol.md, step 22.D).
+MULTI_ROUND_TOKEN_CEILING = 300_000
+MULTI_ROUND_CALL_CEILING = 140
 
 CAPPED_FINISH_REASON = "length"
 
@@ -86,11 +90,38 @@ class EpisodeStats(ScoreModel):
     skill_uses: int | None
 
 
+class RoundSummary(ScoreModel):
+    """One improvement round as the bench saw it: public practice score and decision."""
+
+    round: int
+    version: int | None
+    decision: str
+    practice_rate: float | None
+    practice_primitives: int
+    practice_goals: int | None
+    practice_episodes: int
+
+
+class CurveSummary(ScoreModel):
+    """One kept version's held-out result, evaluated after the loop ended."""
+
+    version: int
+    learning_tokens: int
+    heldout_goals: int
+    heldout_episodes: int
+
+
 class SequenceScore(ScoreModel):
     sequence_id: str
+    condition: Literal["single-pass", "multi-round"] = "single-pass"
     acceptance_source: Literal["result", "inferred"]
     training: EpisodeStats | None
     heldout: tuple[EpisodeStats, ...]
+    practice: tuple[EpisodeStats, ...] = ()
+    rounds: tuple[RoundSummary, ...] = ()
+    loop_stop_reason: str | None = None
+    practice_agreement: float | None = None
+    curve: tuple[CurveSummary, ...] = ()
     action: ActionStats
     builder: BuilderStats
     wall_time_seconds: float | None
@@ -133,6 +164,7 @@ class SequenceRecords:
     training: tuple[StoredEpisode, ...]
     heldout: tuple[StoredEpisode, ...]
     model_calls: tuple[ModelCallRecord, ...]
+    practice: tuple[StoredEpisode, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,6 +175,10 @@ class SequenceOutcome:
     builder_stop_reason: str
     grades: Mapping[str, bool] = field(default_factory=dict)
     skill_uses: Mapping[str, int] = field(default_factory=dict)
+    rounds: tuple[RoundSummary, ...] = ()
+    loop_stop_reason: str | None = None
+    practice_agreement: float | None = None
+    curve: tuple[CurveSummary, ...] = ()
 
 
 def load_sequences(database: Path) -> tuple[SequenceRecords, ...]:
@@ -169,7 +205,11 @@ def load_sequences(database: Path) -> tuple[SequenceRecords, ...]:
 
 
 def _read_sequence(connection: sqlite3.Connection, sequence_id: str) -> SequenceRecords:
-    experiments = (sequence_id + TRAINING_SUFFIX, sequence_id + HELDOUT_SUFFIX)
+    experiments = (
+        sequence_id + TRAINING_SUFFIX,
+        sequence_id + HELDOUT_SUFFIX,
+        sequence_id + PRACTICE_SUFFIX,
+    )
     # Schema versions before 3 have no model_call table.
     has_calls = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_call'"
@@ -178,7 +218,7 @@ def _read_sequence(connection: sqlite3.Connection, sequence_id: str) -> Sequence
         tuple(
             _model_call(row)
             for row in connection.execute(
-                "SELECT * FROM model_call WHERE experiment_id IN (?, ?) ORDER BY rowid",
+                "SELECT * FROM model_call WHERE experiment_id IN (?, ?, ?) ORDER BY rowid",
                 experiments,
             )
         )
@@ -190,6 +230,7 @@ def _read_sequence(connection: sqlite3.Connection, sequence_id: str) -> Sequence
         training=_read_episodes(connection, experiments[0]),
         heldout=_read_episodes(connection, experiments[1]),
         model_calls=calls,
+        practice=_read_episodes(connection, experiments[2]),
     )
 
 
@@ -305,13 +346,18 @@ def score_sequence(
     records: SequenceRecords, outcome: SequenceOutcome | None = None
 ) -> SequenceScore:
     """Score one sequence from its records and, when known, its in-process outcome."""
-    episodes = records.training + records.heldout
+    episodes = records.training + records.heldout + records.practice
     action_calls = [call for call in records.model_calls if call.purpose == "action"]
     builder_calls = [call for call in records.model_calls if call.purpose != "action"]
     training_experiment = records.sequence_id + TRAINING_SUFFIX
+    practice_experiment = records.sequence_id + PRACTICE_SUFFIX
     training_action_calls = [
         call for call in action_calls if call.experiment_id == training_experiment
     ]
+    practice_action_calls = [
+        call for call in action_calls if call.experiment_id == practice_experiment
+    ]
+    multi_round = bool(records.practice) or bool(practice_action_calls)
 
     action = ActionStats(
         calls=len(action_calls),
@@ -346,8 +392,10 @@ def score_sequence(
         stop_reason=stop_reason,
     )
 
-    learning = training_action_calls + builder_calls
+    learning = training_action_calls + practice_action_calls + builder_calls
     learning_tokens = sum(_tokens(call) for call in learning)
+    token_ceiling = MULTI_ROUND_TOKEN_CEILING if multi_round else LEARNING_TOKEN_CEILING
+    call_ceiling = MULTI_ROUND_CALL_CEILING if multi_round else LEARNING_CALL_CEILING
     exceeded: list[str] = []
     if sum(_tokens(call) for call in training_action_calls) > TRAINING_ACTION_TOKEN_CEILING:
         exceeded.append("training_action_tokens")
@@ -355,9 +403,9 @@ def score_sequence(
         exceeded.append("build_tokens")
     if any(_tokens(c) > REPAIR_TOKEN_CEILING for c in builder_calls if c.purpose == "repair"):
         exceeded.append("repair_tokens")
-    if learning_tokens > LEARNING_TOKEN_CEILING:
+    if learning_tokens > token_ceiling:
         exceeded.append("learning_tokens")
-    if len(learning) > LEARNING_CALL_CEILING:
+    if len(learning) > call_ceiling:
         exceeded.append("learning_calls")
     if any(_usage_unknown(call) for call in records.model_calls):
         exceeded.append("usage_unknown")
@@ -367,6 +415,12 @@ def score_sequence(
         acceptance_source=source,
         training=_episode_stats(records.training[0], outcome) if records.training else None,
         heldout=tuple(_episode_stats(stored, outcome) for stored in records.heldout),
+        practice=tuple(_episode_stats(stored, outcome) for stored in records.practice),
+        rounds=() if outcome is None else outcome.rounds,
+        loop_stop_reason=None if outcome is None else outcome.loop_stop_reason,
+        practice_agreement=None if outcome is None else outcome.practice_agreement,
+        curve=() if outcome is None else outcome.curve,
+        condition="multi-round" if multi_round else "single-pass",
         action=action,
         builder=builder,
         wall_time_seconds=_wall_time(episodes, records.model_calls),
@@ -513,5 +567,29 @@ def render_markdown(score: RunScore, *, title: str) -> str:
             f" {_format(sequence.wall_time_seconds)} | {sequence.learning_tokens} |"
             f" {', '.join(sequence.ceilings_exceeded) or 'none'} | {done} |"
         )
+    round_rows = [
+        (sequence, summary) for sequence in score.sequences for summary in sequence.rounds
+    ]
+    if round_rows:
+        lines.extend(
+            [
+                "",
+                "| Sequence | Round | Version | Decision | Practice terminal rate |"
+                " Practice primitives | Practice goals (private) | Loop stop |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for sequence, summary in round_rows:
+            goals = (
+                "unknown"
+                if summary.practice_goals is None
+                else f"{summary.practice_goals} of {summary.practice_episodes}"
+            )
+            lines.append(
+                f"| {sequence.sequence_id} | {summary.round} | {_format(summary.version)} |"
+                f" {summary.decision} | {_format(summary.practice_rate)} |"
+                f" {summary.practice_primitives} | {goals} |"
+                f" {_format(sequence.loop_stop_reason)} |"
+            )
     lines.append("")
     return "\n".join(lines)

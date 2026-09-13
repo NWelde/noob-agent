@@ -2531,8 +2531,21 @@ never worked around by changing budgets, seeds, or grading.
   `tests/test_builder_prompts.py`, `CHANGELOG.md`.
 - A repair prompt carries the API reference, the primitive definitions, the same
   bounded evidence, the rejected source, and the public failure evidence.
-- The repair output cap defaults to 3,000 and the repair prompt stays under
-  5,000 estimated tokens, so a repair fits the 8,000-token ceiling.
+- The repair output cap defaults to 3,000, or the configured Builder cap if that
+  is smaller, and the repair prompt stays under 5,000 estimated tokens, so a
+  repair fits the 8,000-token ceiling.
+- **Implementation detail (2026-09-13).** The source, the name to keep, and at
+  most three failing checks with 300 characters of evidence each are always
+  included. The primitive definitions and then the trace are added only while the
+  prompt still fits, so even a 12 KiB skill's repair stays in budget. The worked
+  example was tightened to keep the system prompt at about 1,240 estimated
+  tokens.
+- **Renamed repairs (found in the 22.B bench).** A repair that changes the skill's
+  name used to raise `UnknownSkillVersionError` and end the sequence. It is now a
+  public `package/renamed_repair` rejection that spends a repair and re-sends the
+  last recorded source, and every repair prompt names the skill to keep.
+- `BuilderOutcome.attempts` may be 0 when the learning budget is already spent
+  before the first call.
 - A reply that ends at its cap with no complete candidate stops the Builder
   with the new stop reason `truncated_reply`, distinct from `unusable_reply`.
 - The Builder stops before a call that would exceed the sequence's learning
@@ -2564,6 +2577,19 @@ never worked around by changing budgets, seeds, or grading.
   concurrent validation reports the same first failure as sequential
   validation for every existing rejection fixture.
 - Acceptance: single-pass sequence wall time at most 4 minutes in the bench.
+- **Implementation details (2026-09-13).**
+  - Validation runs in three concurrent phases (training replay, the five
+    negative cases, the variation) so a failing phase still stops validation
+    before the next one starts.
+  - The Weave sink nests calls per episode ID. `flush()` only delivers, and a new
+    `close()` ends any open episode calls at run exit.
+  - The first live run deadlocked. A Weave client's `flush()` blocks the event
+    loop until in-flight traced calls finish, and those were other episodes'
+    model calls awaiting replies. Concurrent cells therefore skip the
+    per-episode flush, and the sequence flushes once after all cells end.
+  - The file list also includes `observability/tracing.py`,
+    `runtime/runner.py`, `runtime/heldout.py`, `agents/builder.py`,
+    `tests/test_trace_flush.py`, and `tests/test_model_calls.py`.
 
 ### Step 22.D - Multi-round improvement loop
 
@@ -2612,6 +2638,23 @@ never worked around by changing budgets, seeds, or grading.
   score never decreases between kept versions, and the scorecard reports the
   practice-grade agreement rate and held-out results next to cold results on
   the same seeds.
+- **Implementation details (2026-09-13).**
+  - The registry now also accepts an *accepted* version as a parent, for a
+    refinement. `skill_contract.md` states the refinement lineage.
+  - `BuilderAgent.refine` stops at `validated`, and the loop then accepts or
+    rejects the version.
+  - `HeldOutRunner` takes an explicit offering and split, so a validated
+    refinement can play practice before acceptance.
+  - `LearningSequence` exposes its training, Builder, and cell helpers.
+  - The validator no longer rejects a no-input skill for succeeding in the
+    invalid-input case when no invalid input exists; this bug surfaced while
+    building the loop.
+  - A refinement call is recorded with purpose `build`, because each Builder
+    recorder labels its first call a build.
+  - The file list also includes `skills/registry.py`, `agents/builder.py`,
+    `runtime/heldout.py`, `runtime/sequence.py`,
+    `verification/validator.py`, `observability/loop_scorecard.py`, and
+    `skill_contract.md`.
 
 ### Step 22.G - Minecraft confirmation
 
@@ -2731,6 +2774,106 @@ with a persistent connector.
 Each step reverts alone. Reverting 23a restores a new window per episode;
 reverting 23b removes the view. Neither changes the schema or any recorded
 value.
+
+## 24. Approved core-loop milestone: loop follow-ups
+
+**Approval basis.** After the section 22 report on 2026-09-13, the requester
+replied "keep going and push the PRs when done". This section records the
+follow-ups that report recommended. Its pull requests state that basis at the top
+so a reviewer can reject any step.
+
+### Evidence
+
+- **Wrong accounting is the top rejection.** In `loop-bench-22e`, 4 of 5
+  rejections were `contract/incorrect_action_accounting`. The inspected candidate
+  called the free `context.observe()` and then added `used += 1`, treating it like
+  Doom's charged `observe` tool. The Builder's API reference does not say that
+  `context.observe()` charges nothing.
+- **The multi-round loop stops too early.** In `loop-bench-22d`, the rule "stop
+  after one round without improvement" ended every refining sequence after one
+  refinement. The 2-seed practice score can only be 0, 0.5, or 1, which is too
+  coarse to reward a partial improvement. Refinement calls are also recorded with
+  purpose `build`.
+- **Minecraft observations overrun the token ceiling.** In
+  `mc-confirm-22g-20260913T125747Z`, the median Action input was about 2,300
+  tokens, above the 2,000 per decision that fits the 40,000-token training
+  ceiling. Visible objects take about 80% of the observation JSON, much of it null
+  properties and spaced JSON.
+
+### What this approves
+
+- Builder prompt text about action accounting (step 24a).
+- A patience of 2 rounds, a `basic-v3` Doom manifest with four practice seeds,
+  and a `refine` model-call purpose (step 24b).
+- A compact rendering of the Action observation and history (step 24c).
+
+It does not approve changing any connector, observation content, budget,
+grader, validation rule, held-out scenario, or seed. Each needs its own approval.
+
+### Step 24a - Accounting-clear Builder prompt
+
+- Files: `src/noob_agent/prompts/builder.py`, `tests/test_builder_prompts.py`,
+  `docs/loop-optimization.md`, `CHANGELOG.md`.
+- The API reference says that `context.observe()`, `remaining_budget()`, and
+  `log()` charge nothing. It also says that `primitive_actions_used` must equal
+  the sum of `result.primitive_actions_charged` over the skill's own `call`
+  results, and must never be counted by hand.
+- Tests first:
+  - the reference states that `observe` is free and states the accounting rule;
+  - the system prompt stays under its size limit, and the worst-case repair still
+    fits.
+- Acceptance: a 5-sequence live bench reports the number of
+  `incorrect_action_accounting` rejections next to `loop-bench-22e`.
+
+### Step 24b - Multi-round tuning
+
+- Files: `src/noob_agent/runtime/improvement.py`,
+  `src/noob_agent/models/recording.py`, `src/noob_agent/domain/records.py`,
+  new `scenarios/doom/basic-v3/manifest.json`, `scripts/loop_bench.py`,
+  `eval_protocol.md`, tests, `docs/loop-optimization.md`, `CHANGELOG.md`.
+- **Patience.** The loop stops after 2 consecutive rounds without a kept
+  version. A refinement that fails validation counts as a round without
+  improvement. After a round without improvement, the next refinement still starts
+  from the incumbent.
+- **Four practice seeds.** `basic-v3` is `basic-v2` with practice seeds
+  20260913, 20260915, 20260916, and 20260917, so two targets start on each side of
+  center.
+- **Refinement purpose.** A refinement's model call is recorded with purpose
+  `refine`, and its repairs with `repair`.
+- The multi-round budget in `eval_protocol.md` is unchanged, and its stop rule is
+  amended to patience 2.
+- Tests first:
+  - a single round without improvement continues;
+  - two rounds in a row stop;
+  - a kept version resets the count;
+  - the `refine` purpose is recorded;
+  - the v3 practice seeds are distinct and show the target.
+- Acceptance: a 5-sequence live multi-round bench reports how many rounds each
+  sequence logged, practice-grade agreement, and held-out results against
+  `loop-bench-22d`.
+
+### Step 24c - Compact Action observation
+
+- Files: `src/noob_agent/prompts/action.py`, `tests/test_action_decisions.py`,
+  `docs/loop-optimization.md`, `CHANGELOG.md`.
+- The observation JSON in the Action prompt:
+  - omits null values and empty collections;
+  - uses compact separators;
+  - rounds floats to two decimals.
+- History subgoals are cut to 100 characters.
+- No field with a value is removed, and no object is dropped.
+- Tests first:
+  - the rendered observation parses back to the original with nulls and empty
+    collections removed;
+  - every visible object is still present;
+  - the prompt for a recorded Minecraft-sized observation is at least 20% shorter.
+- Acceptance: one cold live Minecraft episode has a median Action input of at most
+  2,000 tokens, and a 5-sequence Doom bench keeps 0 unusable replies.
+
+### Rollback
+
+Each step reverts alone. Reverting 24b restores the one-round stop and `basic-v2`;
+`basic-v3` becomes unused.
 
 ## References
 

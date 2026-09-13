@@ -404,3 +404,21 @@ async def test_a_reused_connector_after_a_finished_episode_matches_a_fresh_one()
     finally:
         await reused.close()
         await fresh.close()
+
+
+async def test_basic_v2_keeps_v1_cells_and_adds_distinct_visible_practice_seeds() -> None:
+    v1 = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    v2 = json.loads(Path("scenarios/doom/basic-v2/manifest.json").read_text(encoding="utf-8"))
+
+    for scenario_id, scenario in v1["scenarios"].items():
+        assert v2["scenarios"][scenario_id]["seeds"] == scenario["seeds"]
+        assert v2["scenarios"][scenario_id]["split"] == scenario["split"]
+    practice = v2["scenarios"][TRAINING]["practice_seeds"]
+    every_other_seed = {seed for s in v2["scenarios"].values() for seed in s["seeds"]}
+    assert len(practice) == 2 and not set(practice) & every_other_seed
+    connector = DoomConnector()
+    try:
+        for seed in practice:
+            _target(await connector.reset(TRAINING, seed))
+    finally:
+        await connector.close()

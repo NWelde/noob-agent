@@ -70,6 +70,34 @@ The self-improving and notes conditions may use at most 22 learning model calls
 and 60,000 learning tokens before held-out evaluation. Unused budget is not
 reallocated. Actual calls, tokens, latency, and cost are always reported.
 
+### Multi-round self-improving condition
+
+This separately named condition (`hackathon_plan.md` section 22, step 22.D)
+refines the skill before held-out evaluation. It is never pooled with
+single-pass results.
+
+- **Round 0.** Round 0 is the single-pass training attempt and build above.
+- **Practice.** The accepted skill plays a fixed set of training-split practice
+  seeds (`scenarios/doom/basic-v2`: `practice_seeds`). Each practice episode has
+  the held-out episode budget and a fresh Action conversation.
+- **Refinement.** Each later round makes one refinement call, up to 12,000
+  tokens, plus its repairs, up to 8,000 tokens each. A validated refinement plays
+  the same practice seeds.
+- **Keep or reject.** A refinement is accepted, and the incumbent retired, only
+  if its public practice score is higher: the fraction of practice episodes ending
+  in a terminal state, with fewer primitive actions breaking ties. Otherwise it is
+  rejected and the loop stops.
+- **Stopping.** The loop stops after 3 refinement rounds, a round without
+  improvement, a perfect practice score, or the learning budget.
+- **Learning budget.** At most 140 learning model calls, 300,000 learning tokens
+  (training, Builder, and practice calls), and 900 seconds of learning wall time.
+- **Held-out.** Held-out cells run once, after the loop has ended, with the final
+  version. A learning curve, if reported, evaluates earlier kept versions only
+  after the loop has ended.
+- **Grades.** Private grades of practice episodes are recorded only to report how
+  often the public practice score agrees with them. They never select a version or
+  reach a model.
+
 Skills do not receive free actions: nested primitives count toward the same
 held-out limit. Cold results are compared under equal held-out budgets, while
 total adaptation cost is disclosed separately.

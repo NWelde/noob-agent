@@ -40,14 +40,25 @@ class RecordingWeaveClient:
         self.operations.append("flush")
 
 
-def test_flush_closes_an_open_episode_before_flushing_the_client() -> None:
+def test_close_closes_an_open_episode_before_flushing_the_client() -> None:
+    client = RecordingWeaveClient()
+    sink = WeaveTraceSink(client)
+    sink.record(TraceEvent(name="episode.started", attributes={"episode_id": "ep_0001"}))
+
+    sink.close()
+
+    assert client.operations == ["create", "finish", "flush"]
+
+
+def test_flush_delivers_without_closing_episodes_that_are_still_running() -> None:
+    """Section 22.E: one episode's flush must not close a concurrent episode's call."""
     client = RecordingWeaveClient()
     sink = WeaveTraceSink(client)
     sink.record(TraceEvent(name="episode.started", attributes={"episode_id": "ep_0001"}))
 
     sink.flush()
 
-    assert client.operations == ["create", "finish", "flush"]
+    assert client.operations == ["create", "flush"]
 
 
 def test_a_client_flush_failure_does_not_escape() -> None:

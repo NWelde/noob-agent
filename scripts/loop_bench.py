@@ -27,6 +27,8 @@ from noob_agent.connectors.protocol import GameConnector
 from noob_agent.domain.records import StoredEpisode
 from noob_agent.models.client import ModelClient, build_model_client
 from noob_agent.observability.loop_scorecard import (
+    CurveSummary,
+    RoundSummary,
     RunScore,
     SequenceOutcome,
     load_sequences,
@@ -35,7 +37,8 @@ from noob_agent.observability.loop_scorecard import (
     score_run,
     score_sequence,
 )
-from noob_agent.observability.tracing import NullTraceSink, TraceSink, build_trace_sink
+from noob_agent.observability.tracing import NullTraceSink, TraceSink, build_trace_sink, close_trace
+from noob_agent.runtime.improvement import ImprovementLoop, ImprovementResult
 from noob_agent.runtime.sequence import HeldOutCell, LearningSequence, LearningSequenceResult
 from noob_agent.settings import IntegrationSettings
 from noob_agent.skills.executor import SkillExecutor, build_skill_executor
@@ -45,6 +48,8 @@ from noob_agent.storage import EpisodeStore
 DEFAULT_MANIFEST = Path("scenarios/doom/basic-v1/manifest.json")
 DEFAULT_OUTPUT_DIR = Path(".noob-agent/loop-bench")
 BENCH_CONDITION = "loop-bench"
+MULTI_ROUND_CONDITION = "loop-bench-multi-round"
+DEFAULT_HELDOUT_CONCURRENCY = 6
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     run.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     run.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     run.add_argument("--run-id", default=None)
+    run.add_argument(
+        "--rounds",
+        type=int,
+        default=0,
+        help="Refinement rounds over practice seeds (0 runs the single-pass sequence).",
+    )
+    run.add_argument(
+        "--curve",
+        action="store_true",
+        help="With --rounds, evaluate every kept version on the held-out cells afterwards.",
+    )
+    run.add_argument(
+        "--heldout-concurrency",
+        type=int,
+        default=DEFAULT_HELDOUT_CONCURRENCY,
+        help="Held-out cells played at once (1 plays them one after another).",
+    )
 
     score = commands.add_parser("score", help="Score an existing database, read-only.")
     score.add_argument("--database", type=Path, required=True)
@@ -76,7 +98,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parsed = parser.parse_args(argv)
     if parsed.command == "run" and parsed.sequences < 1:
         parser.error("--sequences must be at least 1")
+    if parsed.command == "run" and parsed.heldout_concurrency < 1:
+        parser.error("--heldout-concurrency must be at least 1")
+    if parsed.command == "run" and parsed.rounds < 0:
+        parser.error("--rounds cannot be negative")
+    if parsed.command == "run" and parsed.curve and parsed.rounds == 0:
+        parser.error("--curve requires --rounds")
     return parsed
+
+
+def _practice_cells(manifest_path: Path) -> tuple[HeldOutCell, ...]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return tuple(
+        HeldOutCell(scenario_id, int(seed))
+        for scenario_id, scenario in manifest["scenarios"].items()
+        if scenario["split"] == "training"
+        for seed in scenario.get("practice_seeds", ())
+    )
 
 
 def _cells(manifest_path: Path) -> tuple[HeldOutCell, tuple[HeldOutCell, ...]]:
@@ -123,6 +161,48 @@ def _outcome(result: LearningSequenceResult[Any]) -> SequenceOutcome:
     )
 
 
+def _goal_completed(grade: Any) -> bool:
+    return bool(getattr(grade, "goal_completed", False))
+
+
+def _loop_outcome(result: ImprovementResult[Any]) -> SequenceOutcome:
+    episodes = [result.training, *result.heldout]
+    grades = {episode.episode_id: _goal_completed(episode.grade) for episode in episodes}
+    for report in result.rounds:
+        grades.update({e.episode_id: _goal_completed(e.grade) for e in report.practice})
+    return SequenceOutcome(
+        builder_accepted=result.final_version is not None,
+        builder_stop_reason=result.rounds[0].builder.stop_reason
+        if result.rounds and result.rounds[0].builder is not None
+        else result.stop_reason,
+        grades=grades,
+        skill_uses={e.episode_id: e.skill_uses for e in result.heldout},
+        rounds=tuple(
+            RoundSummary(
+                round=report.round,
+                version=None if report.version is None else report.version.version,
+                decision=report.decision,
+                practice_rate=None if report.score is None else report.score.terminal_rate,
+                practice_primitives=0 if report.score is None else report.score.primitives,
+                practice_goals=sum(1 for e in report.practice if _goal_completed(e.grade)),
+                practice_episodes=len(report.practice),
+            )
+            for report in result.rounds
+        ),
+        loop_stop_reason=result.stop_reason,
+        practice_agreement=result.practice_agreement,
+        curve=tuple(
+            CurveSummary(
+                version=point.version,
+                learning_tokens=point.learning_tokens,
+                heldout_goals=sum(1 for e in point.heldout if _goal_completed(e.grade)),
+                heldout_episodes=len(point.heldout),
+            )
+            for point in result.curve
+        ),
+    )
+
+
 def _write(score: RunScore, output_dir: Path, name: str, title: str) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     markdown = render_markdown(score, title=title)
@@ -150,6 +230,13 @@ def _run(
         print(f"Refusing to run: {database} already exists.", file=sys.stderr)
         return 2
     training, heldout = _cells(args.manifest)
+    practice = _practice_cells(args.manifest)
+    if args.rounds and not practice:
+        print(
+            f"Refusing to run: --rounds needs practice_seeds in {args.manifest}.",
+            file=sys.stderr,
+        )
+        return 2
 
     if dependencies is None:
         try:
@@ -168,23 +255,43 @@ def _run(
             for index in range(1, args.sequences + 1):
                 sequence_id = f"{run_id}-s{index:02d}"
                 print(f"{sequence_id}: running", file=sys.stderr, flush=True)
-                sequence = LearningSequence(
-                    connector_factory=dependencies.connector_factory,
-                    client=dependencies.client,
-                    model_id=model_id,
-                    store=store,
-                    registry=SkillRegistry(),
-                    executor=dependencies.executor,
-                    grade=dependencies.grade,
-                    trace=trace,
-                    action_max_output_tokens=settings.model.action_max_output_tokens,
-                    builder_max_output_tokens=settings.model.builder_max_output_tokens,
-                    action_thinking=settings.model.action_thinking,
-                    condition=BENCH_CONDITION,
-                )
+                options: dict[str, Any] = {
+                    "connector_factory": dependencies.connector_factory,
+                    "client": dependencies.client,
+                    "model_id": model_id,
+                    "store": store,
+                    "registry": SkillRegistry(),
+                    "executor": dependencies.executor,
+                    "grade": dependencies.grade,
+                    "trace": trace,
+                    "action_max_output_tokens": settings.model.action_max_output_tokens,
+                    "builder_max_output_tokens": settings.model.builder_max_output_tokens,
+                    "action_thinking": settings.model.action_thinking,
+                    "builder_thinking": settings.model.builder_thinking,
+                    "condition": BENCH_CONDITION if not args.rounds else MULTI_ROUND_CONDITION,
+                    "heldout_concurrency": args.heldout_concurrency,
+                }
                 try:
+                    if args.rounds:
+                        loop = ImprovementLoop(
+                            max_rounds=args.rounds,
+                            grade_success=_goal_completed,
+                            **options,
+                        )
+                        improved = asyncio.run(
+                            loop.run(
+                                sequence_id=sequence_id,
+                                training_scenario_id=training.scenario_id,
+                                training_seed=training.seed,
+                                practice=practice,
+                                heldout=heldout,
+                                curve=args.curve,
+                            )
+                        )
+                        outcomes[sequence_id] = _loop_outcome(improved)
+                        continue
                     result = asyncio.run(
-                        sequence.run(
+                        LearningSequence(**options).run(
                             sequence_id=sequence_id,
                             training_scenario_id=training.scenario_id,
                             training_seed=training.seed,
@@ -201,7 +308,7 @@ def _run(
                 outcomes[sequence_id] = _outcome(result)
     finally:
         with suppress(Exception):
-            trace.flush()
+            close_trace(trace)
 
     records = load_sequences(database)
     score = score_run(
