@@ -2034,6 +2034,25 @@ Reverting this milestone removes live-demo mode and its cancellation-specific
 durability handling. Existing databases remain readable because there is no
 schema change. The display and replay features from section 19 remain intact.
 
+### One-run high-token loop diagnostic
+
+The requester approved one additional non-benchmark live run on 2026-09-12 to
+test whether truncation is preventing the complete learning loop. This run may
+override the existing per-call defaults with
+`NOOB_AGENT_ACTION_MAX_OUTPUT_TOKENS=2000` and
+`NOOB_AGENT_BUILDER_MAX_OUTPUT_TOKENS=8000`, the maximum values already
+validated by `ModelSettings`. It keeps the same model, prompts, scenarios,
+decision and primitive limits, visible real-time connector, 600-second overall
+deadline, local skill sandbox label, separate database, and Weave tracing.
+
+This is a paid diagnostic and not benchmark evidence. Success means the Action
+agent completes training, the Builder authors a valid accepted skill, and the
+existing sequence automatically exercises that skill across all six held-out
+cells before the deadline. Model behavior is not forced or scripted: failure,
+truncation, validation rejection, or deadline termination is recorded and
+reported as observed. No code or persistent environment setting changes for
+this diagnostic.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
