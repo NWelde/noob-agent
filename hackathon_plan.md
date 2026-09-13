@@ -1625,6 +1625,143 @@ Each step is its own pull request and can be reverted alone. Reverting 8a
 restores `doom-vizdoom-v1`. 8b and 8c add only new modules, tests, and a script.
 No step changes the SQLite schema or dependencies.
 
+## 18. Approved core-loop milestone: model call records and reply-length settings
+
+This section is the explicit approval required by `CLAUDE.md` and `AGENTS.md`
+to diagnose and fix the first live Doom learning sequence. That run is recorded
+in `docs/current-status.md`: 13 of 20 Action replies were unusable, and the
+Builder reply was unusable at exactly its 2,048-token cap, so no skill was
+accepted and every held-out episode was skipped. Section 17 held prompts and
+budgets fixed, so no fix could be made under it.
+
+### Evidence
+
+- **Reasoning shares the output cap.** A diagnostic call on 2026-09-12 replayed
+  that run's first Action prompt through W&B Inference with
+  `deepseek-ai/DeepSeek-V4-Flash-0731` and the 512-token Action cap. In one
+  reply the message content was empty. In another the provider returned a
+  separate `reasoning` field of 1,391 characters and a 240-character JSON
+  decision, with `finish_reason=stop` and 392 completion tokens. Reasoning
+  tokens count against `max_tokens`, so whenever reasoning runs past the cap the
+  content is empty or cut off, and the Action agent records `unusable_reply`.
+  The first call's finish reason was not captured, so running out of tokens is
+  strongly indicated but not proven for that reply.
+- **The harness discards what would show this.** `WandbInferenceClient` keeps
+  only `message.content`. It drops `finish_reason` and the reasoning field, and
+  it records missing usage as zero.
+- **No model call records exist.** Section 9 defines a Model call record, but
+  nothing persists or traces model requests or responses, so an unusable reply
+  cannot be diagnosed after a run.
+- **The caps are not protocol values.** The Action cap of 512 and the Builder
+  cap of 2,048 are code defaults. `eval_protocol.md` sets per-phase token
+  ceilings (40,000 for training action, 12,000 for a build, 8,000 for a repair,
+  24,000 per held-out episode) and requires the same maximum response tokens
+  for every compared model.
+
+It authorizes: persisted and traced Model call records; capture of the finish
+reason, provider reasoning text, and whether usage was reported; per-role
+maximum output token settings that are recorded with every call; one storage
+schema upgrade; and one more live Doom learning sequence.
+
+It does not authorize changes to the Action or Builder prompt text or reply
+formats, decision, primitive, or wall-time budgets, stop rules, connectors,
+graders, skill contract or static policy, held-out content, the comparison
+runner, report generation, or dependencies. It also does not authorize
+provider-specific reasoning controls such as disabling reasoning or setting a
+reasoning effort, enforcing the `eval_protocol.md` token ceilings, or changing
+the model. Each of those needs its own approval.
+
+### Step 18a - Model call records
+
+- Files: `src/noob_agent/models/client.py`, which adds optional
+  `finish_reason`, optional `reasoning`, and `usage_reported` to
+  `ModelResponse`, and makes `WandbInferenceClient` fill them from the provider
+  response. New `src/noob_agent/models/recording.py`, a `RecordingModelClient`
+  wrapper that writes one record per call. New `ModelCallRecord` in
+  `src/noob_agent/domain/records.py`. `src/noob_agent/storage/schema.py` and
+  `repository.py` for a `model_call` table. `src/noob_agent/runtime/sequence.py`
+  to wrap the client for each role. `src/noob_agent/observability/tracing.py` for
+  a best-effort mirror. New `tests/test_model_calls.py`. `CHANGELOG.md`.
+- Record contents: call ID; experiment ID; purpose (`action`, `build`, or
+  `repair`); the episode the call served, which is the acting episode for
+  Action calls and the authoring episode for Builder calls; for Action calls,
+  the `action_id` the reply produced; provider and exact model ID; system text,
+  prompt text, maximum output tokens, and temperature; response text; reasoning
+  text when the provider returns one; finish reason; input and output tokens,
+  stored as unknown rather than zero when the provider does not report them;
+  latency; and error text. Credentials are never stored, logged, or traced.
+  Records are written only after the call returns or fails, and they never
+  enter a prompt, observation, evidence selection, or grade.
+- Schema: raise `SCHEMA_VERSION` to 3 and upgrade a version-2 database in
+  place, adding the table without changing existing rows. The pull request must
+  state that the upgrade was checked against a copy of the live-run database.
+- Tests first: with a fake provider, every Action, Build, and Repair call
+  writes exactly one record with the right purpose and links. A provider reply
+  with `finish_reason=length` and empty content is recorded as such, while the
+  agent still records `unusable_reply` and still charges the decision exactly as
+  before. Usage the provider did not report is stored as unknown. A failing
+  provider call is recorded with its error and still raises. A version-2
+  database upgrades to version 3 with its episodes intact. No record text
+  reaches a later prompt. No credential appears in a record, repr, or trace
+  attribute.
+- Validation: `uv run pytest tests/test_model_calls.py -v`, then the full test,
+  Ruff, and strict mypy suites.
+- Acceptance: after any sequence, every model call can be read back with its
+  purpose, links, finish reason, reasoning presence, and usage.
+
+### Step 18b - Per-role maximum output tokens
+
+- Files: `src/noob_agent/settings.py`, adding
+  `NOOB_AGENT_ACTION_MAX_OUTPUT_TOKENS` and
+  `NOOB_AGENT_BUILDER_MAX_OUTPUT_TOKENS` to `ModelSettings`.
+  `src/noob_agent/runtime/heldout.py`, so `HeldOutRunner` passes the Action cap
+  to the agent it creates. `src/noob_agent/runtime/sequence.py`, so the cold
+  Action agent and the Builder receive their caps.
+  `scripts/run_doom_learning_sequence.py`, which reports both caps in its
+  summary. `.env.example`, with the defaults. New
+  `tests/test_output_token_settings.py`. `CHANGELOG.md`.
+- Values: Action 1,024 and Builder 6,000, where the Builder cap covers both
+  build and repair calls. With a prompt of about 1,000 tokens, both fit inside
+  the per-call share of the `eval_protocol.md` ceilings: 40,000 tokens over 20
+  training calls, 12,000 for a build, and 8,000 for a repair. A setting above
+  the protocol ceiling for its phase is refused. The same caps apply to every
+  compared model, and every Model call record carries the cap it used.
+- Tests first: the settings parse and apply those defaults; a value that is not
+  a positive integer, or that exceeds its protocol ceiling, is refused. Cold
+  training, held-out, build, and repair requests each carry the configured cap.
+  With no setting, existing constructors and tests keep today's defaults, so
+  only the sequence and the script opt in to the settings.
+- Validation: `uv run pytest tests/test_output_token_settings.py -v`, then the
+  full test, Ruff, and strict mypy suites.
+- Acceptance: both caps are configurable, validated, identical across models,
+  and visible on every recorded call.
+
+### Step 18c - Second live Doom learning sequence
+
+- Files: `docs/current-status.md` and `CHANGELOG.md`. No code changes.
+- Run: `NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python
+  scripts/run_doom_learning_sequence.py` once, with the same model and the new
+  defaults.
+- Report: the sequence result; for Action, Build, and Repair calls separately,
+  the count by finish reason; how many Action replies were unusable and how
+  many of those stopped for length; token totals against the protocol
+  ceilings; and, if a skill was accepted, every held-out grade.
+- Acceptance: the run is fully recorded, and the diagnosis says whether
+  unusable replies came from truncation, format, or model behavior. A learned
+  skill that wins held-out episodes meets BDP criteria 3 and 5-8 for Doom. If
+  the model still fails, that is reported as a failure, and the next change,
+  such as reasoning controls, a different model, or token-ceiling enforcement,
+  is proposed as a separate plan update rather than made here.
+
+### Rollback
+
+Each step is its own pull request and can be reverted alone. After 18a is
+reverted, the version-2 code refuses any database already upgraded to version
+3 (`EpisodeStore` rejects newer schemas rather than misread them). Keep a copy
+of any database from before the upgrade, or start new Git-ignored
+`.noob-agent/` databases. There is no automatic downgrade. Reverting 18b
+restores the 512 and 2,048 code defaults. 18c changes only documentation.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
