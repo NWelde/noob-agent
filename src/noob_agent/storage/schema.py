@@ -3,11 +3,15 @@
 Public payloads (manifest, observations, requests, results) are stored as JSON
 text exactly as delivered, so a stored episode can be replayed byte-for-byte.
 Scalar columns hold only the bookkeeping the harness queries on.
+
+Version 2 adds the finding, finding_verdict, and reproduction tables. The
+change is additive: a version-1 database gains the new tables on open and its
+recorded episodes are untouched.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -59,6 +63,42 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         total_decisions  INTEGER NOT NULL,
         total_primitives INTEGER NOT NULL,
         finished_at      TEXT    NOT NULL
+    )
+    """,
+    # A finding is the public report; its verdict and reproductions are the
+    # private grader's records and are never read back into a prompt.
+    """
+    CREATE TABLE IF NOT EXISTS finding (
+        finding_id         TEXT PRIMARY KEY,
+        episode_id         TEXT NOT NULL REFERENCES episode (episode_id),
+        action_id          TEXT NOT NULL,
+        reporting_model_id TEXT NOT NULL,
+        report_json        TEXT NOT NULL,
+        reported_at        TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS finding_verdict (
+        finding_id     TEXT PRIMARY KEY REFERENCES finding (finding_id),
+        verification   TEXT NOT NULL,
+        reason_code    TEXT NOT NULL,
+        reason         TEXT NOT NULL,
+        grader_version TEXT NOT NULL,
+        decided_at     TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reproduction (
+        reproduction_id  TEXT    PRIMARY KEY,
+        finding_id       TEXT    NOT NULL REFERENCES finding (finding_id),
+        scenario_id      TEXT    NOT NULL,
+        seed             INTEGER NOT NULL,
+        build            TEXT    NOT NULL,
+        attempted_json   TEXT    NOT NULL,
+        result           TEXT    NOT NULL,
+        predicate_result INTEGER,
+        first_mismatch   TEXT,
+        attempted_at     TEXT    NOT NULL
     )
     """,
     """
