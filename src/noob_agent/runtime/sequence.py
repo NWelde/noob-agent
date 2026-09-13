@@ -139,6 +139,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         condition: str = "self-improving",
         persistent_connector: bool = False,
         action_thinking: bool | None = None,
+        builder_thinking: bool | None = None,
     ) -> None:
         self._connector_factory = connector_factory
         self._client = client
@@ -154,6 +155,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._builder_max_output_tokens = builder_max_output_tokens
         self._condition = condition
         self._action_thinking = action_thinking
+        self._builder_thinking = builder_thinking
         # One game for the whole sequence: reset per episode, closed once at the end.
         self._persistent_connector = persistent_connector
 
@@ -269,6 +271,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             executor=self._executor,
             max_repairs=self._max_repairs,
             max_output_tokens=self._builder_max_output_tokens,
+            thinking=self._builder_thinking,
         )
         outcome = await builder.build(
             select_evidence(training_stored),
