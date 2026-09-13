@@ -87,13 +87,18 @@ class SkillRegistry:
         parent_version: int | None = None,
         reason: str = "Candidate submitted.",
     ) -> SkillVersion:
-        """Record a new candidate. A repair names the rejected version it follows."""
+        """Record a new candidate.
+
+        A repair names the rejected version it follows; a refinement names the
+        accepted version it tries to improve. No other status can be a parent.
+        """
         if parent_version is not None:
             parent = self._find(package.name, parent_version)
-            if parent.status != "rejected":
+            if parent.status not in ("rejected", "accepted"):
                 raise IllegalTransitionError(
                     f"Skill {package.name!r} version {parent_version} is "
-                    f"{parent.status!r}; only a rejected version can be repaired."
+                    f"{parent.status!r}; only a rejected version can be repaired "
+                    "or an accepted version refined."
                 )
 
         recorded = self._versions.setdefault(package.name, [])
