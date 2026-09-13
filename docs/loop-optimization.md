@@ -126,3 +126,31 @@ seeds 20260913 and 20260915, then evaluated the kept versions on held-out:
 - **Practice predicts held-out.** A perfect practice score came with 5 of 6
   held-out goals, and a zero practice score with 1 and 2 of 6. The public practice
   score agreed with the private grade on every practice episode (agreement 1.0).
+
+## Minecraft confirmation (22.G)
+
+On 2026-09-13 one cold Minecraft training episode (`resonator-training-v1`, seed
+20260912) ran through the unchanged runner and live Mineflayer connector with the
+22.A Action agent (JSON-schema decisions, thinking off), on the local server.
+Recorded as `mc-confirm-22g-20260913T125747Z`:
+
+| Metric | Value |
+| --- | --- |
+| Unusable Action replies | 0 of 10 |
+| Action calls ending at their cap | 0 of 10 |
+| Decision latency p50 / p90 | 690 / 1,477 ms |
+| Median Action input tokens | about 2,317 |
+| Episode | `repeated_failure` after 10 decisions and 10 primitives, 11.4 s |
+
+- **The agent used real controls.** It called `observe` three times with a growing
+  radius, moved to reach an unreachable object, inspected it successfully, then
+  inspected a vanished object three times, which triggered the repeated-failure
+  stop.
+- **Decisions are reliable and fast on the second game**, with no Minecraft code
+  change.
+- **Token risk.** Minecraft observations are larger. At about 2,300 input tokens a
+  decision, a full 20-decision training episode would use about 46,000 tokens,
+  above the 40,000-token training ceiling. The observation or history size needs
+  a separately approved change before a Minecraft benchmark run.
+- **Not confirmed on Minecraft:** the Builder, practice rounds, and held-out. Only
+  the cold Action loop was run.
