@@ -2053,6 +2053,25 @@ truncation, validation rejection, or deadline termination is recorded and
 reported as observed. No code or persistent environment setting changes for
 this diagnostic.
 
+### Live window continuity during Builder work
+
+After watching the first two live demos, the requester approved keeping the
+training window open while the Builder authors a skill. In `--live-demo` mode,
+the training connector retains ownership of its ViZDoom instance after the
+episode finishes; the game simulation stays paused on the final training frame
+while the Builder reasons. The instance closes after Builder completion or
+failure, immediately before any fresh held-out connector opens. A whole-run
+deadline or other exception also closes it without replacing the original
+error.
+
+This changes no game state, Builder evidence, prompt, model setting, budget,
+trace, grade, connector result, or normal evaluation lifecycle. `EpisodeRunner`
+gains an explicit opt-out from its default close-on-finish ownership, and
+`LearningSequence` uses that opt-out only when the live-demo runner requests
+window continuity. Tests prove the default still closes, the Builder observes
+the training connector as open only in continuity mode, and every success,
+failure, or cancellation path ultimately closes it.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
