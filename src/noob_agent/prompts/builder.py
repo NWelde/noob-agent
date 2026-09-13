@@ -38,11 +38,13 @@ SKILL_API_REFERENCE = """Skill API (noob-agent.skill.v1). A skill is one module 
 
     async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult
 
-`context` is the only capability. Every method below is the complete surface:
+`context` is the only capability; these methods are the complete surface:
 
-- `await context.observe()` returns the latest public `Observation`:
+- `await context.observe()` returns the latest public `Observation`. It is free:
+  `context.observe()` charges no primitive action and is not the `observe`
+  primitive tool. `remaining_budget()` and `log()` are free too.
   - `observation.sequence` (int), `observation.terminal` (bool)
-  - `observation.status` (dict of public values, for example health or ammo)
+  - `observation.status` (dict of public values such as health)
   - `observation.visible_objects`: a tuple of `VisibleObject`, each with
     `object_id`, `label`, `position` (x, y, z or None), `distance` (float or None),
     and `properties` (dict, for example a screen offset)
@@ -50,32 +52,32 @@ SKILL_API_REFERENCE = """Skill API (noob-agent.skill.v1). A skill is one module 
 - `await context.call(tool_name, **arguments)` runs one listed primitive and
   returns a `StepResult`:
   - `result.status`: "succeeded", "rejected", "failed", or "unknown"
-  - `result.code` and `result.message`: public text explaining the status
+  - `result.code` and `result.message`: public text
   - `result.observation`: the `Observation` after the action
   - `result.primitive_actions_charged` (int)
   Arguments are keywords, for example `await context.call("tool_name", amount=3)`.
-  A rejected or failed call changes nothing you can rely on. Treat "unknown" as
-  inconclusive and stop: never retry it.
+  Treat "unknown" as inconclusive and stop; never retry it.
 - `context.remaining_budget()` returns a `SkillBudget` with `primitive_actions`
   and `wall_time_seconds`. Stop before `primitive_actions` reaches zero.
-- `context.log(event, fields)` records one short public event (a str and a dict).
+- `context.log(event, fields)` records one short public event.
 
 Return exactly one `SkillResult(status=..., summary=..., evidence=...,
 outputs=..., primitive_actions_used=...)`:
 - `status`: "succeeded", "failed", or "inconclusive"
-- `summary`: one non-empty sentence
+- `summary`: one sentence
 - `evidence`: a tuple of `EvidenceRef(kind=..., value=...)`, where `kind` is
   "observation_sequence", "action_id", "object_id", or "message" and `value` is a
   non-empty string from this invocation's own results. A "succeeded" status must
   cite at least one.
 - `outputs`: a JSON-safe dict (optional)
-- `primitive_actions_used`: the sum of `primitive_actions_charged` you received
+- `primitive_actions_used`: `primitive_actions_used` must equal the sum of
+  `result.primitive_actions_charged` over this skill's own `context.call` results;
+  never count actions by hand
 
 Validation runs your skill against the recorded public trace, then against a
 missing target, a failed primitive, an unknown primitive, invalid inputs, and an
 exhausted budget, three times each, and against a copy with renamed object IDs.
-It must return a well-formed result every time, report failure honestly, and
-never loop without spending budget."""
+It must return a well-formed result every time and report failure honestly."""
 
 WORKED_EXAMPLE_SOURCE = '''\
 from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult

@@ -331,3 +331,15 @@ async def test_the_sequence_sends_the_builder_thinking_setting(store: Any) -> No
     builder = [request for request in client.requests if request.system == BUILDER_SYSTEM]
     assert result.builder.accepted is True
     assert builder and all(request.thinking is False for request in builder)
+
+
+def test_the_reference_says_which_context_calls_are_free_and_how_to_count_actions() -> None:
+    reference = " ".join(SKILL_API_REFERENCE.split())
+
+    assert "`context.observe()` charges no primitive action" in reference
+    assert "is not the `observe` primitive tool" in reference
+    assert (
+        "`primitive_actions_used` must equal the sum of `result.primitive_actions_charged`"
+        in reference
+    )
+    assert "never count actions by hand" in reference

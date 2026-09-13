@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 08:37 PDT | [ADDED] | Added section 24 step 24a: the Builder's skill API reference now states that `context.observe()`, `remaining_budget()`, and `log()` charge no primitive action, and that `primitive_actions_used` must equal the sum of `result.primitive_actions_charged` and never be counted by hand, with wording tightened so the worst-case repair still fits. On 5 live Doom sequences every sequence accepted a skill, against 1 of 5 in `loop-bench-22e`, with no accounting rejections.
+
 2026-09-13 08:29 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 24, loop follow-ups from the section 22 report: an accounting-clear Builder prompt (24a), multi-round patience of 2 rounds with four practice seeds in a new `basic-v3` manifest and a `refine` model-call purpose (24b), and a compact Action observation so Minecraft decisions fit the training token ceiling (24c).
 
 2026-09-13 06:03 PDT | [DOCUMENTED] | Recorded the section 22 step 22.G Minecraft confirmation: one cold `resonator-training-v1` episode on the live server with the optimized Action agent made 10 decisions with no unusable or capped replies and a 690 ms median decision, and ended at `repeated_failure`; its roughly 2,300 input tokens per decision would exceed the 40,000-token training ceiling over 20 decisions, which needs a separate approved change before a Minecraft benchmark.
