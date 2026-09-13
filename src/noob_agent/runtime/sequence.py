@@ -220,6 +220,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             action_thinking=self._action_thinking,
             close_connector=not self._persistent_connector,
             on_episode_started=opened.append,
+            flush_trace=self._heldout_concurrency == 1,
         )
         result = await runner.run(
             experiment=heldout_record, scenario_id=cell.scenario_id, seed=cell.seed
@@ -363,7 +364,12 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
                 async with gate:
                     return await self._run_heldout_cell(connector, heldout_record, cell)
 
-            reports = list(await asyncio.gather(*(run_cell(cell) for cell in cells)))
+            try:
+                reports = list(await asyncio.gather(*(run_cell(cell) for cell in cells)))
+            finally:
+                if self._heldout_concurrency > 1 and self._trace is not None:
+                    with suppress(Exception):
+                        self._trace.flush()
         else:
             skipped_reason = outcome.stop_reason
 
