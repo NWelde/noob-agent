@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from noob_agent.agents.action import ActionAgent
+from noob_agent.agents.action import ActionAgent, parse_decision
 from noob_agent.agents.builder import BuilderAgent
 from noob_agent.agents.evidence import select_evidence
 from noob_agent.connectors.minecraft import MinecraftConnector
@@ -69,29 +69,57 @@ def _chat_transcript_lines(
     reply: str | None = None,
     error: str | None = None,
 ) -> tuple[str, ...]:
-    """Render every model-call field into short, first-person chat lines."""
-    fields = (
-        ("system", system),
-        ("prompt", prompt),
-        ("reasoning", reasoning),
-        ("reply", reply),
-        ("error", error),
-    )
-    lines: list[str] = []
-    for label, value in fields:
-        if value is None:
-            continue
-        rendered = " ".join(value.split()) or "<empty>"
-        # Leave ample room for the label and sequence prefix below Minecraft's
-        # 256-character chat limit.
-        chunks = [rendered[index : index + 180] for index in range(0, len(rendered), 180)]
-        for index, chunk in enumerate(chunks, start=1):
-            lines.append(f"[noob:{purpose} {label} {index}/{len(chunks)}] {chunk}")
-    return tuple(lines)
+    """Describe public observations and chosen actions; never dump model internals."""
+    del system, reasoning
+
+    def line(verb: str, body: str) -> tuple[str, ...]:
+        body = " ".join(body.replace("§", "").split())
+        if len(body) > 100:
+            body = body[:97].rstrip() + "..."
+        return (f"[noob:{verb}] {body}",)
+
+    if error is not None:
+        return line("Doing", "paused because the model call failed; details are in Weave.")
+    if purpose == "builder":
+        return line("Learning", "building a skill from this attempt.") if reply is None else ()
+
+    objects: dict[str, str] = {}
+    try:
+        snapshot_text = (prompt or "").split("Current observation (sequence ", 1)[1]
+        snapshot = json.JSONDecoder().raw_decode(snapshot_text.split(":\n", 1)[1])[0]
+        for obj in snapshot.get("visible_objects", []):
+            if isinstance(obj.get("object_id"), str) and isinstance(obj.get("label"), str):
+                objects[obj["object_id"]] = obj["label"]
+    except (IndexError, ValueError, AttributeError, TypeError):
+        pass
+    if reply is None:
+        labels = list(dict.fromkeys(objects.values()))[:3]
+        return line("Seeing", ", ".join(labels) + ".") if labels else ()
+
+    decision = parse_decision(reply)
+    if decision.kind == "unusable":
+        return line("Doing", "unable to choose an action this turn.")
+    if decision.kind == "skill":
+        return line("Doing", f"using the learned skill {decision.name.replace('_', ' ')}.")
+    target = objects.get(str(decision.arguments.get("object_id", "")), "the selected object")
+    if decision.name == "use_object":
+        verb = "Pressing" if "button" in target.lower() else "Doing"
+        return line(verb, f"{target}." if verb == "Pressing" else f"using {target}.")
+    actions = {
+        "observe": "looking around.",
+        "observe_nearby": "looking around.",
+        "move_to": "moving to the selected position.",
+        "look_at": f"looking at {target}.",
+        "inspect_object": f"taking a closer look at {target}.",
+        "collect_object": f"collecting {target}.",
+        "place_object": "placing the selected item.",
+        "wait": "waiting for the world to respond.",
+    }
+    return line("Doing", actions.get(decision.name, "trying the selected action."))
 
 
 class MinecraftChatTranscriptClient:
-    """Mirror a smoke-run model call to Minecraft chat without changing it."""
+    """Narrate a smoke-run model call without changing its recorded contents."""
 
     def __init__(self, inner: ModelClient, connector: MinecraftConnector, *, purpose: str) -> None:
         self._inner = inner
@@ -127,6 +155,7 @@ class MinecraftChatTranscriptClient:
         await self._announce(
             _chat_transcript_lines(
                 purpose=self._purpose,
+                prompt=request.prompt,
                 reasoning=response.reasoning,
                 reply=response.text,
             )
@@ -425,9 +454,12 @@ def main(argv: Sequence[str] | None = None, *, environ: dict[str, str] | None = 
                         + (0 if item["reuse"] is None else int(item["reuse"]["primitives_used"]))
                         for item in summaries
                     )
-                    if len(_records_for_run(store, run_id)) >= CALL_BUDGET or sum(
-                        _call_tokens(record) for record in _records_for_run(store, run_id)
-                    ) >= TOKEN_BUDGET or primitives_used >= PRIMITIVE_BUDGET:
+                    if (
+                        len(_records_for_run(store, run_id)) >= CALL_BUDGET
+                        or sum(_call_tokens(record) for record in _records_for_run(store, run_id))
+                        >= TOKEN_BUDGET
+                        or primitives_used >= PRIMITIVE_BUDGET
+                    ):
                         return
                     index += 1
 
