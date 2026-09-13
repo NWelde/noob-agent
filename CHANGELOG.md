@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 15:22 PDT | [DOCUMENTED] | Rewrote the README's "What is working today" from the section 22–24 scorecards: Doom skills now accepted in 5 of 5 benchmark sequences with 0 of 597 unusable Action replies, held-out at 8 of 30 with practice matching the private grade on every episode, and refinement not yet improving held-out; Minecraft Action loop working live, the recorded redstone run lighting the lamp cold with an unusable Builder reply, and the 40,000-token training ceiling still exceeded. Corrected the redstone image caption to say the frame is a demo recording, not a graded model result.
+
 2026-09-13 15:16 PDT | [DOCUMENTED] | Added a "What it looks like" section to the README with the Doom cold-versus-learned-skill held-out comparison image and a frame from the Minecraft redstone lamp recording (`assets/redstone-lamp-lit.png`), and a section on how runs use W&B Weave (nested episode, step, and model-call traces, the live reasoning view and demo log that read from Weave), trace-driven debugging, and skill isolation (static policy, validator, local subprocess worker, and the not-yet-implemented CoreWeave Sandbox backend).
 
 2026-09-13 12:53 PDT | [DOCUMENTED] | Rewrote the README in plain language, defined project terminology, clarified verified prototype status and limitations, and replaced the compressed repository table with a readable source-tree map.
