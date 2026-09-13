@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-2026-09-12 23:41 PDT | [ADDED] | Added an explicit `--live-demo` mode to the Doom learning-sequence runner: every game episode opens visibly and runs at native speed, the whole sequence has a configurable deadline capped at 600 seconds, storage and experiment records are labeled `non-benchmark-live-demo`, and timeout cleanup durably records cancelled model calls and finalizes an interrupted episode before closing Doom and flushing Weave. Normal evaluation defaults are unchanged.
+2026-09-12 23:41 PDT | [ADDED] | Added an explicit `--live-demo` mode to the Doom learning-sequence runner: every game episode opens visibly and runs at native speed, the whole sequence has a configurable deadline capped at 600 seconds, storage and experiment records are labeled `non-benchmark-live-demo`, and timeout cleanup durably records cancelled model calls and finalizes an interrupted episode before closing Doom and flushing Weave. Normal evaluation defaults are unchanged. Manual run `doom-live-demo-20260912-234243-PDT` opened the WSLg game window, completed before its deadline, and remotely delivered the episode with all 20 Action calls and steps plus the separate Builder call; the model made 9 attacks without turning, did not kill the target, and produced no accepted skill.
 
 2026-09-12 23:35 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 20 for a visibly rendered, real-time, Weave-traced Doom learning sequence with a 600-second whole-run deadline, separate storage, cancellation-safe durable records, and explicit `non-benchmark-live-demo` labeling while leaving ordinary evaluation defaults unchanged.
 
