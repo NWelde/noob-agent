@@ -28,7 +28,7 @@ from noob_agent.agents.action import ActionAgent
 from noob_agent.agents.builder import BuilderAgent, BuilderOutcome
 from noob_agent.agents.evidence import select_evidence
 from noob_agent.connectors.protocol import GameConnector
-from noob_agent.domain.records import ExperimentRecord, StopReason, StoredEpisode
+from noob_agent.domain.records import EpisodeSplit, ExperimentRecord, StopReason, StoredEpisode
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient
 from noob_agent.models.recording import ModelRole, RecordingModelClient
@@ -111,6 +111,26 @@ class HeldOutEpisodeReport(Generic[GradeT]):
     offered_skills: tuple[str, ...]
     skill_uses: int
     grade: GradeT
+    input_tokens: int = 0
+    output_tokens: int = 0
+    decisions_by_model: int = 0
+    # Each skill use as "status: summary", public results only.
+    skill_results: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Trained(Generic[GradeT]):
+    """Cold training and the first Builder run, with the learning spend so far."""
+
+    manifest_tools: tuple[str, ...]
+    connector_version: str
+    training_record: ExperimentRecord
+    heldout_record: ExperimentRecord
+    training: TrainingEpisodeReport[GradeT]
+    training_stored: StoredEpisode
+    outcome: BuilderOutcome
+    spent_tokens: int
+    spent_calls: int
 
 
 @dataclass(frozen=True)
@@ -177,6 +197,8 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._validation_concurrency = validation_concurrency
         # One game for the whole sequence: reset per episode, closed once at the end.
         self._persistent_connector = persistent_connector
+        self._learning_token_budget = LEARNING_TOKEN_BUDGET
+        self._learning_call_budget = LEARNING_CALL_BUDGET
 
     def _recording(
         self, experiment: ExperimentRecord, *, role: ModelRole, episode_id: str | None = None
@@ -192,8 +214,14 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             trace=self._trace,
         )
 
-    async def _run_heldout_cell(
-        self, connector: ConnectorT, heldout_record: ExperimentRecord, cell: HeldOutCell
+    async def _run_cell(
+        self,
+        connector: ConnectorT,
+        record: ExperimentRecord,
+        cell: HeldOutCell,
+        *,
+        split: EpisodeSplit = "held-out",
+        offered: Sequence[SkillVersion] | None = None,
     ) -> HeldOutEpisodeReport[GradeT]:
         heldout_connector = connector if self._persistent_connector else self._connector_factory()
         # Several held-out episodes of one experiment may be open at once, so each
@@ -206,7 +234,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             client=RecordingModelClient(
                 self._client,
                 store=self._store,
-                experiment_id=heldout_record.experiment_id,
+                experiment_id=record.experiment_id,
                 role="action",
                 model_id=self._model_id,
                 clock=self._clock,
@@ -221,9 +249,10 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             close_connector=not self._persistent_connector,
             on_episode_started=opened.append,
             flush_trace=self._heldout_concurrency == 1,
+            offered=offered,
         )
         result = await runner.run(
-            experiment=heldout_record, scenario_id=cell.scenario_id, seed=cell.seed
+            experiment=record, scenario_id=cell.scenario_id, seed=cell.seed, split=split
         )
         stored = self._store.read_episode(result.episode.episode_id)
         return HeldOutEpisodeReport(
@@ -236,50 +265,61 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             offered_skills=tuple(skill.name for skill in result.offered_skills),
             skill_uses=len(result.skill_uses),
             grade=self._grade(stored, heldout_connector),
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            decisions_by_model=len(result.decisions),
+            skill_results=tuple(
+                f"{use.status}: {use.result.summary if use.result is not None else use.message}"
+                for use in result.skill_uses
+            ),
         )
 
-    async def run(
+    async def _run_cells(
         self,
+        connector: ConnectorT,
+        record: ExperimentRecord,
+        cells: Sequence[HeldOutCell],
         *,
-        sequence_id: str,
-        training_scenario_id: str,
-        training_seed: int,
-        heldout: Sequence[HeldOutCell],
-    ) -> LearningSequenceResult[GradeT]:
-        cells = tuple(heldout)
-        if not cells:
-            raise ValueError("A learning sequence needs at least one held-out cell.")
-        if any(cell.scenario_id == training_scenario_id for cell in cells):
-            raise ValueError("A held-out cell must not reuse the training scenario.")
+        split: EpisodeSplit = "held-out",
+        offered: Sequence[SkillVersion] | None = None,
+    ) -> tuple[HeldOutEpisodeReport[GradeT], ...]:
+        gate = asyncio.Semaphore(self._heldout_concurrency)
 
-        connector = self._connector_factory()
+        async def run_cell(cell: HeldOutCell) -> HeldOutEpisodeReport[GradeT]:
+            async with gate:
+                return await self._run_cell(connector, record, cell, split=split, offered=offered)
+
         try:
-            result = await self._run(
-                connector,
-                sequence_id=sequence_id,
-                training_scenario_id=training_scenario_id,
-                training_seed=training_seed,
-                cells=cells,
-            )
-        except BaseException:
-            # Closing must not replace the error that is already propagating.
-            if self._persistent_connector:
+            return tuple(await asyncio.gather(*(run_cell(cell) for cell in cells)))
+        finally:
+            if self._heldout_concurrency > 1 and self._trace is not None:
                 with suppress(Exception):
-                    await connector.close()
-            raise
-        if self._persistent_connector:
-            await connector.close()
-        return result
+                    self._trace.flush()
 
-    async def _run(
+    def _builder(self, training_record: ExperimentRecord, episode_id: str) -> BuilderAgent:
+        return BuilderAgent(
+            self._recording(training_record, role="builder", episode_id=episode_id),
+            self._registry,
+            executor=self._executor,
+            max_repairs=self._max_repairs,
+            max_output_tokens=self._builder_max_output_tokens,
+            thinking=self._builder_thinking,
+            repair_max_output_tokens=min(
+                self._builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
+            ),
+            learning_token_budget=self._learning_token_budget,
+            learning_call_budget=self._learning_call_budget,
+            validation_concurrency=self._validation_concurrency,
+        )
+
+    async def _train_and_build(
         self,
         connector: ConnectorT,
         *,
         sequence_id: str,
         training_scenario_id: str,
         training_seed: int,
-        cells: tuple[HeldOutCell, ...],
-    ) -> LearningSequenceResult[GradeT]:
+    ) -> _Trained[GradeT]:
         manifest = await connector.manifest()
         created_at = self._clock.now()
         training_record = training_experiment(
@@ -330,46 +370,85 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             primitives_used=cold_result.primitives_used,
             grade=self._grade(training_stored, connector),
         )
-
-        builder = BuilderAgent(
-            self._recording(training_record, role="builder", episode_id=cold_result.episode_id),
-            self._registry,
-            executor=self._executor,
-            max_repairs=self._max_repairs,
-            max_output_tokens=self._builder_max_output_tokens,
-            thinking=self._builder_thinking,
-            repair_max_output_tokens=min(
-                self._builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
-            ),
-            learning_token_budget=LEARNING_TOKEN_BUDGET,
-            learning_call_budget=LEARNING_CALL_BUDGET,
-            validation_concurrency=self._validation_concurrency,
-        )
-        outcome = await builder.build(
+        spent_tokens = cold_agent.input_tokens + cold_agent.output_tokens
+        spent_calls = len(cold_agent.decisions)
+        outcome = await self._builder(training_record, cold_result.episode_id).build(
             select_evidence(training_stored),
             training_trace=training_stored,
             primitive_names=tuple(tool.name for tool in manifest.tools),
             authoring_model_id=self._model_id,
             created_at=self._clock.now(),
-            spent_tokens=cold_agent.input_tokens + cold_agent.output_tokens,
-            spent_calls=len(cold_agent.decisions),
+            spent_tokens=spent_tokens,
+            spent_calls=spent_calls,
+        )
+        return _Trained(
+            manifest_tools=tuple(tool.name for tool in manifest.tools),
+            connector_version=manifest.connector_version,
+            training_record=training_record,
+            heldout_record=heldout_record,
+            training=training,
+            training_stored=training_stored,
+            outcome=outcome,
+            spent_tokens=spent_tokens
+            + sum(item.input_tokens + item.output_tokens for item in outcome.usage),
+            spent_calls=spent_calls + outcome.attempts,
         )
 
-        reports: list[HeldOutEpisodeReport[GradeT]] = []
+    async def run(
+        self,
+        *,
+        sequence_id: str,
+        training_scenario_id: str,
+        training_seed: int,
+        heldout: Sequence[HeldOutCell],
+    ) -> LearningSequenceResult[GradeT]:
+        cells = tuple(heldout)
+        if not cells:
+            raise ValueError("A learning sequence needs at least one held-out cell.")
+        if any(cell.scenario_id == training_scenario_id for cell in cells):
+            raise ValueError("A held-out cell must not reuse the training scenario.")
+
+        connector = self._connector_factory()
+        try:
+            result = await self._run(
+                connector,
+                sequence_id=sequence_id,
+                training_scenario_id=training_scenario_id,
+                training_seed=training_seed,
+                cells=cells,
+            )
+        except BaseException:
+            # Closing must not replace the error that is already propagating.
+            if self._persistent_connector:
+                with suppress(Exception):
+                    await connector.close()
+            raise
+        if self._persistent_connector:
+            await connector.close()
+        return result
+
+    async def _run(
+        self,
+        connector: ConnectorT,
+        *,
+        sequence_id: str,
+        training_scenario_id: str,
+        training_seed: int,
+        cells: tuple[HeldOutCell, ...],
+    ) -> LearningSequenceResult[GradeT]:
+        trained = await self._train_and_build(
+            connector,
+            sequence_id=sequence_id,
+            training_scenario_id=training_scenario_id,
+            training_seed=training_seed,
+        )
+        training_record, heldout_record = trained.training_record, trained.heldout_record
+        training, outcome = trained.training, trained.outcome
+
+        reports: tuple[HeldOutEpisodeReport[GradeT], ...] = ()
         skipped_reason: str | None = None
         if outcome.accepted:
-            gate = asyncio.Semaphore(self._heldout_concurrency)
-
-            async def run_cell(cell: HeldOutCell) -> HeldOutEpisodeReport[GradeT]:
-                async with gate:
-                    return await self._run_heldout_cell(connector, heldout_record, cell)
-
-            try:
-                reports = list(await asyncio.gather(*(run_cell(cell) for cell in cells)))
-            finally:
-                if self._heldout_concurrency > 1 and self._trace is not None:
-                    with suppress(Exception):
-                        self._trace.flush()
+            reports = await self._run_cells(connector, heldout_record, cells)
         else:
             skipped_reason = outcome.stop_reason
 
@@ -381,7 +460,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             training=training,
             builder=outcome,
             accepted_version=outcome.version,
-            heldout=tuple(reports),
+            heldout=reports,
             heldout_skipped_reason=skipped_reason,
             skill_isolation_note=self._executor.isolation_note,
         )
