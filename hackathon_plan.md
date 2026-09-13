@@ -2072,6 +2072,221 @@ window continuity. Tests prove the default still closes, the Builder observes
 the training connector as open only in continuity mode, and every success,
 failure, or cancellation path ultimately closes it.
 
+## 21. Approved non-benchmark milestone: token-budget Doom demo loop
+
+This section records the requester's request on 2026-09-13 for an end-to-end
+test of the Doom learning loop that keeps running until a fixed token budget
+is spent. The Doom window is full screen, and a Markdown log written from the
+Weave trace shows everything the model does. It builds on the section 20
+`--live-demo` mode. Like section 20, it is **not benchmark evidence**. Its
+Builder cap and token budget exceed the `eval_protocol.md` ceilings, and its
+results must never enter a comparison or a report as evaluation data.
+
+### Evidence
+
+- **The Builder never reaches its code.** In the live run of 2026-09-13 06:26
+  UTC (`doom-seq-live-20260912T232547PDT`), the one Builder call used all 6,000
+  output tokens on 24,828 characters of reasoning and returned an empty reply
+  (`finish_reason=length`). The section 20 diagnostic hit the same result at
+  8,000. No skill was accepted, so no held-out episode ran.
+- **Measured Builder speed.** That call produced 6,000 output tokens in 32.3
+  seconds, about 185 tokens per second. A 32,000-token call therefore takes at
+  most about 3 minutes, and a build plus three repairs is at most about 128,000
+  output tokens, roughly 5 to 10 minutes of Builder work.
+- **The 8,000 ceiling is fixed today.** `ModelSettings` refuses a Builder cap
+  above `BUILDER_MAX_OUTPUT_TOKENS_CEILING` (8,000), and `LearningSequence`
+  defaults to one repair.
+- **Maximum output is unverified.** W&B Inference's model listing does not
+  publish the maximum output for `deepseek-ai/DeepSeek-V4-Flash-0731`, so a
+  32,000-token request may be refused or clipped by the provider.
+- **The section 20 deadline would end the run first.** `--live-demo` enforces a
+  whole-run deadline of at most 600 seconds, far less than a 500,000-token loop
+  needs.
+- **Tracing reaches Weave with correct nesting.** On 2026-09-13, a no-model
+  smoke episode and the live run above both appeared in the configured Weave
+  project, with each Action `noob_agent.model_call` and `noob_agent.step`
+  nested under its `noob_agent.episode`. Builder calls appear as top-level
+  calls, and Weave's OpenAI integration adds an `openai.chat.completions.create`
+  call beside each model call.
+- **Cancellation is already durable.** On deadline cancellation, `EpisodeRunner`
+  finalizes the open episode as `unknown_result`, and `RecordingModelClient`
+  records the cancelled call before cancellation propagates.
+- **Full screen is available through game arguments.** ViZDoom 1.3.0 exposes
+  `add_game_args` and `set_screen_resolution`. Whether WSLg honors a full-screen
+  ZDoom window is unverified.
+
+It authorizes: a token-budget mode for `--live-demo` that runs fresh learning
+sequences back to back; demo-only Builder output caps up to 32,000 and repair
+counts up to 3; a longer safety deadline in that mode; a display-only
+`fullscreen` connector setting used by the live demo and the replay viewer; a
+script that writes `doom-demo-log.md` from the Weave trace during the run; and
+one paid demo run of at most 500,000 tokens plus the overshoot bound below.
+
+It does not authorize: changing `eval_protocol.md`, `ModelSettings` ceilings,
+or any default of the normal learning-sequence command; changing prompts,
+tools, scenarios, seeds, decision or primitive limits, skill policy,
+validation, or grading; carrying skills from one sequence into the next;
+letting the Builder run its candidate in the game before acceptance; reasoning
+controls or a different model; dependencies; CI; or Minecraft. Each of those
+needs its own approval.
+
+### Design constraints
+
+- **Separate from benchmarks.** Budget mode is available only with
+  `--live-demo`. It keeps section 20's labels, condition, and separate
+  Git-ignored database, and its JSON summary adds `run_kind:
+  non-benchmark-token-budget-demo`.
+- **Fresh sequences.** Each sequence gets a new `SkillRegistry`, new connectors,
+  and a sequence ID `<demo-run-id>-s<NN>`, so the log and Weave can group every
+  sequence of one demo run by that prefix.
+- **Budget accounting.** Tokens used are the input plus output tokens reported
+  on every model call in the demo run, read from the Model call records. A call
+  whose provider reported no usage counts its maximum output tokens plus its
+  prompt and system characters divided by 4, so unknown usage never undercounts.
+- **Stopping.** Before each model call, the demo checks the tokens used so far.
+  If they are at or above the budget, the call is not sent. The running sequence
+  is cancelled through the same path as the section 20 deadline: the open
+  episode is finalized as `unknown_result`, the connector closes, the unsent
+  call is recorded with an error saying the token budget was exhausted and the
+  call was not sent, and Weave is flushed. The budget can therefore be exceeded
+  by at most one call already in progress, which is at most 32,000 output tokens
+  plus that call's input.
+- **Safety deadline.** In budget mode the whole-run deadline defaults to 3,600
+  seconds and may be set up to 7,200. Whichever comes first, budget or
+  deadline, ends the run, and the summary names which one it was.
+- **Provider refusal is reported, not worked around.** If the provider refuses
+  or errors on a call, for example because 32,000 is above its maximum output,
+  the demo stops, records the error, and reports it. It does not retry with a
+  smaller cap.
+- **Full screen is display only.** The setting changes no observation or step
+  result. `screen_offset` uses ViZDoom's render resolution, which full screen
+  does not change.
+- **The log comes from Weave only.** It is rebuilt from Weave calls, not from
+  SQLite, so it shows what the trace shows. Registry validation verdicts are not
+  traced; the log says so, and the terminal summary reports each Builder
+  outcome. The log contains full prompts, replies, and reasoning, so its
+  default location is the Git-ignored `.noob-agent/doom-demo-log.md`.
+
+### Step 21a - Full-screen display setting
+
+- Files: `src/noob_agent/connectors/doom.py`, which adds `fullscreen: bool =
+  False` to `DoomSettings` and applies ViZDoom's full-screen game arguments
+  before `init()` only when both `window_visible` and `fullscreen` are true.
+  `scripts/run_doom_learning_sequence.py`, where `--live-demo` uses full screen
+  unless `--windowed` is given. `scripts/replay_doom_episode.py`, where a
+  non-headless replay uses full screen unless `--windowed` is given.
+  `tests/test_doom_display_settings.py`. `tests/test_replay_doom_episode.py`.
+  `tests/test_doom_live_demo.py`. `docs/doom-env.md`. `CHANGELOG.md`.
+- Tests first:
+  - `fullscreen` defaults to `False`.
+  - With a stand-in `vizdoom` module, full-screen arguments are added before
+    `init()` only when `window_visible` and `fullscreen` are both true.
+  - The live demo and the replay viewer request full screen by default, and
+    `--windowed` turns it off.
+  - `--headless` replays never request a window or full screen.
+  - With real ViZDoom, headless, `fullscreen=True` produces step results
+    identical to the default settings.
+- Validation: the focused tests, then the full test, Ruff, and strict mypy
+  suites.
+- Manual verification: a replay of the first live run opens full screen on
+  WSLg and still matches all 20 steps. If WSLg does not honor full screen, the
+  pull request reports that and proposes no workaround.
+
+### Step 21b - Token-budget demo loop
+
+- Files: `scripts/run_doom_learning_sequence.py`, adding `--token-budget`,
+  `--builder-max-output-tokens`, and `--max-repairs`, all valid only with
+  `--live-demo`. New `tests/test_doom_token_budget_demo.py`. `docs/doom-env.md`.
+  `CHANGELOG.md`.
+- Values:
+  - `--token-budget` turns on budget mode, which runs sequences back to back.
+    The run documented here uses 500,000; the flag refuses values outside 1 to
+    500,000.
+  - In budget mode, `--builder-max-output-tokens` defaults to 32,000 and may
+    be 1 to 32,000.
+  - In budget mode, `--max-repairs` defaults to 3 and may be 0 to 3.
+  - The Action cap still comes from `ModelSettings`.
+  - Without `--token-budget`, section 20 behavior and every default are
+    unchanged.
+- Tests first, with fake providers and the fake connector:
+  - Sequences run back to back with fresh registries and `-s<NN>` IDs.
+  - The budget stops the run before an unsent call. The open episode is
+    finalized as `unknown_result`, the unsent call is recorded with the budget
+    error and no tokens, and the trace is flushed.
+  - Unreported usage counts as its cap plus prompt characters divided by 4.
+  - The overshoot never exceeds the one call in progress.
+  - The Builder receives the demo cap and repair count.
+  - The deadline defaults to 3,600 seconds in budget mode, and whichever of
+    budget and deadline comes first is named in the summary.
+  - A provider error stops the run and is reported.
+  - Every flag is refused outside `--live-demo` or out of range, and budget mode
+    refuses to start when Weave tracing is disabled.
+  - The normal command and plain `--live-demo` are unchanged.
+- Validation: `uv run pytest tests/test_doom_token_budget_demo.py -v`, then the
+  full test, Ruff, and strict mypy suites.
+
+### Step 21c - Live Weave log
+
+- Files: new `scripts/doom_demo_log.py`. `scripts/run_doom_learning_sequence.py`,
+  which starts the log writer as a child process in budget mode, stops it after
+  the final flush, and runs it once more to write the complete log. New
+  `tests/test_doom_demo_log.py`. `docs/doom-env.md`. `CHANGELOG.md`.
+- Behavior:
+  - `uv run python scripts/doom_demo_log.py --run-id <demo-run-id>
+    [--output .noob-agent/doom-demo-log.md] [--follow]` reads the Weave calls
+    whose `experiment_id` starts with the run ID and rewrites the log.
+  - With `--follow`, it polls about every 5 seconds until stopped.
+  - The log has a header with the run ID, model, caps, budget, and tokens used
+    so far according to the trace.
+  - It has one section per sequence, and within it one section per episode
+    (scenario, seed, split, and outcome) plus the Builder calls, in time order.
+  - Every Action model call shows purpose, finish reason, tokens, latency, and
+    the reply, with the reasoning in a collapsible block, followed by the step
+    it produced: tool, arguments, status and code, visible labels with
+    `screen_offset`, health, and ammo.
+  - Every Builder call shows build or repair, finish reason, tokens, latency,
+    the full reply including any code, and the reasoning in a collapsible
+    block.
+  - Calls not yet in Weave simply appear on a later poll.
+- Tests first, with a stand-in Weave client and recorded call fixtures:
+  - The log groups sequences, episodes, and Builder calls in time order and
+    shows every field listed above.
+  - Calls from other runs are excluded.
+  - Repeated polls rewrite the file without duplicates.
+  - A Weave read error keeps the last good log and retries.
+  - Budget mode starts and stops the writer and writes a final complete log.
+  - No credential appears in the log.
+- Validation: `uv run pytest tests/test_doom_demo_log.py -v`, then the full
+  test, Ruff, and strict mypy suites.
+
+### Step 21d - One token-budget demo run
+
+- Run once, after 21a-21c are merged:
+
+  ```sh
+  NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
+    scripts/run_doom_learning_sequence.py --live-demo --token-budget 500000
+  ```
+
+- Files: `docs/current-status.md` and `CHANGELOG.md`. No code changes.
+- Report, labeled non-benchmark:
+  - what ended the run (budget, deadline, or error) and the total tokens used;
+  - per sequence: training result, each Builder call's finish reason and
+    tokens, whether a skill was accepted, and every held-out grade;
+  - the path to the log and the Weave run prefix.
+- Acceptance: the requester watches full-screen Doom while
+  `.noob-agent/doom-demo-log.md` updates from the trace, and the run ends
+  cleanly within the budget bound or the deadline. A failure to accept a skill
+  is reported as observed.
+
+### Rollback
+
+Each step is its own pull request and can be reverted alone. Reverting 21a
+removes full screen, and the demo and replay open ordinary windows. Reverting
+21b removes budget mode and the demo-only caps, leaving section 20 unchanged.
+Reverting 21c removes the log writer. None changes the database schema, and
+demo databases and logs are Git-ignored.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
