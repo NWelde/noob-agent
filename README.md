@@ -21,9 +21,12 @@ Run the test suite with:
 uv run pytest
 ```
 
-The current pre-BDP foundation establishes only the package and test layout.
-It does not yet implement a connector, runner, model integration, skill runtime,
-or game integration.
+The current `main` branch includes the typed connector contracts, SQLite episode
+store, bounded cold-episode runner, best-effort Weave mirror, generated-skill
+package checks and immutable registry, resettable Minecraft training scenario,
+Minecraft reset/observe connector, and Builder-generated candidate path. See
+[`docs/current-status.md`](docs/current-status.md) for the dated implementation
+map, stacked-branch state, and next steps.
 
 ## Integration configuration
 
@@ -38,6 +41,14 @@ adapter:
 uv sync --group dev --group integrations
 ```
 
-The initial seams default to disabled. SQLite remains the source of truth; a
-future Weave adapter must mirror completed local events rather than make episode
-finalization depend on a remote service.
+The integration seams default to disabled. SQLite remains the source of truth;
+the Weave adapter mirrors durable local events on a best-effort basis and never
+makes episode finalization depend on a remote service.
+
+## Local game environments
+
+- [`docs/minecraft-server.md`](docs/minecraft-server.md) records the dedicated
+  server and world locations, tmux operations, TLauncher connection details,
+  live connector verification, and known setup failures.
+- [`docs/doom-env.md`](docs/doom-env.md) records the non-production ViZDoom
+  environment check for the later Doom connector milestone.
