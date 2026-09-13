@@ -402,3 +402,21 @@ async def test_practice_grades_are_recorded_for_agreement_only(store: EpisodeSto
     refined = result.rounds[1]
     assert all(p.grade.endswith("True") for p in refined.practice)
     assert result.practice_agreement == 1.0
+
+
+async def test_practice_never_starts_when_it_could_exceed_the_call_budget(
+    store: EpisodeStore,
+) -> None:
+    registry = SkillRegistry()
+    # Training 2 calls, build 1, incumbent practice up to 24, refinement 1: 28.
+    # A challenger's practice could add 24 more, which would pass a 40-call budget.
+    result = await _run(
+        _loop(store, Provider(LOOK, USE), registry=registry, learning_call_budget=40)
+    )
+
+    assert result.stop_reason == "learning_budget"
+    assert result.learning_calls <= 40
+    challenger = registry.get(SKILL, 2)
+    assert challenger.status == "rejected"
+    assert "learning budget" in challenger.status_reason
+    assert [r.decision for r in result.rounds] == ["incumbent"]

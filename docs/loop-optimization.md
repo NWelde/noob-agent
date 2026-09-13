@@ -174,3 +174,53 @@ equal the sum of `result.primitive_actions_charged`:
 Held-out goals by sequence: 1, 1, 1, 1, and 4 of 6. Skills are now accepted
 reliably, but most still do not solve held-out, which is what step 24b's longer
 practice loop targets.
+
+## Multi-round tuning (24b)
+
+Step 24b changed the multi-round loop to stop after 2 consecutive rounds without
+a kept version, moved practice to the four `basic-v3` seeds, and recorded
+refinement calls with purpose `refine`. Both runs used `--rounds 3 --curve` on
+`basic-v3`.
+
+The first run, `loop-bench-24b`, took 2 of 5 sequences over the 140-call learning
+ceiling (156 and 168 calls): the loop started a practice batch that the remaining
+budget could not cover. The loop now starts a practice batch only when its worst
+case, every practice episode using its whole 12-decision budget at the largest
+average cost per call so far, fits both learning budgets. A validated challenger
+whose practice cannot fit is rejected with stop `learning_budget`. The rerun,
+`loop-bench-24b-r2`, is the result below.
+
+| Sequence | Refinement rounds | Kept | Stop | Practice (private goals) | Held-out goals | Learning tokens / calls |
+| --- | --- | --- | --- | --- | --- | --- |
+| s01 | 0 | none | `perfect_practice` | 4 of 4 | **5 of 6** | 38,017 / 28 |
+| s02 | 2 | none | `no_improvement` | 0, 0, 0 of 4 | 1 of 6 | 89,024 / 63 |
+| s03 | 1 | none | `learning_budget` | 2, then 0 of 4 | 0 of 6 | 145,700 / 111 |
+| s04 | 1 | v3 (fewer primitives, same 0 terminal rate) | `learning_budget` | 0, 0 of 4 | 1 of 6 | 149,322 / 106 |
+| s05 | 1 | v2 (fewer primitives, same 0 terminal rate) | `learning_budget` | 0, 0 of 4 | 1 of 6 | 131,768 / 95 |
+
+| Metric | `loop-bench-22d` | `loop-bench-24b-r2` |
+| --- | --- | --- |
+| Sequences with an accepted skill | 3 of 5 | 5 of 5 (includes the 24a prompt) |
+| Most refinement rounds in a sequence | 1 | 2 |
+| Refinements kept | 0 | 2, both on the primitive tie-break |
+| Practice agreement with the private grade | 1.0 | 1.0 in every sequence |
+| Held-out goals completed | 8 of 18 (3 sequences ran held-out) | 8 of 30 |
+| Sequences over a protocol ceiling | 0 | 0 |
+| Unusable Action replies | 0 of 311 | 0 of 597 |
+| Median sequence wall time | 34.7 s | 65.4 s |
+
+- **Patience 2 works but rarely binds.** Only s02 logged two rounds without a
+  kept version. Three sequences stopped on the learning budget first.
+- **The call budget allows one challenger.** A four-seed practice batch can take
+  48 Action calls. Training, the build, and the incumbent's practice leave room
+  for at most one full challenger practice inside 140 calls, so no sequence can
+  log 3 rounds.
+- **Kept refinements did not help held-out.** Both kept versions scored 0 on
+  practice and won only by using fewer primitives. Their `--curve` held-out
+  results equalled their incumbents' (1 of 6 each).
+- **Practice still predicts held-out.** Perfect practice again came with 5 of 6
+  held-out goals, and practice agreed with the private grade on every episode.
+
+Reaching 3 rounds within the protocol needs a separately approved change, such
+as a smaller practice decision budget, two practice seeds per round, or a larger
+learning call budget.
