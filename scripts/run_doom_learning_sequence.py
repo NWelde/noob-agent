@@ -29,7 +29,7 @@ from noob_agent.connectors.doom import DoomConnector, DoomSettings
 from noob_agent.domain.records import StoredEpisode
 from noob_agent.grading.doom import DoomEpisodeGrade, DoomPrivateOutcome, grade_doom_episode
 from noob_agent.models.client import build_model_client
-from noob_agent.observability.tracing import build_trace_sink
+from noob_agent.observability.tracing import build_trace_sink, close_trace
 from noob_agent.runtime.sequence import HeldOutCell, LearningSequence, LearningSequenceResult
 from noob_agent.settings import IntegrationSettings
 from noob_agent.skills.executor import build_skill_executor
@@ -301,7 +301,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                 timed_out = True
     finally:
         with suppress(Exception):
-            trace.flush()
+            close_trace(trace)
         if view is not None:
             _stop_live_view(view)
 
