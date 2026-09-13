@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 12:53 PDT | [DOCUMENTED] | Rewrote the README in plain language, defined project terminology, clarified verified prototype status and limitations, and replaced the compressed repository table with a readable source-tree map.
+
 2026-09-13 11:46 PDT | [DOCUMENTED] | Rewrote the README to explain what noob-agent is for: the two learning loops, compared conditions, scorecard, games, repository map, and getting-started commands.
 
 2026-09-13 10:15 PDT | [ADDED] | Added section 24 step 24b, multi-round tuning: the improvement loop stops after 2 consecutive rounds without a kept version (a refinement that fails validation counts as one) and each refinement starts from the incumbent; practice uses the four `scenarios/doom/basic-v3` seeds, two targets on each side; refinement calls are recorded with purpose `refine` and counted by the scorecard; and a practice batch starts only when its worst case fits the learning call and token budgets, with a validated challenger that cannot fit rejected as `learning_budget`, fixing a live run where 2 of 5 sequences passed the 140-call ceiling. In the 5-sequence rerun every sequence accepted a skill, none passed a ceiling, practice agreed with the private grade on every episode, and held-out goals were 8 of 30; the most rounds logged was 2, three sequences stopped on the learning budget, and the two kept refinements won only on fewer primitives without improving held-out.

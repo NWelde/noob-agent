@@ -661,6 +661,23 @@ class MinecraftConnector:
         """Report the terminal flag of the latest public observation."""
         return self._latest is not None and self._latest.terminal
 
+    async def announce(self, text: str) -> None:
+        """Show smoke-run diagnostics in local Minecraft chat.
+
+        This is intentionally outside the frozen agent primitive surface.  It
+        is used only by the non-benchmark first-person smoke runner, so it
+        neither becomes a model-visible tool nor affects action accounting.
+        """
+        if not text or len(text) > 256:
+            raise ValueError("Minecraft chat announcements must contain 1 to 256 characters.")
+        await self.start()
+        reply = await self._exchange({"op": "chat", "text": text}, timeout=CALL_TIMEOUT_SECONDS)
+        if reply.get("ok") is not True:
+            raise ConnectorError(
+                f"The sidecar could not send a Minecraft chat announcement: "
+                f"{reply.get('error', 'no reason given')}"
+            )
+
     async def close(self) -> None:
         """Release the sidecar. Safe to call more than once."""
         if self._closed:

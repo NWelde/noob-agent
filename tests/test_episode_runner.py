@@ -235,6 +235,24 @@ async def test_three_identical_failures_without_a_state_change_end_the_episode(
     assert len(connector.requests) == 3
 
 
+async def test_an_opt_in_policy_can_stop_from_a_public_result(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    class StopAfterOnePolicy(ScriptedPolicy):
+        stop_reason = None
+
+        def notice(self, request: object, outcome: object) -> None:
+            del request, outcome
+            self.stop_reason = "no_progress"
+
+    connector = ScriptedConnector(ScriptedStep(), ScriptedStep())
+
+    result = await run_episode(prepared_store, connector, StopAfterOnePolicy(), clock)
+
+    assert result.stop_reason == "no_progress"
+    assert len(connector.requests) == 1
+
+
 async def test_a_state_change_between_failures_resets_the_streak(
     prepared_store: EpisodeStore, clock: FakeClock
 ) -> None:

@@ -69,6 +69,12 @@ class FeedbackPolicy(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class StopRequestingPolicy(Protocol):
+    @property
+    def stop_reason(self) -> StopReason | None: ...
+
+
 class Clock(Protocol):
     """Wall time for records, monotonic time for the budget."""
 
@@ -336,7 +342,14 @@ class EpisodeRunner:
                 terminal = result.observation.terminal
                 self._notice(request, result)
 
-                if result.code == "CONNECTOR_LOST":
+                requested_stop = (
+                    self._policy.stop_reason
+                    if isinstance(self._policy, StopRequestingPolicy)
+                    else None
+                )
+                if requested_stop is not None:
+                    stop_reason = requested_stop
+                elif result.code == "CONNECTOR_LOST":
                     stop_reason = "connector_lost"
                 elif result.status == "unknown":
                     # An unknown action may have changed the game, so it is never

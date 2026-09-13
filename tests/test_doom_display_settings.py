@@ -78,11 +78,12 @@ def no_pause(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 # --- Defaults ------------------------------------------------------------------
 
 
-def test_both_display_settings_default_to_off() -> None:
+def test_display_settings_default_to_off() -> None:
     settings = DoomSettings()
 
     assert settings.window_visible is False
     assert settings.realtime is False
+    assert settings.fullscreen is False
     assert doom.CONNECTOR_VERSION == "doom-vizdoom-v2"
     assert doom.MANIFEST.connector_version == doom.CONNECTOR_VERSION
 
@@ -168,6 +169,18 @@ async def test_a_visible_window_renders_every_frame_before_init(
     assert ("set_render_all_frames", (True,)) in calls
     assert names.index("set_window_visible") < names.index("init")
     assert names.index("set_render_all_frames") < names.index("init")
+
+
+async def test_full_screen_is_requested_only_for_a_visible_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hidden = await _setup_calls(tmp_path, monkeypatch, DoomSettings(fullscreen=True))
+    visible = await _setup_calls(
+        tmp_path, monkeypatch, DoomSettings(window_visible=True, fullscreen=True)
+    )
+
+    assert ("add_game_args", ("+fullscreen 1",)) not in hidden
+    assert ("add_game_args", ("+fullscreen 1",)) in visible
 
 
 # --- Real-time pacing, against real ViZDoom (headless) ---------------------------

@@ -33,6 +33,7 @@ StopReason = Literal[
     "unknown_result",
     "connector_lost",
     "repeated_failure",
+    "no_progress",
 ]
 
 
@@ -114,6 +115,37 @@ class EpisodeOutcome(DurableRecord):
 
 
 ModelCallPurpose = Literal["action", "build", "repair", "refine"]
+
+
+class SequenceSummaryRecord(DurableRecord):
+    """One harness-only summary of a completed learning sequence.
+
+    This is diagnostic output, never prompt evidence.  It carries compact
+    grader results but no private scenario configuration or predicate state.
+    """
+
+    sequence_id: str = Field(min_length=1)
+    run_kind: str = Field(min_length=1)
+    training_episode_id: str = Field(min_length=1)
+    training_goal_completed: bool
+    builder_stop_reason: str = Field(min_length=1)
+    builder_truncated: bool
+    accepted_skill_name: str | None = Field(default=None, min_length=1)
+    accepted_skill_version: int | None = Field(default=None, ge=1)
+    heldout_total: int = Field(ge=0)
+    heldout_completed: int = Field(ge=0)
+    heldout_skipped_reason: str | None = None
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    finished_at: datetime
+
+    @model_validator(mode="after")
+    def accepted_skill_is_complete(self) -> Self:
+        if (self.accepted_skill_name is None) != (self.accepted_skill_version is None):
+            raise ValueError("An accepted skill needs both name and version.")
+        if self.heldout_completed > self.heldout_total:
+            raise ValueError("Held-out completions cannot exceed held-out cells.")
+        return self
 
 
 class ModelCallRecord(DurableRecord):

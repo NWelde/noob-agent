@@ -18,6 +18,24 @@ The central question:
 Self-improvement here means building and keeping tested code. It does **not**
 mean fine-tuning or changing model weights.
 
+## What is working today
+
+This is a hackathon prototype, not a finished benchmark. The shared learning
+loop, Minecraft and Doom connectors, persistent run records, skill validation,
+and deterministic tests are in the repository. The current live evidence is
+more limited:
+
+- A hand-written fixture skill passes the deterministic Doom learning loop.
+  That fixture tests the plumbing and is not a model result.
+- The recorded Doom model run did not produce an accepted skill. The model
+  exhausted its action budget without killing the target, and the Builder
+  reply was cut off at its output limit.
+- The live Minecraft clean-versus-faulty grading path and independent defect
+  reproduction are not complete.
+
+The repo is ready to support a first technical phase and a credible prototype
+review. It should not claim that the full cross-game benchmark is finished.
+
 ## How it works
 
 Two loops run at different speeds.
@@ -62,6 +80,46 @@ and reproduction (clean vs. faulty scenario twins), and cost in actions, model
 calls, tokens, time, and dollars. Every step is recorded in SQLite and mirrored
 to W&B Weave for inspection.
 
+## Terms used in this repository
+
+- **Action agent:** the model that chooses what to do in the game.
+- **Builder agent:** the model call that writes a skill from a public training
+  trace or repairs a rejected skill.
+- **Primitive:** one low-level game action, such as `observe`, `move`, `attack`,
+  or `use_object`.
+- **Connector:** the adapter that translates the shared action format into one
+  game's controls and returns structured observations and results.
+- **Skill:** a generated Python function that calls approved primitives to do a
+  repeated task. Accepted skills are versioned and immutable.
+- **Training episode:** the first attempt, where the model explores and leaves
+  evidence for the Builder.
+- **Held-out episode:** a fresh task variation the Builder did not see. It
+  tests transfer rather than memory of the original run.
+- **Independent grader:** code outside the model conversation that checks the
+  actual game outcome.
+- **Defect reproduction:** a fresh reset that replays evidence for a reported
+  bug to check whether the bug is real and repeatable.
+- **Scenario:** a declared task with rules, reset behavior, budgets, and
+  training or held-out variations.
+- **Seed:** a fixed number that makes a scenario reset reproducible.
+- **Weave:** W&B's tracing and evaluation product. Here it mirrors local run
+  records so a person can inspect model calls and episode steps.
+- **W&B Inference:** the model-serving interface used by the configured client.
+- **SQLite:** the local database that stores experiments, episodes, steps,
+  model calls, skills, and grading records.
+- **CoreWeave Sandbox:** the intended isolated runtime for generated skills.
+  The local subprocess fallback is weaker and is labeled as such.
+- **ViZDoom:** the Python Doom environment used by the second connector.
+- **Mineflayer:** the Node.js library used to connect to Minecraft.
+- **Sidecar:** the helper process that runs Mineflayer and exchanges
+  newline-delimited JSON messages with Python.
+- **JSON Lines:** a text format with one JSON object per line, used by that
+  Python-to-Node connection.
+- **Data pack:** Minecraft files that add commands and game behavior without a
+  custom mod.
+- **BDP:** "Basic Demoable Product," the smallest complete demonstration
+  target described in [`hackathon_plan.md`](hackathon_plan.md).
+
 ## Games
 
 The same learning architecture runs on two deliberately different games. Each
@@ -78,16 +136,26 @@ Two working games do not prove universal support. Generality stays a hypothesis.
 
 ## Repository map
 
-| Path | Contents |
-| --- | --- |
-| `src/noob_agent/agents`, `prompts` | Action agent and Builder |
-| `src/noob_agent/connectors` | Minecraft and Doom connectors, plus a deterministic fake |
-| `src/noob_agent/skills`, `verification` | Skill format, validation, immutable registry, executor |
-| `src/noob_agent/runtime` | Episode runner and learning sequence |
-| `src/noob_agent/grading` | Independent private graders and reproduction |
-| `src/noob_agent/storage`, `observability` | SQLite source of truth and Weave mirror |
-| `scenarios/` | Game scenarios, manifests, and precommitted seeds |
-| `scripts/` | Learning runs, loop benchmark, episode replay, live reasoning view |
+```text
+src/noob_agent/
+  agents/          Action and Builder model roles
+  connectors/      Minecraft, Doom, and fake game adapters
+  domain/          Typed records and public contracts
+  grading/         Independent outcome checks and reproduction
+  models/          Model client and call recording
+  observability/   Weave trace mirror and scorecards
+  prompts/         Action, Builder, and refinement prompts
+  runtime/         Episode and improvement-loop orchestration
+  skills/          Skill packages, policy, registry, and execution
+  storage/         SQLite schema and repository
+  verification/    Skill validation
+
+scenarios/         Versioned game scenarios and seeds
+scripts/           Demo, replay, benchmark, and live-view entry points
+tests/             Unit, integration, and live-environment contract tests
+docs/              Operational guides and implementation status
+assets/            Checked-in visual evidence
+```
 
 Specifications:
 

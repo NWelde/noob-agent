@@ -134,7 +134,9 @@ def _refusal(stored: StoredEpisode) -> str | None:
     return None
 
 
-async def _replay(stored: StoredEpisode, *, headless: bool, step_pause_seconds: float) -> int:
+async def _replay(
+    stored: StoredEpisode, *, headless: bool, windowed: bool, step_pause_seconds: float
+) -> int:
     episode = stored.episode
     outcome = stored.outcome.stop_reason if stored.outcome is not None else "unfinished"
     print(f"REPLAY of recorded episode {episode.episode_id} - not a live model run.")
@@ -143,7 +145,13 @@ async def _replay(stored: StoredEpisode, *, headless: bool, step_pause_seconds: 
         f"steps {len(stored.steps)} | recorded stop reason {outcome}"
     )
 
-    connector = DoomConnector(DoomSettings(window_visible=not headless, realtime=not headless))
+    connector = DoomConnector(
+        DoomSettings(
+            window_visible=not headless,
+            realtime=not headless,
+            fullscreen=not headless and not windowed,
+        )
+    )
     try:
         reset = await connector.reset(episode.scenario_id, episode.seed)
         differences = _differences(
@@ -189,6 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Hide the window and skip pacing and pauses; only check the replay.",
     )
+    parser.add_argument("--windowed", action="store_true", help="Do not request full screen.")
     parser.add_argument("--step-pause-seconds", type=float, default=DEFAULT_STEP_PAUSE_SECONDS)
     args = parser.parse_args(argv)
 
@@ -221,7 +230,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Refusing to replay: {refusal}", file=sys.stderr)
         return 2
     return asyncio.run(
-        _replay(stored, headless=args.headless, step_pause_seconds=args.step_pause_seconds)
+        _replay(
+            stored,
+            headless=args.headless,
+            windowed=args.windowed,
+            step_pause_seconds=args.step_pause_seconds,
+        )
     )
 
 
