@@ -2116,11 +2116,11 @@ results must never enter a comparison or a report as evaluation data.
   ZDoom window is unverified.
 
 It authorizes: a token-budget mode for `--live-demo` that runs fresh learning
-sequences back to back; demo-only Builder output caps up to 32,000 and repair
+sequences back to back; demo-only Builder output caps up to 100,000 and repair
 counts up to 3; a longer safety deadline in that mode; a display-only
 `fullscreen` connector setting used by the live demo and the replay viewer; a
 script that writes `doom-demo-log.md` from the Weave trace during the run; and
-one paid demo run of at most 500,000 tokens plus the overshoot bound below.
+one paid demo run of at most 1,000,000 tokens plus the overshoot bound below.
 
 It does not authorize: changing `eval_protocol.md`, `ModelSettings` ceilings,
 or any default of the normal learning-sequence command; changing prompts,
@@ -2149,13 +2149,13 @@ needs its own approval.
   episode is finalized as `unknown_result`, the connector closes, the unsent
   call is recorded with an error saying the token budget was exhausted and the
   call was not sent, and Weave is flushed. The budget can therefore be exceeded
-  by at most one call already in progress, which is at most 32,000 output tokens
+  by at most one call already in progress, which is at most 100,000 output tokens
   plus that call's input.
 - **Safety deadline.** In budget mode the whole-run deadline defaults to 3,600
   seconds and may be set up to 7,200. Whichever comes first, budget or
   deadline, ends the run, and the summary names which one it was.
 - **Provider refusal is reported, not worked around.** If the provider refuses
-  or errors on a call, for example because 32,000 is above its maximum output,
+  or errors on a call, for example because 100,000 is above its maximum output,
   the demo stops, records the error, and reports it. It does not retry with a
   smaller cap.
 - **Full screen is display only.** The setting changes no observation or step
@@ -2200,10 +2200,9 @@ needs its own approval.
   `CHANGELOG.md`.
 - Values:
   - `--token-budget` turns on budget mode, which runs sequences back to back.
-    The run documented here uses 500,000; the flag refuses values outside 1 to
-    500,000.
-  - In budget mode, `--builder-max-output-tokens` defaults to 32,000 and may
-    be 1 to 32,000.
+    The next run uses 1,000,000; the flag refuses values outside 1 to 1,000,000.
+  - In budget mode, `--builder-max-output-tokens` defaults to 100,000 and may
+    be 1 to 100,000.
   - In budget mode, `--max-repairs` defaults to 3 and may be 0 to 3.
   - The Action cap still comes from `ModelSettings`.
   - Without `--token-budget`, section 20 behavior and every default are
@@ -2286,6 +2285,60 @@ removes full screen, and the demo and replay open ordinary windows. Reverting
 21b removes budget mode and the demo-only caps, leaving section 20 unchanged.
 Reverting 21c removes the log writer. None changes the database schema, and
 demo databases and logs are Git-ignored.
+
+## 22. Approved non-benchmark milestone: live Minecraft loop smoke run
+
+This section records the requester's request on 2026-09-13 for a real-local-
+server smoke run of the Minecraft learning loop. It exists to observe whether
+the Action agent, Builder, skill validation, Mineflayer sidecar, SQLite store,
+and Weave tracer continue to operate smoothly together under a practical
+budget. It is not benchmark or evaluation evidence: the deployed world has
+only the frozen training scenario, so every reuse attempt is reset to that
+same training room and is labelled a smoke attempt, never held-out transfer.
+
+It authorizes the new
+`scripts/run_minecraft_live_smoke.py`, its deterministic
+`tests/test_minecraft_live_smoke.py`, the opt-in public-outcome stop signal in
+the episode runner and its stop-reason record, this plan,
+`docs/minecraft-server.md`, and `CHANGELOG.md`. It does not authorize scenario,
+connector, prompt, grader, evaluation-protocol, dependency, CI, or
+database-schema changes.
+
+### Fixed safety limits
+
+- The process runs for at most 600 seconds.
+- It charges at most 2,000,000 reported-or-conservatively-estimated tokens.
+- It sends at most 500 model calls and at most 1,000 delivered primitive
+  actions across the smoke run. Each rapid cycle gives cold exploration 12
+  decisions, 24 primitives, and 90 seconds before Builder validation.
+- The Builder can make at most five repairs. No Builder output cap is raised
+  above the existing configured cap. Action replies use a smoke-only
+  3,000-token cap.
+- Weave tracing is required. The runner refuses to start when tracing is
+  disabled, uses a separate Git-ignored SQLite database, and flushes tracing
+  on every exit path.
+
+### Required behavior and acceptance
+
+`uv run --env-file .env python scripts/run_minecraft_live_smoke.py
+--live-smoke` connects only to the documented local 1.21.1 Minecraft server
+through the Mineflayer sidecar. It creates fresh registries, connector
+sessions, and Action conversations between smoke sequences; records the cold
+attempt, Builder calls, validation outcome, and same-training-room reuse
+attempt; and emits a terminal JSON summary naming the stop condition, token
+and call totals, primitive totals, database path, and Weave run prefix. A
+provider, server, sidecar, or validation failure is reported directly and is
+not retried with lower limits. Automated tests use fakes; a live invocation is
+manual verification and never skips silently.
+
+The smoke policy also ends an episode after two consecutive
+`NO_VISIBLE_TARGET` results or five actions with no visible state change.
+Those decisions use only public step results and are recorded as
+`repeated_failure` or `no_progress`; ordinary evaluation policies do not opt
+into this behavior.
+Each cold and same-room reuse phase receives a unique smoke-only bookkeeping
+seed so fresh connector reset counters cannot produce duplicate episode IDs;
+the deployed training datapack still builds the same fixed room.
 
 ## References
 
