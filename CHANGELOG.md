@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 03:56 PDT | [ADDED] | Added the section 22 step 22.F loop scorecard and `scripts/loop_bench.py`: `run` executes fixed-seed headless Doom learning sequences into a new Git-ignored database and writes JSON and Markdown scorecards, and `score` reads any existing database through a read-only connection. The scorecard reports unusable and capped Action decisions, nearest-rank decision latency, Builder calls and caps, acceptance (labeled when inferred), per-phase wall time, and learning tokens and calls against the `eval_protocol.md` ceilings. `docs/loop-optimization.md` records the baseline of the recorded live runs: 46-65% unusable replies, 5.4-5.7 s median decisions, and every recent sequence over a protocol ceiling.
+
 2026-09-13 03:46 PDT | [ADDED] | Added mandatory isolated skill validation before registry acceptance for section 22 step 22.0: real load and API-contract checks, public training-trace replay through a fake connector, missing-target, failed, unknown, invalid-input, and exhausted-budget cases, three-run repeatability, a generated object-ID variation, and public failure evidence for the Builder's bounded repair.
 
 2026-09-13 03:43 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 22, the loop-optimization milestone: land the isolated validation pipeline, add a loop scorecard and headless bench, make Action decisions reliable and fast with per-role thinking controls and native tool calls, give the Builder the real skill API and observation evidence, make repairs converge within protocol ceilings, parallelize held-out cells and validation, add a multi-round practice-based improvement loop with its learning budget, and confirm on Minecraft.
