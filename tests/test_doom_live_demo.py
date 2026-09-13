@@ -179,3 +179,97 @@ def test_live_demo_deadline_cancels_the_sequence_and_flushes_tracing(
     assert payload["run_kind"] == "non-benchmark-live-demo"
     assert payload["status"] == "deadline_exceeded"
     assert payload["deadline_seconds"] == 0.001
+
+
+def test_live_view_requires_live_demo(capsys: pytest.CaptureFixture[str]) -> None:
+    module = _load_run_script()
+
+    with pytest.raises(SystemExit) as raised:
+        module._parse_args(["--live-view"])
+
+    assert raised.value.code == 2
+    assert "live-demo" in capsys.readouterr().err.lower()
+
+
+def test_live_view_refuses_to_start_with_tracing_disabled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_run_script()
+    _isolate_main(monkeypatch, module, block=False)
+    started: list[object] = []
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: started.append(a))
+
+    code = module.main(
+        ["--live-demo", "--live-view", "--database", str(tmp_path / "demo.sqlite3")],
+        environ=_live_environment(),
+    )
+
+    assert code == 2
+    assert "tracing" in capsys.readouterr().err.lower()
+    assert started == []
+
+
+class _ViewProcess:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def terminate(self) -> None:
+        self._events.append("view terminated")
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+
+@pytest.mark.parametrize("block", [False, True], ids=["completed", "deadline"])
+def test_live_view_starts_for_the_run_and_stops_after_the_final_flush(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    block: bool,
+) -> None:
+    module = _load_run_script()
+    sink = _isolate_main(monkeypatch, module, block=block)
+    events: list[str] = []
+    original_flush = sink.flush
+
+    def flush() -> None:
+        events.append("trace flushed")
+        original_flush()
+
+    monkeypatch.setattr(sink, "flush", flush)
+    launched: list[list[str]] = []
+
+    def popen(command: list[str], **kwargs: object) -> _ViewProcess:
+        del kwargs
+        launched.append(command)
+        events.append("view started")
+        return _ViewProcess(events)
+
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+    monkeypatch.setattr(module, "LIVE_VIEW_LINGER_SECONDS", 0.0)
+    environment = {
+        **_live_environment(),
+        "NOOB_AGENT_TRACE_MODE": "weave",
+        "WEAVE_DISABLED": "false",
+    }
+
+    module.main(
+        [
+            "--live-demo",
+            "--live-view",
+            "--deadline-seconds",
+            "0.001" if block else "1",
+            "--sequence-id",
+            "doom-live-demo-view-test",
+            "--database",
+            str(tmp_path / "demo.sqlite3"),
+        ],
+        environ=environment,
+    )
+
+    assert events == ["view started", "trace flushed", "view terminated"]
+    (command,) = launched
+    assert command[1].endswith("live_reasoning_view.py")
+    assert command[command.index("--run-id") + 1] == "doom-live-demo-view-test"
+    assert "http://127.0.0.1:" in capsys.readouterr().out
