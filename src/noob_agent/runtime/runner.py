@@ -133,6 +133,7 @@ class EpisodeRunner:
         clock: Clock | None = None,
         trace: TraceSink | None = None,
         skills: SkillRuntime | None = None,
+        close_connector: bool = True,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -143,6 +144,8 @@ class EpisodeRunner:
         self._trace = trace if trace is not None else NullTraceSink()
         # No runtime means no skill is offered: a cold episode.
         self._skills = skills
+        # An explicit external owner may retain a display between phases.
+        self._close_connector = close_connector
 
     def _mirror(self, event: TraceEvent) -> None:
         """Mirror one event that the store has already made durable.
@@ -174,10 +177,12 @@ class EpisodeRunner:
             )
         except BaseException:
             # Closing must not replace the error that is already propagating.
-            with suppress(Exception):
-                await self._connector.close()
+            if self._close_connector:
+                with suppress(Exception):
+                    await self._connector.close()
             raise
-        await self._connector.close()
+        if self._close_connector:
+            await self._connector.close()
         return result
 
     async def _run(

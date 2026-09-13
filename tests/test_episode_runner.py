@@ -499,6 +499,29 @@ async def test_a_failing_close_surfaces_when_nothing_else_went_wrong(
         await run_episode(prepared_store, connector, ScriptedPolicy(), clock)
 
 
+async def test_an_explicit_external_owner_can_keep_the_connector_open(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    connector = ScriptedConnector(
+        ScriptedStep(terminal=True, terminal_reason="goal_reached")
+    )
+    runner = EpisodeRunner(
+        connector=connector,
+        store=prepared_store,
+        policy=ScriptedPolicy(),
+        clock=clock,
+        close_connector=False,
+    )
+
+    result = await runner.run(
+        experiment=make_experiment(), scenario_id=SCENARIO_ID, seed=7
+    )
+
+    assert result.stop_reason == "terminal_state"
+    assert connector.closed is False
+    await connector.close()
+
+
 async def test_cancellation_finalizes_an_open_episode_before_it_propagates(
     prepared_store: EpisodeStore, clock: FakeClock
 ) -> None:

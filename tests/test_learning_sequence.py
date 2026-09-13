@@ -288,6 +288,78 @@ async def test_a_non_benchmark_condition_labels_both_experiments(store: EpisodeS
     assert result.heldout_experiment.condition == "non-benchmark-live-demo"
 
 
+async def test_live_demo_keeps_training_open_for_builder_then_closes_before_heldout(
+    store: EpisodeStore,
+) -> None:
+    class ContinuityFactory(ConnectorFactory):
+        def __call__(self) -> ScriptedConnector:
+            if self.created:
+                assert self.created[0].closed is True
+            return super().__call__()
+
+    factory = ContinuityFactory()
+
+    class CheckingClient(RoutingModelClient):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            if request.system == BUILDER_SYSTEM:
+                assert factory.created[0].closed is False
+            return await super().complete(request)
+
+    sequence = LearningSequence(
+        connector_factory=factory,
+        client=CheckingClient(ACCEPTABLE_CANDIDATE),
+        model_id="fake-model",
+        store=store,
+        registry=SkillRegistry(),
+        executor=LocalSubprocessSkillExecutor(),
+        grade=recording_grader([]),
+        clock=FakeClock(wall=STARTED_AT),
+        keep_training_connector_open_during_builder=True,
+    )
+
+    await sequence.run(
+        sequence_id="live-window-seq",
+        training_scenario_id=TRAINING,
+        training_seed=7,
+        heldout=HELDOUT_CELLS,
+    )
+
+    assert all(connector.closed for connector in factory.created)
+
+
+async def test_live_demo_closes_training_when_builder_fails(store: EpisodeStore) -> None:
+    factory = ConnectorFactory()
+
+    class FailingBuilderClient(RoutingModelClient):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            if request.system == BUILDER_SYSTEM:
+                assert factory.created[0].closed is False
+                raise ConnectionError("builder unavailable")
+            return await super().complete(request)
+
+    sequence = LearningSequence(
+        connector_factory=factory,
+        client=FailingBuilderClient(),
+        model_id="fake-model",
+        store=store,
+        registry=SkillRegistry(),
+        executor=LocalSubprocessSkillExecutor(),
+        grade=recording_grader([]),
+        clock=FakeClock(wall=STARTED_AT),
+        keep_training_connector_open_during_builder=True,
+    )
+
+    with pytest.raises(ConnectionError, match="builder unavailable"):
+        await sequence.run(
+            sequence_id="live-window-failure",
+            training_scenario_id=TRAINING,
+            training_seed=7,
+            heldout=HELDOUT_CELLS,
+        )
+
+    assert factory.created[0].closed is True
+
+
 @pytest.mark.parametrize(
     "heldout",
     [

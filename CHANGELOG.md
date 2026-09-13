@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-2026-09-13 00:03 PDT | [DOCUMENTED] | Approved live-demo window continuity during Builder authoring: keep the finished training ViZDoom instance open and paused on its final frame, close it before a fresh held-out episode, and preserve immediate close behavior for ordinary evaluation plus guaranteed cleanup on errors and deadlines.
+2026-09-12 23:57 PDT | [ADDED] | Kept the visible live-demo training window open and paused on its final frame throughout Builder authoring, then closed it before any fresh held-out connector opens. `EpisodeRunner` retains its close-on-finish default, while explicit external ownership now has tested normal and Builder-error cleanup paths.
+
+2026-09-12 23:56 PDT | [DOCUMENTED] | Approved live-demo window continuity during Builder authoring: keep the finished training ViZDoom instance open and paused on its final frame, close it before a fresh held-out episode, and preserve immediate close behavior for ordinary evaluation plus guaranteed cleanup on errors and deadlines.
 
 2026-09-12 23:49 PDT | [DOCUMENTED] | Approved one paid, non-benchmark live Doom loop diagnostic using the existing maximum validated output caps of 2,000 Action tokens and 8,000 Build/Repair tokens, with the same model, prompts, game budgets, visible real-time connector, 600-second deadline, separate database, local sandbox label, and Weave tracing; no code or persistent environment setting changes.
 
