@@ -2348,8 +2348,8 @@ Inference and the labeled local sandbox:
   (step 22.A).
 - Changes to the Action and Builder prompts, Builder evidence selection, and
   Builder output caps within the `eval_protocol.md` ceilings (steps 22.A-22.C).
-- One additive storage migration that records per-call request options
-  (step 22.A).
+- One additive storage migration that records per-call request options and
+  returned tool calls (step 22.A).
 - Bounded concurrency for held-out cells and validation executions (step 22.E).
 - A multi-round improvement loop over training-split practice seeds, a new
   Doom scenario manifest version that adds practice seeds, and the matching
@@ -2455,7 +2455,11 @@ never worked around by changing budgets, seeds, or grading.
   `src/noob_agent/settings.py`, `src/noob_agent/agents/action.py`,
   `src/noob_agent/prompts/action.py`, `src/noob_agent/domain/records.py`,
   `src/noob_agent/storage/schema.py`, `src/noob_agent/storage/repository.py`,
-  tests, `.env.example`, `CHANGELOG.md`.
+  `src/noob_agent/runtime/sequence.py` and `src/noob_agent/runtime/heldout.py`
+  (to pass the thinking setting), `scripts/run_doom_learning_sequence.py` and
+  `scripts/loop_bench.py` (to read it), new `tests/test_action_decisions.py`,
+  the schema-version and prompt assertions in `tests/test_grader.py` and
+  `tests/test_model_calls.py`, `.env.example`, `CHANGELOG.md`.
 - `ModelRequest` gains optional `thinking: bool | None` and `tools`, and
   `ModelResponse` gains an optional `tool_call`. The W&B Inference adapter sends
   `chat_template_kwargs.thinking` only when `thinking` is not `None`, and sends
@@ -2470,11 +2474,14 @@ never worked around by changing budgets, seeds, or grading.
   so scripted providers keep working. A reply cut off at its cap without a
   decision is still rejected as `unusable_reply` and is counted separately as
   truncated.
-- The static instructions move to the system prompt; the user prompt carries
-  the goal, history, and observation.
-- Schema version 4 adds a nullable `request_options_json` column to
-  `model_call` holding thinking, tool names, and tool-choice mode. The change is
-  additive, and a version-3 database opens unchanged.
+- The fixed instructions, including the reply and finding formats, move to the
+  system prompt, which is identical on every turn. The user prompt keeps the
+  goal, the primitive and skill lists, the history, and the observation.
+- Schema version 5 adds nullable `request_options_json` (thinking, tool names,
+  and tool-choice mode) and `tool_call_json` (the returned call) columns to
+  `model_call`. Version 4 is skipped because unmerged section 21 work already
+  wrote version-4 local databases. The change is additive: a version-3 or
+  version-4 database gains the columns and keeps every row.
 - Tests first: adapter request shape with thinking on, off, and unset, and with
   tools; tool-call parsing including removal of intent fields, an unknown tool,
   invalid arguments, and several calls, where the first is used; fallback to
