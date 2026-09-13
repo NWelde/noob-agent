@@ -318,7 +318,7 @@ def test_a_version_1_database_is_upgraded_in_place(
 
     with EpisodeStore.open(str(database_path)) as reopened:
         version = reopened._connection.execute("SELECT version FROM schema_version").fetchone()
-        assert version[0] == SCHEMA_VERSION == 4
+        assert version[0] == SCHEMA_VERSION == 5
         assert reopened.read_episode("ep_0001").outcome is not None
         reopened.record_finding(finding())
         assert reopened.read_finding("fnd_0001").finding == finding()
@@ -352,12 +352,19 @@ def test_the_prompt_tells_the_agent_how_to_report_but_not_what_to_find(
 
     observation = observation_factory(0)
     assert isinstance(observation, Observation)
-    rendered = render_action_prompt(
-        public_goal=observation.public_goal,
-        observation=observation,
-        tools=(),
-        skills=(),
-        history=(),
+    from noob_agent.prompts.action import ACTION_SYSTEM
+
+    # The finding instructions reach the model through the fixed system prompt.
+    rendered = (
+        ACTION_SYSTEM
+        + "\n"
+        + render_action_prompt(
+            public_goal=observation.public_goal,
+            observation=observation,
+            tools=(),
+            skills=(),
+            history=(),
+        )
     )
 
     assert '"finding"' in rendered

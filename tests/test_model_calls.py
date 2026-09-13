@@ -592,11 +592,11 @@ def test_a_version_2_database_upgrades_to_version_3_with_its_episodes_intact(
     connection.close()
 
     with EpisodeStore.open(database_path) as upgraded:
-        assert SCHEMA_VERSION == 4
+        assert SCHEMA_VERSION == 5
         assert upgraded.read_episode(episode.episode_id) == before
         assert upgraded.read_model_calls() == ()
         version = upgraded._connection.execute("SELECT version FROM schema_version").fetchone()
-        assert version["version"] == 4
+        assert version["version"] == 5
         upgraded.record_model_call(_record())
         assert [r.call_id for r in upgraded.read_model_calls()] == ["mc_0001"]
 
@@ -683,7 +683,8 @@ def test_the_weave_mirror_nests_action_calls_under_their_episode() -> None:
 
     sink.record(started)
     sink.record(model_call_event(_record()))
-    sink.flush()
+    # Ending the episode's trace is `close`; `flush` only delivers (section 22.E).
+    sink.close()
     sink.record(model_call_event(_record(call_id="mc_0002", purpose="build", action_id=None)))
 
     assert weave.calls == [

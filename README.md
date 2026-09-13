@@ -1,82 +1,96 @@
 # noob-agent
 
-noob-agent tests whether an AI model can learn a new game mechanic and turn
-what it learned into a small, reusable Python program.
+noob-agent measures how well an AI model **learns** inside a game it has never
+seen. It doesn't just check whether the model can finish a fixed task.
 
-The model starts with a short list of ordinary actions. It explores a task it
-has not been told how to solve, records what happened, writes a Python function
-from that experience, checks the function, and tries it on a fresh version of
-the task.
+A model starts as a "noob": it gets the same basic new-player senses and
+controls as every other model (observe, move, inspect, pick up, interact). Nobody
+tells it how the unfamiliar objects work or what steps reach the goal. It has to
+experiment, turn what it discovers into reusable Python **skills**, and then use
+those skills on variations it never saw while learning.
 
-> Given the same actions, feedback, and budget, can a model turn experience
-> into code that works in a new situation?
+The central question:
 
-This is an evaluation harness, not a general-purpose game-playing bot. It
-does not fine-tune or change model weights.
+> Given the same new-player controls, unfamiliar environment, feedback, and
+> learning budget, how effectively can a model turn experience into a reliable
+> skill that works on unseen variations?
 
-## What is working
+Self-improvement here means building and keeping tested code. It does **not**
+mean fine-tuning or changing model weights.
 
-The repository contains the shared learning loop, Minecraft and Doom
-connectors, persistent run records, skill validation, and deterministic tests.
-The project is still a hackathon prototype, so the evidence is mixed:
+## What is working today
 
-- The fake-connector tests and connector plumbing cover the full learning loop.
-- A hand-written fixture skill is accepted and reused in deterministic Doom
-  tests. That fixture is test plumbing, not a model result.
+This is a hackathon prototype, not a finished benchmark. The shared learning
+loop, Minecraft and Doom connectors, persistent run records, skill validation,
+and deterministic tests are in the repository. The current live evidence is
+more limited:
+
+- A hand-written fixture skill passes the deterministic Doom learning loop.
+  That fixture tests the plumbing and is not a model result.
 - The recorded Doom model run did not produce an accepted skill. The model
   exhausted its action budget without killing the target, and the Builder
   reply was cut off at its output limit.
 - The live Minecraft clean-versus-faulty grading path and independent defect
-  reproduction are not yet complete.
+  reproduction are not complete.
 
-The repository can support a first technical phase and a credible prototype
-review. It should not claim that the complete cross-game benchmark is finished.
+The repo is ready to support a first technical phase and a credible prototype
+review. It should not claim that the full cross-game benchmark is finished.
 
-## The loop
+## How it works
 
-The Action agent plays through a connector and records every observation,
-decision, primitive action, result, model call, and cost. The Builder then uses
-the public training trace to write a Python skill. Skills are validated in an
-isolated environment before an immutable version can be offered on a fresh
-held-out episode.
+Two loops run at different speeds.
+
+**Fast action loop.** The Action agent repeatedly observes the public game state,
+chooses one primitive action or accepted skill, executes it through a game
+connector, and records the result. An attempt ends on success, a budget limit, no
+progress, or an infrastructure failure.
+
+**Slow improvement loop.**
 
 ```mermaid
-flowchart LR
-    Cold[Cold attempt] --> Trace[Public trace]
-    Trace --> Build[Builder writes skill]
-    Build --> Check[Validate and repair]
-    Check -->|accepted| Reset[Reset game + conversation]
-    Reset --> HeldOut[Unseen held-out task]
-    HeldOut --> Grade[Independent grader]
+flowchart TD
+    Cold[Cold training attempt] --> Trace[Select public trace evidence]
+    Trace --> Candidate[Builder writes a Python skill]
+    Candidate --> Validate[Validate in an isolated sandbox]
+    Validate -->|reject with public errors| Repair[Bounded repair, new version]
+    Repair --> Validate
+    Validate -->|accept| Save[Save immutable skill version]
+    Save --> Reset[Reset game and model conversation]
+    Reset --> Heldout[Attempt unseen variations with the skill]
+    Heldout --> Grade[Independent private grading]
 ```
 
-The only thing carried across the reset is the accepted skill. Held-out grader
-feedback never goes back to the Builder, and the prompts, primitive controls,
-scenario split, and budgets stay fixed.
+The accepted skill is the only thing carried across the reset. Held-out grader
+feedback never goes back to the Builder, and the connector, grader, scenario
+split, budgets, and prompts stay fixed, so the system can't raise its score by
+editing the test.
 
-## What the comparison means
+## What it compares
 
-- **Cold:** primitive actions only.
-- **Self-improving:** the same actions and budget, plus an accepted skill built
-  from training evidence.
-- **Notes control:** the same evidence and learning budget, but written notes
-  instead of executable code.
+- **Cold condition:** primitive tools only.
+- **Self-improving condition:** same tools and budget, plus skills the model
+  built and validated from its own training attempts.
+- **Notes control:** same evidence and learning budget, but it keeps a written
+  playbook instead of executable code. This checks whether validated skills add
+  value beyond reflection.
 
-The scorecard keeps task completion, exploration, skill acceptance, transfer,
-defect reproduction, action counts, model calls, tokens, time, and dollars
-separate. SQLite is the source of truth. Weave mirrors the durable run trace.
+Results are a small scorecard, not one opaque number. It separates initial
+ability, skill-building, repair, transfer to unseen variations, defect discovery
+and reproduction (clean vs. faulty scenario twins), and cost in actions, model
+calls, tokens, time, and dollars. Every step is recorded in SQLite and mirrored
+to W&B Weave for inspection.
 
 ## Terms used in this repository
 
 - **Action agent:** the model that chooses what to do in the game.
-- **Builder agent:** the model call that turns a public training trace into a
-  candidate Python skill or repairs a rejected candidate.
+- **Builder agent:** the model call that writes a skill from a public training
+  trace or repairs a rejected skill.
 - **Primitive:** one low-level game action, such as `observe`, `move`, `attack`,
   or `use_object`.
 - **Connector:** the adapter that translates the shared action format into one
   game's controls and returns structured observations and results.
-- **Skill:** a generated Python function that calls approved primitives to
-  perform a repeated task. Accepted skills are versioned and immutable.
+- **Skill:** a generated Python function that calls approved primitives to do a
+  repeated task. Accepted skills are versioned and immutable.
 - **Training episode:** the first attempt, where the model explores and leaves
   evidence for the Builder.
 - **Held-out episode:** a fresh task variation the Builder did not see. It
@@ -85,12 +99,9 @@ separate. SQLite is the source of truth. Weave mirrors the durable run trace.
   actual game outcome.
 - **Defect reproduction:** a fresh reset that replays evidence for a reported
   bug to check whether the bug is real and repeatable.
-- **Scenario:** a declared task with its rules, reset behavior, budgets, and
+- **Scenario:** a declared task with rules, reset behavior, budgets, and
   training or held-out variations.
 - **Seed:** a fixed number that makes a scenario reset reproducible.
-- **BDP:** "Basic Demoable Product," the smallest vertical slice in
-  [`hackathon_plan.md`](hackathon_plan.md). It is the project's first complete
-  demonstration target.
 - **Weave:** W&B's tracing and evaluation product. Here it mirrors local run
   records so a person can inspect model calls and episode steps.
 - **W&B Inference:** the model-serving interface used by the configured client.
@@ -106,36 +117,22 @@ separate. SQLite is the source of truth. Weave mirrors the durable run trace.
   Python-to-Node connection.
 - **Data pack:** Minecraft files that add commands and game behavior without a
   custom mod.
-- **Action space:** the complete set of actions available to the model in one
-  environment.
-- **Trace:** the chronological record of observations, model decisions, game
-  results, and costs for an episode.
+- **BDP:** "Basic Demoable Product," the smallest complete demonstration
+  target described in [`hackathon_plan.md`](hackathon_plan.md).
 
-## A Doom result
+## Games
 
-The checked-in image is a non-benchmark Doom replay capture. It shows the
-intended cold-versus-skill presentation, not a published aggregate result.
+The same learning architecture runs on two deliberately different games. Each
+game supplies a public goal, observations, reset, and a frozen primitive control
+set.
 
-![Doom cold versus learned skill](assets/doom-comparison.png)
-
-*Non-benchmark demo capture from the Doom comparison recorder. It is a visual
-example of the intended cold-vs-skill story, not a published aggregate score.*
-
-Doom is connected through [ViZDoom](https://vizdoom.farama.org/) with
-structured observations and a frozen set of ordinary player controls. The
-replay viewer can verify recorded episodes step by step; see
-[`docs/doom-env.md`](docs/doom-env.md).
-
-## Two different games
-
-- **Minecraft** (primary): a local vanilla Java 1.21.1 server, an unfamiliar
-  data-pack mechanic, and a Mineflayer connector. See
+- **Minecraft** (primary): a local vanilla Java 1.21.1 server, a data-pack
+  scenario with an unfamiliar mechanic, and a Mineflayer connector. See
   [`docs/minecraft-server.md`](docs/minecraft-server.md).
-- **Doom:** fast, real-time, Python-native, and resettable through ViZDoom. See
+- **Doom** via ViZDoom: fast, real-time, Python-native, and fully resettable. See
   [`docs/doom-env.md`](docs/doom-env.md).
 
-Two integrations do not prove that every game will work. Generality remains a
-hypothesis for future testing.
+Two working games do not prove universal support. Generality stays a hypothesis.
 
 ## Repository map
 
@@ -146,28 +143,28 @@ src/noob_agent/
   domain/          Typed records and public contracts
   grading/         Independent outcome checks and reproduction
   models/          Model client and call recording
-  observability/   Weave trace mirror
-  prompts/         Action and Builder prompts
-  runtime/         Episode and learning-sequence orchestration
+  observability/   Weave trace mirror and scorecards
+  prompts/         Action, Builder, and refinement prompts
+  runtime/         Episode and improvement-loop orchestration
   skills/          Skill packages, policy, registry, and execution
   storage/         SQLite schema and repository
   verification/    Skill validation
 
 scenarios/         Versioned game scenarios and seeds
-scripts/           Demo, replay, and smoke-run entry points
+scripts/           Demo, replay, benchmark, and live-view entry points
 tests/             Unit, integration, and live-environment contract tests
-docs/              Operational guides and dated implementation status
+docs/              Operational guides and implementation status
 assets/            Checked-in visual evidence
 ```
 
-The contracts and scope live in:
+Specifications:
 
 - [`hackathon_plan.md`](hackathon_plan.md): authoritative scope and build order
-- [`connector_contract.md`](connector_contract.md): observations, primitives, and accounting
+- [`connector_contract.md`](connector_contract.md): observations, primitives, and action accounting
 - [`skill_contract.md`](skill_contract.md): generated skills, permissions, and validation
-- [`minecraft_scenario.md`](minecraft_scenario.md): task, worlds, and private grading
+- [`minecraft_scenario.md`](minecraft_scenario.md): the Minecraft task, worlds, and private grading
 - [`eval_protocol.md`](eval_protocol.md): conditions, budgets, metrics, and publication rules
-- [`docs/current-status.md`](docs/current-status.md): dated implementation status
+- [`docs/current-status.md`](docs/current-status.md) and [`docs/loop-optimization.md`](docs/loop-optimization.md): implementation status and loop scorecards
 
 ## Getting started
 
@@ -178,23 +175,24 @@ uv sync --group dev
 uv run pytest
 ```
 
-Copy `.env.example` to `.env` and fill in only the credentials for integrations
-you enable. All integrations are disabled by default, and tests do not need
-credentials.
+Copy `.env.example` to `.env` and fill in only the credentials for the
+integrations you enable (W&B Inference, Weave, CoreWeave Sandbox). All
+integrations are disabled by default, and tests don't need credentials.
 
 ```sh
-# Run one Doom learning sequence: cold training, Builder, held-out grading.
-NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
-  scripts/run_doom_learning_sequence.py
+# One live Doom learning sequence: cold training, Builder, graded held-out cells.
+NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_doom_learning_sequence.py
 
-# Watch a previously recorded Doom episode, checking every step.
-uv run python scripts/replay_doom_episode.py \
-  --database .noob-agent/doom-learning-live.sqlite3
+# Benchmark the loop on fixed seeds and write a scorecard.
+NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/loop_bench.py run --sequences 5
+
+# Watch a run's reasoning live from Weave.
+uv run --env-file .env python scripts/live_reasoning_view.py --run-id <sequence-id>
 ```
 
-`NOOB_AGENT_SANDBOX_MODE=local` uses a labeled local subprocess executor,
-weaker isolation than CoreWeave Sandbox. This prototype makes no production
-security claim for arbitrary generated code.
+`NOOB_AGENT_SANDBOX_MODE=local` uses a labeled local subprocess executor, which
+is weaker isolation than CoreWeave Sandbox. Generated code is time-limited and
+gets a narrow API, but this prototype makes no production security claim.
 
 ## Contributing
 

@@ -10,8 +10,6 @@ Settings come only from the process environment. Load the local `.env` with:
     uv run --env-file .env python scripts/run_doom_learning_sequence.py
 """
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import argparse
@@ -20,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -27,10 +26,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 from noob_agent.connectors.doom import DoomConnector, DoomSettings
-from noob_agent.domain.records import ModelCallRecord, StoredEpisode
+from noob_agent.domain.records import StoredEpisode
 from noob_agent.grading.doom import DoomEpisodeGrade, DoomPrivateOutcome, grade_doom_episode
-from noob_agent.models.client import ModelClient, ModelRequest, ModelResponse, build_model_client
-from noob_agent.observability.tracing import build_trace_sink
+from noob_agent.models.client import build_model_client
+from noob_agent.observability.tracing import build_trace_sink, close_trace
 from noob_agent.runtime.sequence import HeldOutCell, LearningSequence, LearningSequenceResult
 from noob_agent.settings import IntegrationSettings
 from noob_agent.skills.executor import build_skill_executor
@@ -42,11 +41,10 @@ DEFAULT_DATABASE = Path(".noob-agent/doom-learning.sqlite3")
 LIVE_DEMO_DATABASE = Path(".noob-agent/doom-live-demo.sqlite3")
 LIVE_DEMO_CONDITION = "non-benchmark-live-demo"
 LIVE_DEMO_DEADLINE_SECONDS = 600.0
-TOKEN_BUDGET_DEADLINE_SECONDS = 3_600.0
-TOKEN_BUDGET_MAX_DEADLINE_SECONDS = 7_200.0
-TOKEN_BUDGET_MAX = 1_000_000
-DEMO_BUILDER_MAX_OUTPUT_TOKENS = 100_000
-DEMO_MAX_REPAIRS = 3
+LIVE_VIEW_SCRIPT = Path(__file__).with_name("live_reasoning_view.py")
+LIVE_VIEW_PORT = 8765
+# Keeps the view up briefly after the final flush so the last calls reach it.
+LIVE_VIEW_LINGER_SECONDS = 10.0
 
 
 class RunOptions(NamedTuple):
@@ -55,42 +53,8 @@ class RunOptions(NamedTuple):
     sequence_id: str | None
     live_demo: bool
     deadline_seconds: float | None
-    token_budget: int | None
-    builder_max_output_tokens: int | None
-    max_repairs: int | None
-    windowed: bool
-
-
-class TokenBudgetExhausted(asyncio.CancelledError):
-    """The next model request would begin after the demo budget was spent."""
-
-
-def _call_tokens(record: ModelCallRecord) -> int:
-    """Conservative accounting for one recorded call, including unknown usage."""
-    if record.input_tokens is not None and record.output_tokens is not None:
-        return record.input_tokens + record.output_tokens
-    return record.max_output_tokens + (len(record.system) + len(record.prompt)) // 4
-
-
-def _tokens_for_run(store: EpisodeStore, run_id: str) -> int:
-    return sum(
-        _call_tokens(record)
-        for record in store.read_model_calls()
-        if record.experiment_id.startswith(f"{run_id}-s")
-    )
-
-
-class _BudgetedClient:
-    """Refuses new requests after the durable records reach one demo's budget."""
-
-    def __init__(self, inner: ModelClient, store: EpisodeStore, run_id: str, budget: int) -> None:
-        self._inner, self._store, self._run_id, self._budget = inner, store, run_id, budget
-        self.provider = getattr(inner, "provider", "unknown")
-
-    async def complete(self, request: ModelRequest) -> ModelResponse:
-        if _tokens_for_run(self._store, self._run_id) >= self._budget:
-            raise TokenBudgetExhausted("Token budget exhausted; model call was not sent.")
-        return await self._inner.complete(request)
+    live_view: bool = False
+    live_view_port: int = LIVE_VIEW_PORT
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
@@ -104,46 +68,25 @@ def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
         help="Show real-time Doom under an explicit non-benchmark 10-minute deadline.",
     )
     parser.add_argument("--deadline-seconds", type=float, default=None)
-    parser.add_argument("--token-budget", type=int, default=None)
-    parser.add_argument("--builder-max-output-tokens", type=int, default=None)
-    parser.add_argument("--max-repairs", type=int, default=None)
-    parser.add_argument("--windowed", action="store_true")
+    parser.add_argument(
+        "--live-view",
+        action="store_true",
+        help="Serve the live Weave reasoning view beside the game (requires --live-demo).",
+    )
+    parser.add_argument("--live-view-port", type=int, default=LIVE_VIEW_PORT)
     parsed = parser.parse_args(argv)
     live_demo = bool(parsed.live_demo)
+    if parsed.live_view and not live_demo:
+        parser.error("--live-view requires --live-demo")
     deadline = parsed.deadline_seconds
-    budget = parsed.token_budget
-    demo_only = (
-        deadline is not None
-        or budget is not None
-        or parsed.builder_max_output_tokens is not None
-        or parsed.max_repairs is not None
-        or parsed.windowed
-    )
-    if demo_only and not live_demo:
-        parser.error("demo options require --live-demo")
-    if budget is not None and not 1 <= budget <= TOKEN_BUDGET_MAX:
-        parser.error(f"--token-budget must be between 1 and {TOKEN_BUDGET_MAX}")
-    if (
-        parsed.builder_max_output_tokens is not None
-        and not 1 <= parsed.builder_max_output_tokens <= DEMO_BUILDER_MAX_OUTPUT_TOKENS
-    ):
-        parser.error(
-            f"--builder-max-output-tokens must be between 1 and {DEMO_BUILDER_MAX_OUTPUT_TOKENS}"
-        )
-    if parsed.max_repairs is not None and not 0 <= parsed.max_repairs <= DEMO_MAX_REPAIRS:
-        parser.error(f"--max-repairs must be between 0 and {DEMO_MAX_REPAIRS}")
+    if deadline is not None and not live_demo:
+        parser.error("--deadline-seconds requires --live-demo")
     if live_demo:
-        default_deadline = (
-            TOKEN_BUDGET_DEADLINE_SECONDS if budget is not None else LIVE_DEMO_DEADLINE_SECONDS
-        )
-        maximum_deadline = (
-            TOKEN_BUDGET_MAX_DEADLINE_SECONDS if budget is not None else LIVE_DEMO_DEADLINE_SECONDS
-        )
-        deadline = default_deadline if deadline is None else float(deadline)
-        if deadline <= 0 or deadline > maximum_deadline:
+        deadline = LIVE_DEMO_DEADLINE_SECONDS if deadline is None else float(deadline)
+        if deadline <= 0 or deadline > LIVE_DEMO_DEADLINE_SECONDS:
             parser.error(
                 f"the live-demo deadline must be greater than 0 and no more than "
-                f"{maximum_deadline:g} seconds"
+                f"{LIVE_DEMO_DEADLINE_SECONDS:g} seconds"
             )
     return RunOptions(
         database=parsed.database,
@@ -151,18 +94,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
         sequence_id=parsed.sequence_id,
         live_demo=live_demo,
         deadline_seconds=deadline,
-        token_budget=budget,
-        builder_max_output_tokens=(
-            DEMO_BUILDER_MAX_OUTPUT_TOKENS
-            if budget is not None and parsed.builder_max_output_tokens is None
-            else parsed.builder_max_output_tokens
-        ),
-        max_repairs=(
-            DEMO_MAX_REPAIRS
-            if budget is not None and parsed.max_repairs is None
-            else parsed.max_repairs
-        ),
-        windowed=bool(parsed.windowed),
+        live_view=bool(parsed.live_view),
+        live_view_port=int(parsed.live_view_port),
     )
 
 
@@ -171,27 +104,15 @@ def _database_for(options: RunOptions) -> Path:
 
 
 def _condition_for(options: RunOptions) -> str:
-    return (
-        "non-benchmark-token-budget-demo"
-        if options.token_budget is not None
-        else (LIVE_DEMO_CONDITION if options.live_demo else "self-improving")
-    )
+    return LIVE_DEMO_CONDITION if options.live_demo else "self-improving"
 
 
 def _sequence_prefix(options: RunOptions) -> str:
-    return (
-        "doom-token-demo"
-        if options.token_budget is not None
-        else ("doom-live-demo" if options.live_demo else "doom-seq")
-    )
+    return "doom-live-demo" if options.live_demo else "doom-seq"
 
 
 def _connector_factory(options: RunOptions) -> Callable[[], DoomConnector]:
-    settings = DoomSettings(
-        window_visible=options.live_demo,
-        realtime=options.live_demo,
-        fullscreen=options.live_demo and not options.windowed,
-    )
+    settings = DoomSettings(window_visible=options.live_demo, realtime=options.live_demo)
     return lambda: DoomConnector(settings)
 
 
@@ -271,6 +192,34 @@ def _summary(
     }
 
 
+def _start_live_view(
+    args: RunOptions, sequence_id: str, environment: Mapping[str, str]
+) -> subprocess.Popen[bytes]:
+    view = subprocess.Popen(
+        [
+            sys.executable,
+            str(LIVE_VIEW_SCRIPT),
+            "--run-id",
+            sequence_id,
+            "--port",
+            str(args.live_view_port),
+        ],
+        env=dict(environment),
+    )
+    print(
+        f"Live reasoning view (from Weave): http://127.0.0.1:{args.live_view_port}",
+        flush=True,
+    )
+    return view
+
+
+def _stop_live_view(view: subprocess.Popen[bytes]) -> None:
+    time.sleep(LIVE_VIEW_LINGER_SECONDS)
+    view.terminate()
+    with suppress(Exception):
+        view.wait(timeout=5)
+
+
 def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None = None) -> int:
     args = _parse_args(argv)
     environment = os.environ if environ is None else environ
@@ -280,6 +229,13 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         return 2
 
     settings = IntegrationSettings.from_environ(environment)
+    if args.live_view and not settings.trace.enabled:
+        print(
+            "Refusing live view: it reads from Weave, and Weave tracing is disabled "
+            "(set NOOB_AGENT_TRACE_MODE=weave and WEAVE_DISABLED=false).",
+            file=sys.stderr,
+        )
+        return 2
     if settings.model.provider == "disabled":
         print("Refusing to run: NOOB_AGENT_MODEL_PROVIDER is disabled.", file=sys.stderr)
         return 2
@@ -303,10 +259,6 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     database = _database_for(args)
     database.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.token_budget is not None and not settings.trace.enabled:
-        print("Refusing token-budget demo: Weave tracing must be enabled.", file=sys.stderr)
-        return 2
-
     if args.live_demo:
         print(
             "NON-BENCHMARK LIVE DEMO: visible real-time Doom with Weave tracing; "
@@ -315,88 +267,43 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         )
 
     trace = build_trace_sink(settings.trace, wandb=settings.wandb)
+    view = _start_live_view(args, sequence_id, environment) if args.live_view else None
     timed_out = False
-    result: LearningSequenceResult[DoomEpisodeGrade] | None = None
     try:
         with EpisodeStore.open(database) as store:
-            client = build_model_client(settings.model, settings.wandb)
-            if args.token_budget is not None:
-                client = _BudgetedClient(client, store, sequence_id, args.token_budget)
-
-            async def run_once(identifier: str) -> LearningSequenceResult[DoomEpisodeGrade]:
-                sequence = LearningSequence(
-                    connector_factory=_connector_factory(args),
-                    client=client,
-                    model_id=model_id,
-                    store=store,
-                    registry=SkillRegistry(),
-                    executor=executor,
-                    grade=_grade,
-                    trace=trace,
-                    max_repairs=args.max_repairs if args.max_repairs is not None else 1,
-                    action_max_output_tokens=settings.model.action_max_output_tokens,
-                    builder_max_output_tokens=(
-                        args.builder_max_output_tokens
-                        if args.builder_max_output_tokens is not None
-                        else settings.model.builder_max_output_tokens
-                    ),
-                    condition=_condition_for(args),
-                    keep_training_connector_open_during_builder=args.live_demo,
-                )
-                return await sequence.run(
-                    sequence_id=identifier,
-                    training_scenario_id=training.scenario_id,
-                    training_seed=training.seed,
-                    heldout=heldout,
-                )
-
-            async def run_demo() -> LearningSequenceResult[DoomEpisodeGrade] | None:
-                nonlocal result
-                index = 1
-                while True:
-                    identifier = (
-                        sequence_id if args.token_budget is None else f"{sequence_id}-s{index:02d}"
-                    )
-                    try:
-                        result = await run_once(identifier)
-                    except TokenBudgetExhausted:
-                        return result
-                    if (
-                        args.token_budget is None
-                        or _tokens_for_run(store, sequence_id) >= args.token_budget
-                    ):
-                        return result
-                    index += 1
-
+            sequence = LearningSequence(
+                connector_factory=_connector_factory(args),
+                client=build_model_client(settings.model, settings.wandb),
+                model_id=model_id,
+                store=store,
+                registry=SkillRegistry(),
+                executor=executor,
+                grade=_grade,
+                trace=trace,
+                action_max_output_tokens=settings.model.action_max_output_tokens,
+                builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                action_thinking=settings.model.action_thinking,
+                builder_thinking=settings.model.builder_thinking,
+                condition=_condition_for(args),
+                persistent_connector=args.live_demo,
+            )
+            run = sequence.run(
+                sequence_id=sequence_id,
+                training_scenario_id=training.scenario_id,
+                training_seed=training.seed,
+                heldout=heldout,
+            )
             try:
                 result = asyncio.run(
-                    asyncio.wait_for(run_demo(), timeout=args.deadline_seconds)
-                    if args.live_demo
-                    else run_demo()
+                    asyncio.wait_for(run, timeout=args.deadline_seconds) if args.live_demo else run
                 )
             except TimeoutError:
                 timed_out = True
     finally:
         with suppress(Exception):
-            trace.flush()
-
-    if args.token_budget is not None:
-        # The renderer reads remotely delivered Weave calls only. A final pass
-        # after flush leaves an inspectable transcript even if live polling was
-        # interrupted by the deadline.
-        with suppress(Exception):
-            subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/doom_demo_log.py",
-                    "--run-id",
-                    sequence_id,
-                    "--project",
-                    settings.wandb.project,
-                ],
-                check=False,
-                timeout=60,
-            )
+            close_trace(trace)
+        if view is not None:
+            _stop_live_view(view)
 
     if timed_out:
         print(
@@ -413,23 +320,6 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         )
         return 124
 
-    if result is None:
-        with EpisodeStore.open(database) as result_store:
-            tokens_used = _tokens_for_run(result_store, sequence_id)
-        print(
-            json.dumps(
-                {
-                    "run_kind": _condition_for(args),
-                    "status": "token_budget_exhausted",
-                    "token_budget": args.token_budget,
-                    "tokens_used": tokens_used,
-                    "database": str(database),
-                },
-                indent=2,
-            )
-        )
-        return 0
-
     summary = _summary(
         result,
         action_max_output_tokens=settings.model.action_max_output_tokens,
@@ -437,11 +327,10 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     )
     if args.live_demo:
         summary = {
-            "run_kind": _condition_for(args),
+            "run_kind": LIVE_DEMO_CONDITION,
             "status": "completed",
             "deadline_seconds": args.deadline_seconds,
             "database": str(database),
-            **({"token_budget": args.token_budget} if args.token_budget is not None else {}),
             **summary,
         }
     print(json.dumps(summary, indent=2))

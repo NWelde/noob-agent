@@ -2116,11 +2116,11 @@ results must never enter a comparison or a report as evaluation data.
   ZDoom window is unverified.
 
 It authorizes: a token-budget mode for `--live-demo` that runs fresh learning
-sequences back to back; demo-only Builder output caps up to 100,000 and repair
+sequences back to back; demo-only Builder output caps up to 32,000 and repair
 counts up to 3; a longer safety deadline in that mode; a display-only
 `fullscreen` connector setting used by the live demo and the replay viewer; a
 script that writes `doom-demo-log.md` from the Weave trace during the run; and
-one paid demo run of at most 1,000,000 tokens plus the overshoot bound below.
+one paid demo run of at most 500,000 tokens plus the overshoot bound below.
 
 It does not authorize: changing `eval_protocol.md`, `ModelSettings` ceilings,
 or any default of the normal learning-sequence command; changing prompts,
@@ -2149,13 +2149,13 @@ needs its own approval.
   episode is finalized as `unknown_result`, the connector closes, the unsent
   call is recorded with an error saying the token budget was exhausted and the
   call was not sent, and Weave is flushed. The budget can therefore be exceeded
-  by at most one call already in progress, which is at most 100,000 output tokens
+  by at most one call already in progress, which is at most 32,000 output tokens
   plus that call's input.
 - **Safety deadline.** In budget mode the whole-run deadline defaults to 3,600
   seconds and may be set up to 7,200. Whichever comes first, budget or
   deadline, ends the run, and the summary names which one it was.
 - **Provider refusal is reported, not worked around.** If the provider refuses
-  or errors on a call, for example because 100,000 is above its maximum output,
+  or errors on a call, for example because 32,000 is above its maximum output,
   the demo stops, records the error, and reports it. It does not retry with a
   smaller cap.
 - **Full screen is display only.** The setting changes no observation or step
@@ -2200,9 +2200,10 @@ needs its own approval.
   `CHANGELOG.md`.
 - Values:
   - `--token-budget` turns on budget mode, which runs sequences back to back.
-    The next run uses 1,000,000; the flag refuses values outside 1 to 1,000,000.
-  - In budget mode, `--builder-max-output-tokens` defaults to 100,000 and may
-    be 1 to 100,000.
+    The run documented here uses 500,000; the flag refuses values outside 1 to
+    500,000.
+  - In budget mode, `--builder-max-output-tokens` defaults to 32,000 and may
+    be 1 to 32,000.
   - In budget mode, `--max-repairs` defaults to 3 and may be 0 to 3.
   - The Action cap still comes from `ModelSettings`.
   - Without `--token-budget`, section 20 behavior and every default are
@@ -2286,59 +2287,593 @@ removes full screen, and the demo and replay open ordinary windows. Reverting
 Reverting 21c removes the log writer. None changes the database schema, and
 demo databases and logs are Git-ignored.
 
-## 22. Approved non-benchmark milestone: live Minecraft loop smoke run
+## 22. Approved core-loop milestone: loop optimization
 
-This section records the requester's request on 2026-09-13 for a real-local-
-server smoke run of the Minecraft learning loop. It exists to observe whether
-the Action agent, Builder, skill validation, Mineflayer sidecar, SQLite store,
-and Weave tracer continue to operate smoothly together under a practical
-budget. It is not benchmark or evaluation evidence: the deployed world has
-only the frozen training scenario, so every reuse attempt is reset to that
-same training room and is labelled a smoke attempt, never held-out transfer.
+The requester approved this milestone on 2026-09-13. The project targets Best
+Loop Design, so the learning loop must be fast, effective, and trustworthy as a
+measuring instrument before comparison and report work (build-order step 9)
+begins. This section is the approval required by `CLAUDE.md` and `AGENTS.md`
+for every protected change named below. It supersedes section 21's exclusions
+only where a step below names the change explicitly.
 
-It authorizes the new
-`scripts/run_minecraft_live_smoke.py`, its deterministic
-`tests/test_minecraft_live_smoke.py`, the opt-in public-outcome stop signal in
-the episode runner and its stop-reason record, this plan,
-`docs/minecraft-server.md`, and `CHANGELOG.md`. It does not authorize scenario,
-connector, prompt, grader, evaluation-protocol, dependency, CI, or
-database-schema changes.
+### Evidence
 
-### Fixed safety limits
+Measured from the Git-ignored live Doom databases recorded on 2026-09-13
+(`doom-hypothesis-1m-headed-20260913`, `doom-hypothesis-500k-20260913`, and
+`doom-live-demo`), with `deepseek-ai/DeepSeek-V4-Flash-0731` through W&B
+Inference and the labeled local sandbox:
 
-- The process runs for at most 600 seconds.
-- It charges at most 2,000,000 reported-or-conservatively-estimated tokens.
-- It sends at most 500 model calls and at most 1,000 delivered primitive
-  actions across the smoke run. Each rapid cycle gives cold exploration 12
-  decisions, 24 primitives, and 90 seconds before Builder validation.
-- The Builder can make at most five repairs. No Builder output cap is raised
-  above the existing configured cap. Action replies use a smoke-only
-  3,000-token cap.
-- Weave tracing is required. The runner refuses to start when tracing is
-  disabled, uses a separate Git-ignored SQLite database, and flushes tracing
-  on every exit path.
+- **About half of all Action decisions are wasted.** 52% and 46% of Action
+  calls ended with `finish_reason=length` at the 1,024-token cap after about
+  3,500 characters of reasoning and no reply, and were recorded as
+  `unusable_reply`. The cold baseline is therefore dominated by truncation,
+  not play.
+- **The Builder guesses the skill API.** Rejected candidates call
+  `context.turn_left()`, `act("observe")`, and
+  `SkillResult(success=True, error=...)`, none of which exist. The Builder
+  prompt shows only a `...` stub of `run`.
+- **Repairs consume most of the budget and return nothing.** In the 1M run all
+  three repairs reached the 100,000-token cap after 285-349 seconds with no
+  code: about 58% of that run's output tokens and 49% of its model time. No
+  sequence of five accepted a skill.
+- **The Builder never sees observations.** Its evidence lists tool, status,
+  and message only, with no `screen_offset`, labels, health, or ammunition.
+- **Speed.** The median Action decision takes 5.5 seconds, a training episode
+  about 100 seconds, a build 65-107 seconds, and a sequence about 8 minutes.
+  Held-out cells and the 21 validation executions per candidate run one after
+  another.
+- **Held-out results are weak even with an accepted skill.** 3 of 16 held-out
+  episodes in the token demo reached a terminal state.
+- **The protocol budget is unreachable today.** `eval_protocol.md` allows
+  12,000 tokens for a build, 8,000 for a repair, and 60,000 learning tokens.
+  Every live run above exceeded those ceilings.
+- **Provider capability check (2026-09-13, 16 small calls).** For this model on
+  W&B Inference, `reasoning_effort` does not reduce reasoning.
+  `extra_body={"chat_template_kwargs": {"thinking": false}}` removes it: an
+  Action decision took 0.1-0.8 seconds and 6-43 output tokens, and a small
+  Builder request returned code in 0.6 seconds and 131 tokens, while the same
+  request with thinking on used its 4,000-token cap in 18 seconds with no code.
+  Native tool calling with `tool_choice="required"` returned a valid call on
+  3 of 3 attempts, and `response_format` JSON schema also worked. With thinking
+  off the model treated `screen_offset` 38 as 38 degrees, a gap a learned skill
+  can close.
 
-### Required behavior and acceptance
+### What this approves
 
-`uv run --env-file .env python scripts/run_minecraft_live_smoke.py
---live-smoke` connects only to the documented local 1.21.1 Minecraft server
-through the Mineflayer sidecar. It creates fresh registries, connector
-sessions, and Action conversations between smoke sequences; records the cold
-attempt, Builder calls, validation outcome, and same-training-room reuse
-attempt; and emits a terminal JSON summary naming the stop condition, token
-and call totals, primitive totals, database path, and Weave run prefix. A
-provider, server, sidecar, or validation failure is reported directly and is
-not retried with lower limits. Automated tests use fakes; a live invocation is
-manual verification and never skips silently.
+- Landing the isolated skill-validation pipeline already written on
+  `feature/doom-token-budget-summary` (step 22.0).
+- A loop scorecard and headless benchmark command (step 22.F).
+- Per-role reasoning controls and schema-constrained decisions for the shared
+  model, used identically by every compared model that supports them
+  (step 22.A).
+- Changes to the Action and Builder prompts, Builder evidence selection, and
+  Builder output caps within the `eval_protocol.md` ceilings (steps 22.A-22.C).
+- One additive storage migration that records per-call request options
+  (step 22.A).
+- Bounded concurrency for held-out cells and validation executions (step 22.E).
+- A multi-round improvement loop over training-split practice seeds, a new
+  Doom scenario manifest version that adds practice seeds, and the matching
+  `eval_protocol.md` learning-budget amendment (step 22.D).
+- One Minecraft confirmation run with no Minecraft code changes (step 22.G).
 
-The smoke policy also ends an episode after two consecutive
-`NO_VISIBLE_TARGET` results or five actions with no visible state change.
-Those decisions use only public step results and are recorded as
-`repeated_failure` or `no_progress`; ordinary evaluation policies do not opt
-into this behavior.
-Each cold and same-room reuse phase receives a unique smoke-only bookkeeping
-seed so fresh connector reset counters cannot produce duplicate episode IDs;
-the deployed training datapack still builds the same fixed room.
+It does not approve: the comparison runner, the budget-matched notes
+condition, or report generation; changing the private grader, the connector
+contract, primitive tools, observations, or held-out scenarios and seeds;
+passing any private grade to the Action agent or the Builder; a different
+model; dependency or CI changes; or the section 21 ceiling raise that is still
+uncommitted on `feature/doom-token-budget-summary`. Each needs its own approval.
+
+### Invariants
+
+- **Held-out stays quarantined.** No held-out result, grade, or trace reaches
+  the Builder, the practice score, or any loop decision. Held-out episodes run
+  only after learning has finished.
+- **Practice is training split.** Practice episodes use training-split seeds
+  that are distinct from the held-out cells and from the seed that authored the
+  first candidate.
+- **Public signals only inside the loop.** The practice score is computed from
+  public records. The private grade of a practice episode is recorded for the
+  scorecard's agreement metric and never used for selection or shown to a
+  model.
+- **Everything is recorded.** Every model call keeps its request options,
+  every candidate stays in the registry with its parent, and every round keeps
+  its practice episodes and decision.
+- **Same settings for every compared model.** Thinking, tool-call mode, caps,
+  and loop budgets are experiment settings recorded with the run.
+
+### Loop acceptance targets
+
+Measured with `scripts/loop_bench.py` on 5 headless Doom sequences with fixed
+seeds. Targets marked single-pass apply to the section 17 sequence. The
+multi-round target applies to step 22.D.
+
+| Metric | Baseline | Target |
+| --- | --- | --- |
+| Unusable Action replies | 46-52% | < 5% |
+| Action decision latency, p50 | 5.5 s | <= 3 s |
+| Sequences with an accepted skill | 0 of 5 | >= 4 of 5 |
+| Builder calls ending at their cap | 3 of 3 repairs | 0 |
+| Single-pass sequence wall time | about 8 min | <= 4 min |
+| Learning tokens, single pass | above 60,000 | <= 60,000 |
+| Multi-round practice score | not measured | never decreases between kept versions; >= 3 rounds logged |
+| Held-out versus cold, same seeds | not measured | reported with individual run points; no pass threshold |
+
+A target that is not met is reported as observed with the scorecard. It is
+never worked around by changing budgets, seeds, or grading.
+
+### Step 22.0 - Land the isolated validation pipeline
+
+- Files: `src/noob_agent/verification/validator.py`,
+  `src/noob_agent/skills/errors.py`, `src/noob_agent/agents/builder.py`,
+  `src/noob_agent/prompts/builder.py`, `src/noob_agent/runtime/sequence.py`,
+  `tests/test_skill_validation_pipeline.py`, `tests/test_builder_agent.py`,
+  `tests/test_learning_sequence.py`, `tests/test_doom_learning_integration.py`,
+  `CHANGELOG.md`.
+- Tests first: apply the test changes to `main` alone and confirm they fail
+  because `validate_candidate` and the executor-backed Builder are missing.
+- Validation: the full test, Ruff, and strict mypy suites.
+- Acceptance: a candidate is accepted only after load, contract, training
+  replay, the five negative cases, three-run repeatability, and the object-ID
+  variation pass; a rejection gives the repair public failure evidence.
+
+### Step 22.F - Loop scorecard and benchmark command
+
+- Files: new `src/noob_agent/observability/loop_scorecard.py`; new
+  `scripts/loop_bench.py`; new `tests/test_loop_scorecard.py`; new
+  `tests/test_loop_bench.py`; new `docs/loop-optimization.md`; `CHANGELOG.md`.
+- `loop_scorecard.py` computes, from an `EpisodeStore` and optional in-process
+  sequence results, per sequence and in total:
+  - Action: decisions, unusable replies, calls ending at the cap, and latency
+    p50 and p90;
+  - Builder: calls by purpose, calls ending at the cap, tokens, latency, stop
+    reason, and whether a skill was accepted;
+  - episodes: stop reasons, decisions and primitives used, and, when results
+    are supplied, goal completion and skill uses;
+  - wall time per phase and for the whole sequence;
+  - learning tokens and calls against the `eval_protocol.md` ceilings, with any
+    exceeded ceiling flagged.
+  A database without in-process results reports grades as unknown and infers
+  acceptance only from the presence of held-out episodes, and says so.
+- `uv run --env-file .env python scripts/loop_bench.py run --sequences 5` runs
+  headless Doom sequences with the manifest's fixed seeds into a fresh
+  Git-ignored database under `.noob-agent/loop-bench/` and writes the scorecard
+  as JSON and Markdown. `scripts/loop_bench.py score --database <path>` scores
+  an existing database.
+- Tests first, with the fake connector and a scripted provider: every metric
+  above on hand-built records; unusable and truncated decisions counted
+  separately; ceiling flags; unknown grades for a database-only score; the run
+  command refuses a disabled provider or sandbox and never writes to a
+  non-bench database.
+- `docs/loop-optimization.md` records the baseline scorecards of the three
+  databases in the evidence above and gains an after row for every later step.
+- Validation: the focused tests, then the full test, Ruff, and strict mypy
+  suites.
+
+### Step 22.A - Reliable, fast decisions
+
+- Files: `src/noob_agent/models/client.py`, `src/noob_agent/models/recording.py`,
+  `src/noob_agent/settings.py`, `src/noob_agent/agents/action.py`,
+  `src/noob_agent/prompts/action.py`, `src/noob_agent/domain/records.py`,
+  `src/noob_agent/storage/schema.py`, `src/noob_agent/storage/repository.py`,
+  `src/noob_agent/runtime/sequence.py` and `src/noob_agent/runtime/heldout.py`
+  (to pass the thinking setting), `scripts/run_doom_learning_sequence.py` and
+  `scripts/loop_bench.py` (to read it), new `tests/test_action_decisions.py`,
+  the schema-version and prompt assertions in `tests/test_grader.py` and
+  `tests/test_model_calls.py`, `.env.example`, `CHANGELOG.md`.
+- `ModelRequest` gains optional `thinking: bool | None` and `response_schema`.
+  The W&B Inference adapter sends `chat_template_kwargs.thinking` only when
+  `thinking` is not `None`, and a strict `json_schema` response format when a
+  schema is given. It closes its HTTP client after every call.
+- `ModelSettings` gains `action_thinking` and `builder_thinking`, read from
+  `NOOB_AGENT_ACTION_THINKING` and `NOOB_AGENT_BUILDER_THINKING`, both defaulting
+  to off.
+- The Action agent asks for the decision schema and parses the reply. A reply
+  that is not a usable decision is still rejected as `unusable_reply`, and one
+  cut off at its cap is also marked truncated.
+- The fixed instructions, including the reply and finding formats, move to the
+  system prompt, which is identical on every turn. The user prompt keeps the
+  goal, the primitive and skill lists, the history, and the observation.
+- Schema version 5 adds a nullable `request_options_json` column (thinking and
+  the reply schema) to `model_call`. Version 4 is skipped because unmerged section 21 work already
+  wrote version-4 local databases. The change is additive: a version-3 or
+  version-4 database gains the columns and keeps every row.
+- Tests first: adapter request shape with thinking on, off, and unset, and with
+  a response schema; the decision schema's name enum; parsing of the structured,
+  earlier `tool`, and earlier `skill` reply shapes; truncation classification;
+  compact argument hints; settings parsing and defaults; request options
+  recorded and a version-3 or version-4 database upgraded.
+- **Amendment after the first bench runs (2026-09-13).** Native tool calls met
+  the reliability and latency targets (0 of 100 unusable, p50 634 ms) but the
+  provider's chat template added about 1,250 input tokens for ten tool
+  definitions. Median Action input was 3,156, then 2,273 after trimming, which
+  exceeds the protocol's 40,000-token training ceiling over 20 decisions. On the
+  same recorded prompt a strict JSON-schema reply used 1,209 input tokens with
+  valid output on 3 of 3 attempts. Step 22.A therefore uses a strict JSON-schema
+  reply, `{subgoal, expected_evidence, action, arguments, finding}`, whose
+  `action` is an enum of the offered primitive and skill names, instead of
+  native tool calls. The prompt lists each action with a compact argument hint,
+  such as `turn_left(degrees: integer 1-90)`, and `request_options_json` records
+  the thinking setting and the schema. No `tool_call_json` column is added.
+- Validation: focused tests, the full suites, then `loop_bench.py run` on 5
+  sequences. Acceptance: unusable replies below 5% and decision p50 at most
+  3 seconds.
+
+### Step 22.B - A Builder that knows the API
+
+- Files: `src/noob_agent/prompts/builder.py`, `src/noob_agent/agents/evidence.py`,
+  `src/noob_agent/agents/builder.py`, `tests/test_builder_prompts.py`,
+  `tests/test_builder_agent.py`, `CHANGELOG.md`.
+- The Builder system prompt gains an API reference for `SkillContext.observe`,
+  `SkillContext.call(tool_name, **arguments)`, `remaining_budget`, `log`,
+  `SkillResult`, `EvidenceRef`, and the `Observation`, `VisibleObject`, and
+  `StepResult` fields a skill reads, plus one worked example written for a
+  neutral fictional tool that does not solve any scenario.
+- The prompt lists each primitive's description and argument schema, not only
+  its name.
+- Each evidence step carries the public observation after it: status values,
+  and up to five visible objects with label and properties. The reset
+  observation is included the same way.
+- Builder calls use `builder_thinking`. The build output cap defaults to 6,000
+  and the rendered prompt stays under 5,000 estimated tokens (characters
+  divided by 4), so a build fits the 12,000-token protocol ceiling.
+- Tests first: every `SkillContext` method and every `SkillResult` and
+  `EvidenceRef` field in `skills/contract.py` appears in the reference, so they
+  cannot drift apart; the worked example uses no primitive from any game
+  manifest; evidence includes observations and still excludes every private
+  field; the worst-case prompt stays within its size limit.
+- Acceptance, together with step 22.C: at least 4 of 5 bench sequences accept a
+  skill.
+
+### Step 22.C - Repairs that converge
+
+- Files: `src/noob_agent/prompts/builder.py`, `src/noob_agent/agents/builder.py`,
+  `src/noob_agent/runtime/sequence.py`, `tests/test_builder_agent.py`,
+  `tests/test_builder_prompts.py`, `CHANGELOG.md`.
+- A repair prompt carries the API reference, the primitive definitions, the same
+  bounded evidence, the rejected source, and the public failure evidence.
+- The repair output cap defaults to 3,000, or the configured Builder cap if that
+  is smaller, and the repair prompt stays under 5,000 estimated tokens, so a
+  repair fits the 8,000-token ceiling.
+- **Implementation detail (2026-09-13).** The source, the name to keep, and at
+  most three failing checks with 300 characters of evidence each are always
+  included. The primitive definitions and then the trace are added only while the
+  prompt still fits, so even a 12 KiB skill's repair stays in budget. The worked
+  example was tightened to keep the system prompt at about 1,240 estimated
+  tokens.
+- **Renamed repairs (found in the 22.B bench).** A repair that changes the skill's
+  name used to raise `UnknownSkillVersionError` and end the sequence. It is now a
+  public `package/renamed_repair` rejection that spends a repair and re-sends the
+  last recorded source, and every repair prompt names the skill to keep.
+- `BuilderOutcome.attempts` may be 0 when the learning budget is already spent
+  before the first call.
+- A reply that ends at its cap with no complete candidate stops the Builder
+  with the new stop reason `truncated_reply`, distinct from `unusable_reply`.
+- The Builder stops before a call that would exceed the sequence's learning
+  budget of 22 calls and 60,000 tokens, with stop reason
+  `learning_budget_exhausted`.
+- Tests first: repair prompt contents and size; `truncated_reply` on a capped
+  build and a capped repair; the learning-budget stop before an unsent call;
+  unchanged acceptance and lineage.
+- Acceptance: no Builder call ends at its cap in the bench, and single-pass
+  learning tokens stay at or under 60,000.
+
+### Step 22.E - Parallel held-out cells and validation
+
+- Files: `src/noob_agent/runtime/sequence.py`,
+  `src/noob_agent/models/recording.py`, `src/noob_agent/verification/validator.py`,
+  `scripts/run_doom_learning_sequence.py`, `scripts/loop_bench.py`,
+  `tests/test_learning_sequence.py`, `tests/test_skill_validation_pipeline.py`,
+  `CHANGELOG.md`.
+- `LearningSequence` gains `heldout_concurrency`, which defaults to 1. Each
+  held-out cell gets its own connector and a recording client bound explicitly
+  to its episode, because several episodes of one experiment can be open at
+  once. Reports keep cell order.
+- Live-demo and visible modes always use concurrency 1.
+- Validation runs a fixture's three repeats and the fixtures concurrently, up
+  to a bound, then applies the checks in the existing stage order, so the same
+  first failure is reported.
+- Tests first: concurrency 1 reproduces today's records exactly; concurrent
+  cells record every model call to the right episode and keep report order;
+  concurrent validation reports the same first failure as sequential
+  validation for every existing rejection fixture.
+- Acceptance: single-pass sequence wall time at most 4 minutes in the bench.
+- **Implementation details (2026-09-13).**
+  - Validation runs in three concurrent phases (training replay, the five
+    negative cases, the variation) so a failing phase still stops validation
+    before the next one starts.
+  - The Weave sink nests calls per episode ID. `flush()` only delivers, and a new
+    `close()` ends any open episode calls at run exit.
+  - The first live run deadlocked. A Weave client's `flush()` blocks the event
+    loop until in-flight traced calls finish, and those were other episodes'
+    model calls awaiting replies. Concurrent cells therefore skip the
+    per-episode flush, and the sequence flushes once after all cells end.
+  - The file list also includes `observability/tracing.py`,
+    `runtime/runner.py`, `runtime/heldout.py`, `agents/builder.py`,
+    `tests/test_trace_flush.py`, and `tests/test_model_calls.py`.
+
+### Step 22.D - Multi-round improvement loop
+
+- Files: new `src/noob_agent/runtime/improvement.py`; new
+  `src/noob_agent/prompts/refine.py`; new `scenarios/doom/basic-v2/manifest.json`;
+  `eval_protocol.md`; `scripts/loop_bench.py`; new `tests/test_improvement_loop.py`;
+  `docs/loop-optimization.md`; `CHANGELOG.md`.
+- `scenarios/doom/basic-v2` is `basic-v1` with the same training and held-out
+  cells plus two declared training-split practice seeds. `basic-v1` is
+  unchanged.
+- Loop:
+  1. Round 0 is the single-pass cold training episode, build, validation, and
+     repair from steps 22.A-22.C. An accepted candidate becomes the incumbent
+     after it plays the practice seeds.
+  2. Each practice episode uses held-out budgets (12 decisions, 24 primitives,
+     90 seconds), a fresh Action conversation, and only the skill under test.
+  3. In each later round, the Builder receives the incumbent source, the
+     incumbent's practice evidence including its skill uses and nested steps,
+     and the public practice scores, and writes one refinement with the
+     incumbent as parent. The refinement is validated and, if it passes, plays
+     the same practice seeds.
+  4. The refinement stays `validating` in the registry until it has played. It
+     becomes the incumbent, and the old incumbent is retired, only if its
+     practice score is strictly higher, or equal with fewer primitives.
+     Otherwise it is rejected with the reason "did not improve practice score".
+  5. The loop stops after 3 refinement rounds, one round without improvement,
+     a perfect practice score, or the learning budget, whichever comes first,
+     and records which.
+  6. Held-out cells then run once with the final incumbent. With `--curve`, the
+     bench also evaluates every earlier incumbent on the held-out cells after
+     the loop has ended, to plot the learning curve.
+- Practice score: the fraction of practice episodes ending in
+  `terminal_state`, with total primitives used as the tie-breaker. The private
+  grade is recorded next to it only to measure how often the public score
+  agrees with the private result.
+- Learning budget for the multi-round condition, added to `eval_protocol.md` as
+  a separately named condition: at most 140 learning model calls, 300,000
+  learning tokens, and 900 seconds of learning wall time. The single-pass
+  budget is unchanged.
+- Tests first, with the fake connector and a scripted provider: practice uses
+  only training-split seeds; no held-out record, grade, or private field reaches
+  a refinement prompt or the practice score; keep-best and reject paths with
+  lineage; each stop condition; budget exhaustion before an unsent call;
+  post-hoc curve evaluation runs only after the loop has ended.
+- Acceptance: the bench logs at least 3 rounds on 5 sequences, the practice
+  score never decreases between kept versions, and the scorecard reports the
+  practice-grade agreement rate and held-out results next to cold results on
+  the same seeds.
+- **Implementation details (2026-09-13).**
+  - The registry now also accepts an *accepted* version as a parent, for a
+    refinement. `skill_contract.md` states the refinement lineage.
+  - `BuilderAgent.refine` stops at `validated`, and the loop then accepts or
+    rejects the version.
+  - `HeldOutRunner` takes an explicit offering and split, so a validated
+    refinement can play practice before acceptance.
+  - `LearningSequence` exposes its training, Builder, and cell helpers.
+  - The validator no longer rejects a no-input skill for succeeding in the
+    invalid-input case when no invalid input exists; this bug surfaced while
+    building the loop.
+  - A refinement call is recorded with purpose `build`, because each Builder
+    recorder labels its first call a build.
+  - The file list also includes `skills/registry.py`, `agents/builder.py`,
+    `runtime/heldout.py`, `runtime/sequence.py`,
+    `verification/validator.py`, `observability/loop_scorecard.py`, and
+    `skill_contract.md`.
+
+### Step 22.G - Minecraft confirmation
+
+- Files: `docs/loop-optimization.md` and `CHANGELOG.md`. No Minecraft code
+  changes.
+- With the local server running, one cold Minecraft training episode uses the
+  optimized Action agent through the existing runner and connector, and its
+  scorecard row is recorded. If the server is unavailable, the step records
+  that and the milestone does not claim Minecraft confirmation.
+
+### Order and pull requests
+
+Steps land in the order 22.0, 22.F, 22.A, 22.B, 22.C, 22.E, 22.D, 22.G. Each is
+its own pull request stacked on the previous one, and none is self-merged. Every
+pull request reports its scorecard row when a live bench run applies. A step
+that misses a target is reported, not retried with changed budgets.
+
+### Rollback
+
+Each step reverts alone in reverse order. Reverting 22.A leaves the version-4
+column unused and readable. Reverting 22.D removes the multi-round condition
+and its protocol amendment while leaving `basic-v1` and every single-pass result
+intact. Bench databases are Git-ignored.
+
+## 23. Approved non-benchmark milestone: persistent game and live Weave reasoning view
+
+The requester approved this milestone on 2026-09-13 to strengthen the Best Use
+of Weave demonstration: "Lets use the weave trace to show model reasoning in
+real time alongside the game" and "Make the game not quit everytime it needs to
+do something new. It should be able to persist."
+
+### Evidence
+
+- In `--live-demo`, every episode builds a new `DoomConnector` from the factory,
+  so a fresh ViZDoom window opens for training and for each held-out cell. The
+  section 20 continuity change keeps only the training window open during
+  Builder work.
+- `DoomConnector.reset` already reuses its ViZDoom instance with `set_seed` and
+  `new_episode`, gives each episode a unique ID, and resets its private outcome.
+  Only the sequence's connector ownership forces a new window.
+- Every Action model call, step, and episode is already mirrored to Weave as
+  nested `noob_agent.*` calls. Since step 22.A each Action reply is a JSON object
+  carrying `subgoal`, `expected_evidence`, `action`, and `arguments`. Weave 0.53.9
+  serves incremental queries on call inputs and start time.
+
+### What this approves
+
+- A `persistent_connector` option on `LearningSequence` and the held-out runner.
+  One connector is created for the whole sequence and reset for every episode:
+  training, the Builder pause, and every held-out cell. It closes once at the end,
+  including on error or cancellation. `--live-demo` always uses it, replacing the
+  section 20 training-window continuity flag.
+- A stdlib-only local web view, `scripts/live_reasoning_view.py`, that reads the
+  run's calls from Weave, never from SQLite. It shows each Action decision's
+  subgoal, expected evidence, action, arguments, result, latency, and tokens as
+  they arrive; any provider reasoning; each Builder call's finish reason and
+  code; episode outcomes; and a link to each call in the Weave UI.
+- `--live-view` on `--live-demo`, which starts the view as a child process for
+  the run's sequence ID, prints its local URL, and stops it after the final
+  trace flush.
+
+It does not approve changing what any model, connector, grader, or budget sees
+or computes. The view is display only, and persistence changes no observation,
+reset, or step result. Concurrent held-out cells (step 22.E) are not allowed
+with a persistent connector.
+
+### Step 23a - Persistent game across a sequence
+
+- Files: `src/noob_agent/runtime/sequence.py`, `src/noob_agent/runtime/heldout.py`,
+  `scripts/run_doom_learning_sequence.py`, `tests/test_learning_sequence.py`,
+  `tests/test_doom_live_demo.py`, `tests/test_connectors_doom.py`,
+  `docs/doom-env.md`, `CHANGELOG.md`.
+- Tests first:
+  - With `persistent_connector`, the factory is called once, every episode
+    resets that one connector, every episode gets its own ID and grade, and the
+    connector closes exactly once after the last held-out episode.
+  - It also closes once when the Builder raises and when the sequence is
+    cancelled.
+  - The default still creates and closes one connector per episode.
+  - With real ViZDoom, headless, a reset after a finished episode yields the same
+    observation (apart from the episode ID) and the same step results as a reset
+    on a fresh connector with the same scenario and seed.
+  - `--live-demo` constructs the sequence with `persistent_connector=True`.
+- Acceptance: a live demo keeps one Doom window open from training through the
+  last held-out cell.
+
+### Step 23b - Live Weave reasoning view
+
+- Files: new `scripts/live_reasoning_view.py`, new
+  `tests/test_live_reasoning_view.py`, `scripts/run_doom_learning_sequence.py`,
+  `tests/test_doom_live_demo.py`, `docs/doom-env.md`, `CHANGELOG.md`.
+- Behavior:
+  - `uv run --env-file .env python scripts/live_reasoning_view.py --run-id
+    <sequence-id> [--port 8765]` polls Weave about once a second for new calls
+    whose `experiment_id` or `episode_id` belongs to the run, and serves a page
+    and a JSON event feed on `127.0.0.1`.
+  - The page updates without reloading. It shows the current episode and its
+    latest decision prominently, then a timeline, a Builder panel, and episode
+    outcomes.
+  - A Weave read error keeps the last good events and retries. No prompt text or
+    credential is served.
+- Tests first, with a stand-in Weave client:
+  - events are built from episode, step, Action, Build, and Repair calls;
+  - other runs are excluded;
+  - repeated polls add no duplicates;
+  - structured decision fields and Builder code are extracted;
+  - a read error keeps the last events;
+  - the HTTP server serves the page and the feed;
+  - the served feed carries no prompt or system text;
+  - `--live-view` starts and stops the child process and is refused without
+    `--live-demo` or with tracing disabled.
+- Acceptance: during a live demo, the view beside the Doom window shows each
+  decision from Weave while the game plays.
+
+### Rollback
+
+Each step reverts alone. Reverting 23a restores a new window per episode;
+reverting 23b removes the view. Neither changes the schema or any recorded
+value.
+
+## 24. Approved core-loop milestone: loop follow-ups
+
+**Approval basis.** After the section 22 report on 2026-09-13, the requester
+replied "keep going and push the PRs when done". This section records the
+follow-ups that report recommended. Its pull requests state that basis at the top
+so a reviewer can reject any step.
+
+### Evidence
+
+- **Wrong accounting is the top rejection.** In `loop-bench-22e`, 4 of 5
+  rejections were `contract/incorrect_action_accounting`. The inspected candidate
+  called the free `context.observe()` and then added `used += 1`, treating it like
+  Doom's charged `observe` tool. The Builder's API reference does not say that
+  `context.observe()` charges nothing.
+- **The multi-round loop stops too early.** In `loop-bench-22d`, the rule "stop
+  after one round without improvement" ended every refining sequence after one
+  refinement. The 2-seed practice score can only be 0, 0.5, or 1, which is too
+  coarse to reward a partial improvement. Refinement calls are also recorded with
+  purpose `build`.
+- **Minecraft observations overrun the token ceiling.** In
+  `mc-confirm-22g-20260913T125747Z`, the median Action input was about 2,300
+  tokens, above the 2,000 per decision that fits the 40,000-token training
+  ceiling. Visible objects take about 80% of the observation JSON, much of it null
+  properties and spaced JSON.
+
+### What this approves
+
+- Builder prompt text about action accounting (step 24a).
+- A patience of 2 rounds, a `basic-v3` Doom manifest with four practice seeds,
+  and a `refine` model-call purpose (step 24b).
+- A compact rendering of the Action observation and history (step 24c).
+
+It does not approve changing any connector, observation content, budget,
+grader, validation rule, held-out scenario, or seed. Each needs its own approval.
+
+### Step 24a - Accounting-clear Builder prompt
+
+- Files: `src/noob_agent/prompts/builder.py`, `tests/test_builder_prompts.py`,
+  `docs/loop-optimization.md`, `CHANGELOG.md`.
+- The API reference says that `context.observe()`, `remaining_budget()`, and
+  `log()` charge nothing. It also says that `primitive_actions_used` must equal
+  the sum of `result.primitive_actions_charged` over the skill's own `call`
+  results, and must never be counted by hand.
+- Tests first:
+  - the reference states that `observe` is free and states the accounting rule;
+  - the system prompt stays under its size limit, and the worst-case repair still
+    fits.
+- Acceptance: a 5-sequence live bench reports the number of
+  `incorrect_action_accounting` rejections next to `loop-bench-22e`.
+
+### Step 24b - Multi-round tuning
+
+- Files: `src/noob_agent/runtime/improvement.py`,
+  `src/noob_agent/models/recording.py`, `src/noob_agent/domain/records.py`,
+  new `scenarios/doom/basic-v3/manifest.json`, `scripts/loop_bench.py`,
+  `eval_protocol.md`, tests, `docs/loop-optimization.md`, `CHANGELOG.md`.
+- **Patience.** The loop stops after 2 consecutive rounds without a kept
+  version. A refinement that fails validation counts as a round without
+  improvement. After a round without improvement, the next refinement still starts
+  from the incumbent.
+- **Four practice seeds.** `basic-v3` is `basic-v2` with practice seeds
+  20260913, 20260915, 20260916, and 20260917, so two targets start on each side of
+  center.
+- **Refinement purpose.** A refinement's model call is recorded with purpose
+  `refine`, and its repairs with `repair`.
+- The multi-round budget in `eval_protocol.md` is unchanged, and its stop rule is
+  amended to patience 2.
+- Tests first:
+  - a single round without improvement continues;
+  - two rounds in a row stop;
+  - a kept version resets the count;
+  - the `refine` purpose is recorded;
+  - the v3 practice seeds are distinct and show the target.
+- Acceptance: a 5-sequence live multi-round bench reports how many rounds each
+  sequence logged, practice-grade agreement, and held-out results against
+  `loop-bench-22d`.
+
+### Step 24c - Compact Action observation
+
+- Files: `src/noob_agent/prompts/action.py`, `tests/test_action_decisions.py`,
+  `docs/loop-optimization.md`, `CHANGELOG.md`.
+- The observation JSON in the Action prompt:
+  - omits null values and empty collections;
+  - uses compact separators;
+  - rounds floats to two decimals.
+- History subgoals are cut to 100 characters.
+- No field with a value is removed, and no object is dropped.
+- Tests first:
+  - the rendered observation parses back to the original with nulls and empty
+    collections removed;
+  - every visible object is still present;
+  - the prompt for a recorded Minecraft-sized observation is at least 20% shorter.
+- Acceptance: one cold live Minecraft episode has a median Action input of at most
+  2,000 tokens, and a 5-sequence Doom bench keeps 0 unusable replies.
+
+### Rollback
+
+Each step reverts alone. Reverting 24b restores the one-round stop and `basic-v2`;
+`basic-v3` becomes unused.
 
 ## References
 

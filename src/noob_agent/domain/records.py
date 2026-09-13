@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from noob_agent.domain.model import (
     ConnectorManifest,
@@ -114,7 +114,7 @@ class EpisodeOutcome(DurableRecord):
     finished_at: datetime
 
 
-ModelCallPurpose = Literal["action", "build", "repair"]
+ModelCallPurpose = Literal["action", "build", "repair", "refine"]
 
 
 class SequenceSummaryRecord(DurableRecord):
@@ -178,6 +178,8 @@ class ModelCallRecord(DurableRecord):
     latency_ms: int = Field(ge=0)
     error: str | None = None
     started_at: datetime
+    # Thinking and the reply schema the request asked for; absent before schema 5.
+    request_options: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def links_and_outcome_agree(self) -> Self:

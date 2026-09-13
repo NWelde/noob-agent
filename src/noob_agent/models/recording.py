@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -64,6 +65,8 @@ class RecordingModelClient:
         episode_id: str | None = None,
         clock: Clock | None = None,
         trace: TraceSink | None = None,
+        episode_source: Callable[[], str | None] | None = None,
+        first_purpose: ModelCallPurpose = "build",
     ) -> None:
         if role == "builder" and episode_id is None:
             raise ValueError("A Builder recorder needs the authoring episode.")
@@ -75,6 +78,10 @@ class RecordingModelClient:
         self._episode_id = episode_id
         self._clock = clock if clock is not None else _SystemClock()
         self._trace = trace
+        # Names the acting episode when several episodes of the experiment are open.
+        self._episode_source = episode_source
+        # A Builder recorder's first call is a build, or a refinement of an accepted skill.
+        self._first_purpose: ModelCallPurpose = first_purpose
         self._provider = str(getattr(inner, "provider", "unknown"))
         self._builder_calls = 0
         self._actions_per_episode: dict[str, int] = {}
@@ -125,7 +132,9 @@ class RecordingModelClient:
     def _purpose_and_episode(self) -> tuple[ModelCallPurpose, str | None]:
         if self._role == "builder":
             self._builder_calls += 1
-            return ("build" if self._builder_calls == 1 else "repair"), self._episode_id
+            return (self._first_purpose if self._builder_calls == 1 else "repair"), self._episode_id
+        if self._episode_source is not None:
+            return "action", self._episode_source()
         return "action", self._store.open_episode_id(self._experiment_id)
 
     def _next_action_id(self, episode_id: str | None) -> str | None:
@@ -168,6 +177,7 @@ class RecordingModelClient:
             latency_ms=latency_ms,
             error=error,
             started_at=started_at,
+            request_options=request.options(),
         )
 
     def _write(self, record: ModelCallRecord) -> None:

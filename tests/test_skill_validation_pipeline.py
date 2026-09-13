@@ -24,7 +24,7 @@ METADATA = {
     "api_version": "noob-agent.skill.v1",
 }
 
-VALID_SOURCE = '''from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult
+VALID_SOURCE = """from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult
 
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
@@ -40,15 +40,15 @@ async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
         outputs={"target": observation.visible_objects[0].object_id},
         primitive_actions_used=0,
     )
-'''
+"""
 
-NONEXISTENT_API_SOURCE = '''from noob_agent.skills.contract import SkillContext, SkillResult
+NONEXISTENT_API_SOURCE = """from noob_agent.skills.contract import SkillContext, SkillResult
 
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
     await context.attack(target="nearest")
     return SkillResult(status="failed", summary="Done.", primitive_actions_used=0)
-'''
+"""
 
 
 async def test_runs_the_full_public_pipeline_three_times_with_an_unseen_variation(
@@ -103,7 +103,7 @@ async def test_rejects_a_candidate_that_calls_a_context_api_that_does_not_exist(
 
 
 async def test_negative_cases_reject_an_unknown_retry(episode, step_factory) -> None:
-    source = '''from noob_agent.skills.contract import SkillContext, SkillResult
+    source = """from noob_agent.skills.contract import SkillContext, SkillResult
 
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
@@ -115,7 +115,7 @@ async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
         await context.call("observe")
         used = 2
     return SkillResult(status="inconclusive", summary="Observed.", primitive_actions_used=used)
-'''
+"""
     metadata = {**METADATA, "max_primitive_actions": 3}
     trace = StoredEpisode(episode=episode, steps=(step_factory(1), step_factory(2)))
 
@@ -132,3 +132,21 @@ async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
         issue.check == "negative_case" and issue.code == "unknown_primitive_retried"
         for issue in rejected.value.issues
     )
+
+
+async def test_a_no_input_skill_that_succeeds_is_not_rejected_by_the_invalid_input_case(
+    episode, step_factory
+) -> None:
+    """An empty open input schema has no invalid input, so success there is legitimate."""
+    open_schema = {**METADATA, "input_schema": {"properties": {}}}
+    trace = StoredEpisode(episode=episode, steps=(step_factory(1),))
+
+    report = await validate_candidate(
+        VALID_SOURCE,
+        json.dumps(open_schema),
+        known_primitive_names={"observe", "use_object"},
+        training_trace=trace,
+        executor=LocalSubprocessSkillExecutor(),
+    )
+
+    assert report.accepted is True
