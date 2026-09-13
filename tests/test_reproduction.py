@@ -83,7 +83,9 @@ def stored_episode(
     store.create_experiment(experiment)
     store.create_episode(episode)
     store.append_step(step_factory(1))
-    store.append_step(step_factory(2, tool_name="charge_keystone", status="rejected", code="INVALID_TOOL"))
+    store.append_step(
+        step_factory(2, tool_name="charge_keystone", status="rejected", code="INVALID_TOOL")
+    )
     store.append_step(step_factory(3, tool_name="use_object"))
     store.append_step(step_factory(4))
     store.finalize_episode(outcome)
