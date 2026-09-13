@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import subprocess
@@ -220,11 +221,29 @@ def _stop_live_view(view: subprocess.Popen[bytes]) -> None:
         view.wait(timeout=5)
 
 
+def _has_display(environment: Mapping[str, str], *, platform: str | None = None) -> bool:
+    """Only Linux needs an X11 or Wayland display variable; macOS and Windows open windows."""
+    if not (platform or sys.platform).startswith("linux"):
+        return True
+    return bool(environment.get("DISPLAY") or environment.get("WAYLAND_DISPLAY"))
+
+
+def _missing_packages(
+    settings: IntegrationSettings,
+    find_spec: Callable[[str], object | None] = importlib.util.find_spec,
+) -> list[str]:
+    """Name the optional packages this run needs but cannot import, before any episode starts."""
+    needed = ["openai"]
+    if settings.trace.enabled:
+        needed.append("weave")
+    return [name for name in needed if find_spec(name) is None]
+
+
 def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None = None) -> int:
     args = _parse_args(argv)
     environment = os.environ if environ is None else environ
 
-    if args.live_demo and not (environment.get("DISPLAY") or environment.get("WAYLAND_DISPLAY")):
+    if args.live_demo and not _has_display(environment):
         print("Refusing live demo: no graphical display is available.", file=sys.stderr)
         return 2
 
@@ -244,6 +263,21 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         return 2
     if settings.sandbox.mode == "disabled":
         print("Refusing to run: NOOB_AGENT_SANDBOX_MODE is disabled.", file=sys.stderr)
+        return 2
+    if not settings.wandb.api_key:
+        print(
+            "Refusing to run: WANDB_API_KEY is not set. Copy .env.demo.example to .env "
+            "and add your key from https://wandb.ai/authorize.",
+            file=sys.stderr,
+        )
+        return 2
+    missing = _missing_packages(settings)
+    if missing:
+        print(
+            f"Refusing to run: missing packages {', '.join(missing)}. "
+            "Install them with `uv sync --group dev --group integrations`.",
+            file=sys.stderr,
+        )
         return 2
     try:
         executor = build_skill_executor(settings.sandbox)
