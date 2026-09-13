@@ -50,6 +50,13 @@ def test_rejects_a_forbidden_import_from_form() -> None:
     assert issues[0].code == "forbidden_import"
 
 
+def test_rejects_private_member_import_from_allowed_module() -> None:
+    issues = check_static_policy("from dataclasses import _create_fn\n")
+
+    assert len(issues) == 1
+    assert issues[0].code == "forbidden_import"
+
+
 def test_rejects_file_access_via_the_open_builtin() -> None:
     source = 'async def run(context, inputs):\n    handle = open("secret.txt")\n'
 

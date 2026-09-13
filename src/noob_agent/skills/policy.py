@@ -73,6 +73,11 @@ def check_static_policy(source: str) -> list[SkillValidationIssue]:
             root = (node.module or "").split(".")[0]
             if node.level or root not in ALLOWED_IMPORT_MODULES:
                 issues.append(_forbidden_import(node.module or "", node))
+            else:
+                for alias in node.names:
+                    if alias.name.startswith("_"):
+                        imported_name = f"{node.module or ''}.{alias.name}".strip(".")
+                        issues.append(_forbidden_import(imported_name, node))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in FORBIDDEN_CALL_NAMES or node.func.id in forbidden_aliases:
                 issues.append(
