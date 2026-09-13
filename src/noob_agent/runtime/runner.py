@@ -5,8 +5,9 @@ is recorded through the SQLite store before another action is allowed, and the
 episode always ends with a recorded stop reason.
 
 The runner sees only the public connector surface. It performs no grading, calls
-no model API, executes no generated skill, and sends nothing to a remote
-service.
+no model API, and executes no generated skill. It sends nothing to a remote
+service unless a trace mirror is explicitly enabled, and then only after the
+local record is durable.
 """
 
 from __future__ import annotations
@@ -29,6 +30,14 @@ from noob_agent.domain.records import (
     ExperimentRecord,
     StepRecord,
     StopReason,
+)
+from noob_agent.observability.tracing import (
+    NullTraceSink,
+    TraceEvent,
+    TraceSink,
+    episode_finished_event,
+    episode_started_event,
+    step_event,
 )
 from noob_agent.storage import EpisodeStore, StorageError
 
@@ -105,11 +114,24 @@ class EpisodeRunner:
         store: EpisodeStore,
         policy: Policy,
         clock: Clock | None = None,
+        trace: TraceSink | None = None,
     ) -> None:
         self._connector = connector
         self._store = store
         self._policy = policy
         self._clock = clock if clock is not None else SystemClock()
+        # Mirroring is off unless a sink is supplied; see
+        # noob_agent.observability.tracing.build_trace_sink.
+        self._trace = trace if trace is not None else NullTraceSink()
+
+    def _mirror(self, event: TraceEvent) -> None:
+        """Mirror one event that the store has already made durable.
+
+        Best effort by design: a mirror that fails must not change, delay past
+        its own failure, or end an episode whose record is already written.
+        """
+        with suppress(Exception):
+            self._trace.record(event)
 
     async def run(
         self,
@@ -150,19 +172,19 @@ class EpisodeRunner:
 
         # The connector owns episode identity; the harness adopts it.
         episode_id = reset_observation.episode_id
-        self._store.create_episode(
-            EpisodeRecord(
-                episode_id=episode_id,
-                experiment_id=experiment.experiment_id,
-                game_id=reset_observation.game_id,
-                scenario_id=reset_observation.scenario_id,
-                seed=seed,
-                split=split,
-                manifest=manifest,
-                reset_observation=reset_observation,
-                started_at=started_at,
-            )
+        episode = EpisodeRecord(
+            episode_id=episode_id,
+            experiment_id=experiment.experiment_id,
+            game_id=reset_observation.game_id,
+            scenario_id=reset_observation.scenario_id,
+            seed=seed,
+            split=split,
+            manifest=manifest,
+            reset_observation=reset_observation,
+            started_at=started_at,
         )
+        self._store.create_episode(episode)
+        self._mirror(episode_started_event(episode))
 
         decisions_used = 0
         primitives_used = 0
@@ -200,17 +222,18 @@ class EpisodeRunner:
                     raise ValueError(
                         f"The connector returned sequence {result.sequence}, expected {sequence}."
                     )
-                self._store.append_step(
-                    StepRecord(
-                        episode_id=episode_id,
-                        sequence=result.sequence,
-                        request=request,
-                        result=result,
-                    )
+                step = StepRecord(
+                    episode_id=episode_id,
+                    sequence=result.sequence,
+                    request=request,
+                    result=result,
                 )
+                self._store.append_step(step)
             except (ValidationError, ValueError, StorageError):
                 stop_reason = "unknown_result"
                 break
+
+            self._mirror(step_event(step))
 
             primitives_used += result.primitive_actions_charged
             observation = result.observation
@@ -229,16 +252,18 @@ class EpisodeRunner:
             elif primitives_used >= experiment.primitive_budget:
                 stop_reason = "primitive_limit"
 
-        self._store.finalize_episode(
-            EpisodeOutcome(
-                episode_id=episode_id,
-                stop_reason=stop_reason,
-                terminal=terminal,
-                total_decisions=decisions_used,
-                total_primitives=primitives_used,
-                finished_at=self._clock.now(),
-            )
+        outcome = EpisodeOutcome(
+            episode_id=episode_id,
+            stop_reason=stop_reason,
+            terminal=terminal,
+            total_decisions=decisions_used,
+            total_primitives=primitives_used,
+            finished_at=self._clock.now(),
         )
+        self._store.finalize_episode(outcome)
+        self._mirror(episode_finished_event(outcome))
+        with suppress(Exception):
+            self._trace.flush()
         return EpisodeResult(
             episode_id=episode_id,
             stop_reason=stop_reason,
