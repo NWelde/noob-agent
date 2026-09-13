@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,11 +15,22 @@ from fakes.connector import (
     ScriptedPolicy,
     ScriptedStep,
 )
+from pydantic import JsonValue
 
 from noob_agent.connectors import ConnectorLostError
 from noob_agent.domain.model import StepResult, ToolRequest
 from noob_agent.domain.records import ExperimentRecord
+from noob_agent.observability.tracing import (
+    EPISODE_OP_NAME,
+    STEP_OP_NAME,
+    NullTraceSink,
+    TraceEvent,
+    TraceSink,
+    WeaveTraceSink,
+    build_trace_sink,
+)
 from noob_agent.runtime import EpisodeRunner
+from noob_agent.settings import TraceSettings
 from noob_agent.storage import EpisodeStore
 
 STARTED_AT = datetime(2026, 9, 12, 16, 0, 0, tzinfo=UTC)
@@ -56,8 +69,11 @@ async def run_episode(
     clock: FakeClock,
     experiment: ExperimentRecord | None = None,
     seed: int = 7,
+    trace: TraceSink | None = None,
 ):
-    runner = EpisodeRunner(connector=connector, store=store, policy=policy, clock=clock)
+    runner = EpisodeRunner(
+        connector=connector, store=store, policy=policy, clock=clock, trace=trace
+    )
     return await runner.run(
         experiment=experiment or make_experiment(),
         scenario_id=SCENARIO_ID,
@@ -480,3 +496,229 @@ async def test_a_failing_close_surfaces_when_nothing_else_went_wrong(
 
     with pytest.raises(RuntimeError, match="teardown failed"):
         await run_episode(prepared_store, connector, ScriptedPolicy(), clock)
+
+
+class RecordingTraceSink:
+    """Captures the events the runner mirrors, in the order it mirrors them."""
+
+    def __init__(self) -> None:
+        self.events: list[TraceEvent] = []
+        self.flushed = 0
+
+    def record(self, event: TraceEvent) -> None:
+        self.events.append(event)
+
+    def flush(self) -> None:
+        self.flushed += 1
+
+    @property
+    def names(self) -> list[str]:
+        return [event.name for event in self.events]
+
+
+class BrokenTraceSink:
+    """A mirror that always fails. Tracing is best effort and must never win."""
+
+    def record(self, event: TraceEvent) -> None:
+        raise RuntimeError("the trace backend is unreachable")
+
+    def flush(self) -> None:
+        raise RuntimeError("the trace backend is unreachable")
+
+
+class DurabilityCheckingTraceSink:
+    """Asserts, for every event, that the local record is already durable."""
+
+    def __init__(self, store: EpisodeStore) -> None:
+        self._store = store
+        self.durable_at_event: list[tuple[str, bool]] = []
+
+    def record(self, event: TraceEvent) -> None:
+        episode_id = event.attributes["episode_id"]
+        assert isinstance(episode_id, str)
+        try:
+            stored = self._store.read_episode(episode_id)
+        except Exception:  # pragma: no cover - a missing episode is the failure
+            self.durable_at_event.append((event.name, False))
+            return
+        if event.name == "episode.step":
+            sequence = event.attributes["sequence"]
+            durable = any(step.sequence == sequence for step in stored.steps)
+        elif event.name == "episode.finished":
+            durable = stored.outcome is not None
+        else:
+            durable = True
+        self.durable_at_event.append((event.name, durable))
+
+    def flush(self) -> None:
+        return None
+
+
+@dataclass
+class FakeWeaveCall:
+    """Stands in for the call object a Weave client hands back."""
+
+    op_name: str
+    inputs: dict[str, JsonValue]
+    parent: FakeWeaveCall | None
+    output: dict[str, JsonValue] | None = None
+
+
+@dataclass
+class FakeWeaveClient:
+    """A Weave client shaped like the real one, with no network and no import."""
+
+    calls: list[FakeWeaveCall] = field(default_factory=list)
+
+    def create_call(
+        self,
+        op: str,
+        inputs: dict[str, JsonValue],
+        parent: object | None = None,
+        /,
+    ) -> FakeWeaveCall:
+        assert parent is None or isinstance(parent, FakeWeaveCall)
+        call = FakeWeaveCall(op_name=op, inputs=dict(inputs), parent=parent)
+        self.calls.append(call)
+        return call
+
+    def finish_call(self, call: object, output: dict[str, JsonValue] | None = None, /) -> None:
+        assert isinstance(call, FakeWeaveCall)
+        call.output = None if output is None else dict(output)
+
+
+def test_tracing_is_disabled_by_default_and_never_imports_weave() -> None:
+    """The default configuration mirrors nothing and requires no optional package."""
+    sink = build_trace_sink(TraceSettings())
+
+    assert isinstance(sink, NullTraceSink)
+    assert "weave" not in sys.modules
+
+
+def test_an_enabled_trace_setting_builds_a_weave_mirror() -> None:
+    client = FakeWeaveClient()
+    sink = build_trace_sink(
+        TraceSettings(mode="weave", weave_disabled=False),
+        client_factory=lambda project: client,
+    )
+
+    sink.record(TraceEvent(name="episode.started", attributes={"episode_id": "ep_0001"}))
+
+    assert client.calls[0].op_name == EPISODE_OP_NAME
+
+
+async def test_the_episode_and_every_step_are_mirrored_in_order(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    connector = ScriptedConnector(
+        ScriptedStep(),
+        ScriptedStep(state_changed=True, terminal=True, terminal_reason="goal_reached"),
+    )
+    sink = RecordingTraceSink()
+
+    result = await run_episode(prepared_store, connector, ScriptedPolicy(), clock, trace=sink)
+
+    assert sink.names == [
+        "episode.started",
+        "episode.step",
+        "episode.step",
+        "episode.finished",
+    ]
+    assert sink.flushed == 1
+    assert [event.attributes["episode_id"] for event in sink.events] == [result.episode_id] * 4
+    assert [event.attributes["action_id"] for event in sink.events[1:3]] == ["a_0001", "a_0002"]
+    assert sink.events[-1].attributes["stop_reason"] == "terminal_state"
+    assert sink.events[-1].attributes["total_decisions"] == 2
+
+
+async def test_every_mirrored_event_follows_its_durable_local_record(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    """SQLite is authoritative: nothing is mirrored before the row is committed."""
+    connector = ScriptedConnector(
+        ScriptedStep(),
+        ScriptedStep(terminal=True, terminal_reason="goal_reached"),
+    )
+    sink = DurabilityCheckingTraceSink(prepared_store)
+
+    await run_episode(prepared_store, connector, ScriptedPolicy(), clock, trace=sink)
+
+    assert sink.durable_at_event == [
+        ("episode.started", True),
+        ("episode.step", True),
+        ("episode.step", True),
+        ("episode.finished", True),
+    ]
+
+
+async def test_a_step_the_store_refuses_is_never_mirrored(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    connector = MismatchedActionIdConnector(*[ScriptedStep() for _ in range(2)])
+    sink = RecordingTraceSink()
+
+    result = await run_episode(prepared_store, connector, ScriptedPolicy(), clock, trace=sink)
+
+    assert result.stop_reason == "unknown_result"
+    assert sink.names == ["episode.started", "episode.finished"]
+
+
+async def test_a_failing_trace_mirror_does_not_affect_the_episode(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    """Tracing is best effort: a broken mirror cannot change the recorded attempt."""
+    connector = ScriptedConnector(ScriptedStep(terminal=True, terminal_reason="goal_reached"))
+
+    result = await run_episode(
+        prepared_store, connector, ScriptedPolicy(), clock, trace=BrokenTraceSink()
+    )
+
+    assert result.stop_reason == "terminal_state"
+    stored = prepared_store.read_episode(result.episode_id)
+    assert stored.outcome is not None
+    assert len(stored.steps) == 1
+
+
+async def test_the_weave_mirror_nests_steps_under_one_episode_call(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    """BDP criterion 4: the attempt reads as one nested trace, not a flat log."""
+    connector = ScriptedConnector(
+        ScriptedStep(),
+        ScriptedStep(terminal=True, terminal_reason="goal_reached"),
+    )
+    client = FakeWeaveClient()
+    sink = build_trace_sink(
+        TraceSettings(mode="weave", weave_disabled=False),
+        client_factory=lambda project: client,
+    )
+
+    result = await run_episode(prepared_store, connector, ScriptedPolicy(), clock, trace=sink)
+
+    episode_call, *step_calls = client.calls
+    assert episode_call.op_name == EPISODE_OP_NAME
+    assert episode_call.parent is None
+    assert episode_call.inputs["episode_id"] == result.episode_id
+    assert [call.op_name for call in step_calls] == [STEP_OP_NAME, STEP_OP_NAME]
+    assert all(call.parent is episode_call for call in step_calls)
+    assert [call.output is not None for call in step_calls] == [True, True]
+    assert episode_call.output is not None
+    assert episode_call.output["stop_reason"] == "terminal_state"
+
+
+def test_a_weave_mirror_survives_a_client_that_misbehaves() -> None:
+    """A client whose API does not match degrades to no tracing, not a crash."""
+
+    class HostileClient:
+        def create_call(self, *args: object, **kwargs: object) -> object:
+            raise TypeError("unexpected signature")
+
+        def finish_call(self, *args: object, **kwargs: object) -> None:
+            raise TypeError("unexpected signature")
+
+    sink = WeaveTraceSink(HostileClient())
+
+    sink.record(TraceEvent(name="episode.started", attributes={"episode_id": "ep_0001"}))
+    sink.record(TraceEvent(name="episode.step", attributes={"episode_id": "ep_0001"}))
+    sink.record(TraceEvent(name="episode.finished", attributes={"episode_id": "ep_0001"}))
+    sink.flush()
