@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 23:09 PDT | [ADDED] | Added display-only `window_visible` and `realtime` settings to `DoomSettings` for step 19a: a visible ViZDoom window that renders every frame, and real-time pacing that advances accepted actions one tick at a time at 35 ticks per second and stops when the episode ends. Both default to off, the connector version stays `doom-vizdoom-v2`, and real-ViZDoom tests show paced step results identical to the default settings.
+
 2026-09-12 23:02 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 19, a Doom episode replay viewer: display-only `window_visible` and `realtime` settings for the Doom connector that change no recorded value, and `scripts/replay_doom_episode.py`, which replays a recorded episode's exact requests from a copy of the store in a visible ViZDoom window, verifies every step against the record, stops at the first mismatch, and never calls a model or grader, split into two reversible pull requests.
 
 2026-09-12 22:49 PDT | [ADDED] | Added validated per-role output settings with 1,024-token Action and 6,000-token Builder defaults, wired them through cold, build, repair, and held-out calls and the Doom run summary, and made run-exit trace delivery best effort by draining Weave after closing open calls and using a real W&B base URL default.

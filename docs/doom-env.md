@@ -17,7 +17,12 @@ is now implemented in `src/noob_agent/connectors/doom.py`.
 - No Doom game data. ViZDoom bundles Freedoom and its included scenarios; the
   BDP uses an included scenario rather than a custom level
   ([`hackathon_plan.md`](../hackathon_plan.md) §8).
-- No display. Everything below runs headless with `set_window_visible(False)`.
+- No display for evaluation. The connector and everything below run headless by
+  default. `DoomSettings(window_visible=True, realtime=True)` opens a visible
+  window that renders every frame and paces accepted actions at Doom's native
+  35 ticks per second, for watching a replay (`hackathon_plan.md` §19). Neither
+  setting changes any observation or step result, and the visible window needs
+  a display (on this WSL machine, WSLg).
 
 ## Install
 
