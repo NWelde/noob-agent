@@ -33,6 +33,10 @@ from noob_agent.models.recording import ModelRole, RecordingModelClient
 from noob_agent.observability.tracing import TraceSink
 from noob_agent.runtime.heldout import HeldOutRunner, heldout_experiment
 from noob_agent.runtime.runner import Clock, EpisodeRunner, SystemClock
+from noob_agent.settings import (
+    DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
+    DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
+)
 from noob_agent.skills.executor import SkillExecutor
 from noob_agent.skills.registry import SkillRegistry
 from noob_agent.storage import EpisodeStore
@@ -129,6 +133,8 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         clock: Clock | None = None,
         trace: TraceSink | None = None,
         max_repairs: int = 1,
+        action_max_output_tokens: int = DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
+        builder_max_output_tokens: int = DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
     ) -> None:
         self._connector_factory = connector_factory
         self._client = client
@@ -140,6 +146,8 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._clock = clock if clock is not None else SystemClock()
         self._trace = trace
         self._max_repairs = max_repairs
+        self._action_max_output_tokens = action_max_output_tokens
+        self._builder_max_output_tokens = builder_max_output_tokens
 
     def _recording(
         self, experiment: ExperimentRecord, *, role: ModelRole, episode_id: str | None = None
@@ -191,7 +199,11 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         cold = EpisodeRunner(
             connector=connector,
             store=self._store,
-            policy=ActionAgent(self._recording(training_record, role="action"), manifest=manifest),
+            policy=ActionAgent(
+                self._recording(training_record, role="action"),
+                manifest=manifest,
+                max_output_tokens=self._action_max_output_tokens,
+            ),
             clock=self._clock,
             trace=self._trace,
         )
@@ -216,6 +228,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             self._recording(training_record, role="builder", episode_id=cold_result.episode_id),
             self._registry,
             max_repairs=self._max_repairs,
+            max_output_tokens=self._builder_max_output_tokens,
         )
         outcome = await builder.build(
             select_evidence(training_stored),
@@ -237,6 +250,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
                     executor=self._executor,
                     clock=self._clock,
                     trace=self._trace,
+                    action_max_output_tokens=self._action_max_output_tokens,
                 )
                 result = await runner.run(
                     experiment=heldout_record, scenario_id=cell.scenario_id, seed=cell.seed

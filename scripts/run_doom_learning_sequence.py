@@ -17,6 +17,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -54,12 +55,21 @@ def _cells(manifest_path: Path) -> tuple[HeldOutCell, tuple[HeldOutCell, ...]]:
     return training[0], tuple(heldout)
 
 
-def _summary(result: LearningSequenceResult[DoomEpisodeGrade]) -> dict[str, object]:
+def _summary(
+    result: LearningSequenceResult[DoomEpisodeGrade],
+    *,
+    action_max_output_tokens: int,
+    builder_max_output_tokens: int,
+) -> dict[str, object]:
     version = result.accepted_version
     return {
         "sequence_id": result.sequence_id,
         "model_id": result.model_id,
         "skill_isolation": result.skill_isolation_note,
+        "max_output_tokens": {
+            "action": action_max_output_tokens,
+            "builder": builder_max_output_tokens,
+        },
         "training": {
             "episode_id": result.training.episode_id,
             "scenario_id": result.training.scenario_id,
@@ -130,27 +140,43 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     sequence_id = args.sequence_id or datetime.now(UTC).strftime("doom-seq-%Y%m%dT%H%M%SZ")
     args.database.parent.mkdir(parents=True, exist_ok=True)
 
-    with EpisodeStore.open(args.database) as store:
-        sequence = LearningSequence(
-            connector_factory=DoomConnector,
-            client=build_model_client(settings.model, settings.wandb),
-            model_id=model_id,
-            store=store,
-            registry=SkillRegistry(),
-            executor=executor,
-            grade=_grade,
-            trace=build_trace_sink(settings.trace, wandb=settings.wandb),
-        )
-        result = asyncio.run(
-            sequence.run(
-                sequence_id=sequence_id,
-                training_scenario_id=training.scenario_id,
-                training_seed=training.seed,
-                heldout=heldout,
+    trace = build_trace_sink(settings.trace, wandb=settings.wandb)
+    try:
+        with EpisodeStore.open(args.database) as store:
+            sequence = LearningSequence(
+                connector_factory=DoomConnector,
+                client=build_model_client(settings.model, settings.wandb),
+                model_id=model_id,
+                store=store,
+                registry=SkillRegistry(),
+                executor=executor,
+                grade=_grade,
+                trace=trace,
+                action_max_output_tokens=settings.model.action_max_output_tokens,
+                builder_max_output_tokens=settings.model.builder_max_output_tokens,
             )
-        )
+            result = asyncio.run(
+                sequence.run(
+                    sequence_id=sequence_id,
+                    training_scenario_id=training.scenario_id,
+                    training_seed=training.seed,
+                    heldout=heldout,
+                )
+            )
+    finally:
+        with suppress(Exception):
+            trace.flush()
 
-    print(json.dumps(_summary(result), indent=2))
+    print(
+        json.dumps(
+            _summary(
+                result,
+                action_max_output_tokens=settings.model.action_max_output_tokens,
+                builder_max_output_tokens=settings.model.builder_max_output_tokens,
+            ),
+            indent=2,
+        )
+    )
     return 0
 
 
