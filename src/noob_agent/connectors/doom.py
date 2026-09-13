@@ -5,6 +5,11 @@ the target, and each scenario ID applies a fixed starting offset during reset,
 before observation zero. The kill count, player death, and timeout are kept on
 a harness-only outcome and never enter an observation, a step result, or a
 message.
+
+Two display-only settings exist for watching a replay (`hackathon_plan.md`
+section 19): a visible window that renders every frame, and real-time pacing
+that advances an accepted action one tick at a time at Doom's native rate. Both
+are off by default, and neither changes what the game computes or reports.
 """
 
 from __future__ import annotations
@@ -43,6 +48,8 @@ START_OFFSET_TICKS: Final = 12
 # Doom's friction keeps a strafing player sliding; this is enough for the
 # reset to be exactly repeatable, which is what the contract requires.
 SETTLE_TICKS: Final = 35
+# Doom's native simulation rate, used only by real-time pacing.
+NATIVE_TICK_SECONDS: Final = 1 / 35
 
 StartOffset = Literal["left", "right"] | None
 SCENARIOS: Final[dict[str, StartOffset]] = {
@@ -107,6 +114,17 @@ class DoomSettings:
     scenario: str = "basic.cfg"
     call_timeout_seconds: float = 3.0
     reset_timeout_seconds: float = 10.0
+    # Display only: show the game window and render every frame.
+    window_visible: bool = False
+    # Display only: advance accepted actions one tick at a time in real time.
+    realtime: bool = False
+
+
+def _pace(tick_started: float) -> None:
+    """Sleep out the rest of one native tick that began at `tick_started`."""
+    remaining = NATIVE_TICK_SECONDS - (time.monotonic() - tick_started)
+    if remaining > 0:
+        time.sleep(remaining)
 
 
 @dataclass(frozen=True)
@@ -172,7 +190,17 @@ class DoomConnector:
         values, ticks, changed = action
         game = self._game
         assert game is not None
-        game.make_action(values, ticks)
+        if self._settings.realtime:
+            # Same buttons, one tick per call: the simulation is unchanged, and
+            # stopping at the end of the episode matches a multi-tick call.
+            for _ in range(ticks):
+                tick_started = time.monotonic()
+                game.make_action(values, 1)
+                _pace(tick_started)
+                if game.is_episode_finished():
+                    break
+        else:
+            game.make_action(values, ticks)
         self._capture_outcome()
         elapsed = time.monotonic() - started
         self._sequence += 1
@@ -235,7 +263,9 @@ class DoomConnector:
             )
         game = vzd.DoomGame()
         game.load_config(str(scenario))
-        game.set_window_visible(False)
+        game.set_window_visible(self._settings.window_visible)
+        if self._settings.window_visible:
+            game.set_render_all_frames(True)
         game.set_mode(vzd.Mode.PLAYER)
         self._buttons = [
             vzd.Button.MOVE_FORWARD,
