@@ -183,9 +183,13 @@ class WeaveTraceSink:
                 self._finish_episode(event.attributes)
 
     def flush(self) -> None:
-        """Close an episode call that never received its outcome event."""
+        """Close an open episode and ask the client to deliver buffered calls."""
         with suppress(Exception):
             self._finish_episode(None)
+        with suppress(Exception):
+            client_flush = getattr(self._client, "flush", None)
+            if callable(client_flush):
+                client_flush()
 
     def _finish_episode(self, output: dict[str, JsonValue] | None) -> None:
         call, self._episode_call = self._episode_call, None

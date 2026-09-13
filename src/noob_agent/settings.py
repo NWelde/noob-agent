@@ -11,7 +11,12 @@ import os
 from collections.abc import Mapping
 from typing import Literal, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+DEFAULT_ACTION_MAX_OUTPUT_TOKENS = 1_024
+DEFAULT_BUILDER_MAX_OUTPUT_TOKENS = 6_000
+ACTION_MAX_OUTPUT_TOKENS_CEILING = 2_000
+BUILDER_MAX_OUTPUT_TOKENS_CEILING = 8_000
 
 
 def _read_bool(environment: Mapping[str, str], name: str, default: bool) -> bool:
@@ -53,6 +58,16 @@ class ModelSettings(BaseModel):
     inference_base_url: str = "https://api.inference.wandb.ai/v1"
     inference_project: str | None = None
     inference_model: str | None = None
+    action_max_output_tokens: int = Field(
+        default=DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
+        gt=0,
+        le=ACTION_MAX_OUTPUT_TOKENS_CEILING,
+    )
+    builder_max_output_tokens: int = Field(
+        default=DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
+        gt=0,
+        le=BUILDER_MAX_OUTPUT_TOKENS_CEILING,
+    )
 
 
 class SandboxSettings(BaseModel):
@@ -79,9 +94,7 @@ class IntegrationSettings(BaseModel):
     sandbox: SandboxSettings
 
     @classmethod
-    def from_environ(
-        cls, environment: Mapping[str, str] | None = None
-    ) -> IntegrationSettings:
+    def from_environ(cls, environment: Mapping[str, str] | None = None) -> IntegrationSettings:
         values = os.environ if environment is None else environment
         return cls(
             wandb=WandbSettings(
@@ -107,6 +120,18 @@ class IntegrationSettings(BaseModel):
                 ),
                 inference_project=values.get("NOOB_AGENT_INFERENCE_PROJECT") or None,
                 inference_model=values.get("NOOB_AGENT_INFERENCE_MODEL") or None,
+                action_max_output_tokens=int(
+                    values.get(
+                        "NOOB_AGENT_ACTION_MAX_OUTPUT_TOKENS",
+                        str(DEFAULT_ACTION_MAX_OUTPUT_TOKENS),
+                    )
+                ),
+                builder_max_output_tokens=int(
+                    values.get(
+                        "NOOB_AGENT_BUILDER_MAX_OUTPUT_TOKENS",
+                        str(DEFAULT_BUILDER_MAX_OUTPUT_TOKENS),
+                    )
+                ),
             ),
             sandbox=SandboxSettings(
                 api_key=values.get("CWSANDBOX_API_KEY") or None,

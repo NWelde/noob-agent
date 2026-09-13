@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 22:49 PDT | [ADDED] | Added validated per-role output settings with 1,024-token Action and 6,000-token Builder defaults, wired them through cold, build, repair, and held-out calls and the Doom run summary, and made run-exit trace delivery best effort by draining Weave after closing open calls and using a real W&B base URL default.
+
 2026-09-12 22:36 PDT | [DOCUMENTED] | Amended `hackathon_plan.md` section 18 so step 18b also delivers step 18a traces: `WeaveTraceSink.flush()` drains the Weave client's upload queue, the Doom run script flushes the trace sink at exit even when no skill is accepted, and `.env.example` sets `WANDB_BASE_URL=https://api.wandb.ai` instead of exporting a blank host, with tests and rollback notes.
 
 2026-09-12 22:32 PDT | [ADDED] | Added persisted and traced Model call records for step 18a: `LearningSequence` wraps each role's client in `RecordingModelClient`, which writes one `model_call` row per Action, Build, and Repair call (purpose, experiment, episode, and `action_id` links; provider and exact model; prompt, cap, and temperature; reply, provider reasoning, finish reason, token usage stored as unknown when unreported, latency, and error) and mirrors it to Weave under its episode. `WandbInferenceClient` now keeps `finish_reason`, reasoning text, and whether usage was reported. Schema version 3 adds the table and upgrades a version-2 database in place.

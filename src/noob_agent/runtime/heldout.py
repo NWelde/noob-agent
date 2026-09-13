@@ -16,7 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from noob_agent.agents.action import DEFAULT_HISTORY_LIMIT, ActionAgent, Decision
+from noob_agent.agents.action import (
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    ActionAgent,
+    Decision,
+)
 from noob_agent.connectors import GameConnector
 from noob_agent.domain.records import ExperimentRecord
 from noob_agent.domain.skills import SkillVersion
@@ -100,6 +105,7 @@ class HeldOutRunner:
         clock: Clock | None = None,
         trace: TraceSink | None = None,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
+        action_max_output_tokens: int | None = None,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -109,6 +115,7 @@ class HeldOutRunner:
         self._clock = clock
         self._trace = trace
         self._history_limit = history_limit
+        self._action_max_output_tokens = action_max_output_tokens
 
     async def run(
         self, *, experiment: ExperimentRecord, scenario_id: str, seed: int
@@ -127,6 +134,11 @@ class HeldOutRunner:
             manifest=manifest,
             skills=offered,
             history_limit=self._history_limit,
+            max_output_tokens=(
+                DEFAULT_MAX_OUTPUT_TOKENS
+                if self._action_max_output_tokens is None
+                else self._action_max_output_tokens
+            ),
         )
         runtime = SkillRuntime(self._executor, available=offered)
         runner = EpisodeRunner(
