@@ -20,14 +20,26 @@ def _module():
 
 
 def test_budget_mode_has_its_approved_defaults() -> None:
-    options = _module()._parse_args(["--live-demo", "--token-budget", "500000"])
-    assert options.token_budget == 500_000
-    assert options.builder_max_output_tokens == 32_000
+    options = _module()._parse_args(["--live-demo", "--token-budget", "1000000"])
+    assert options.token_budget == 1_000_000
+    assert options.builder_max_output_tokens == 100_000
     assert options.max_repairs == 3
     assert options.deadline_seconds == 3_600
 
 
 @pytest.mark.parametrize("args", [["--token-budget", "1"], ["--live-demo", "--token-budget", "0"]])
 def test_budget_mode_is_live_demo_only_and_bounded(args: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _module()._parse_args(args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--live-demo", "--token-budget", "1000001"],
+        ["--live-demo", "--builder-max-output-tokens", "100001"],
+    ],
+)
+def test_budget_mode_refuses_values_above_the_new_caps(args: list[str]) -> None:
     with pytest.raises(SystemExit):
         _module()._parse_args(args)
