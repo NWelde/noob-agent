@@ -28,7 +28,7 @@ from noob_agent.agents.evidence import select_evidence
 from noob_agent.domain.records import ExperimentRecord
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.prompts.refine import PracticeAttempt, render_refine_prompt
-from noob_agent.runtime.heldout import heldout_experiment
+from noob_agent.runtime.heldout import HELD_OUT_DECISION_BUDGET, heldout_experiment
 from noob_agent.runtime.sequence import (
     ConnectorT,
     GradeT,
@@ -228,6 +228,12 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
             return result((), None, "no_skill")
 
         incumbent = trained.outcome.version
+        if not self._practice_fits(tokens, calls, practice_cells):
+            heldout = await self._run_cells(connector, trained.heldout_record, heldout_cells)
+            round_zero: RoundReport[GradeT] = RoundReport(
+                0, incumbent, trained.outcome, (), None, "incumbent"
+            )
+            return result([round_zero], incumbent, "learning_budget", heldout)
         practice = await self._practice(connector, practice_record, practice_cells, incumbent)
         tokens += _tokens(practice)
         calls += _calls(practice)
@@ -278,6 +284,14 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                 continue
 
             challenger = outcome.version
+            if not self._practice_fits(tokens, calls, practice_cells):
+                self._registry.reject(
+                    challenger.name,
+                    challenger.version,
+                    reason="Validated, but the learning budget could not cover its practice.",
+                )
+                stop = "learning_budget"
+                break
             challenger_practice = await self._practice(
                 connector, practice_record, practice_cells, challenger
             )
@@ -343,6 +357,18 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                 connector, sequence_id, trained.connector_version, heldout_cells, kept, heldout
             )
         return result(rounds, incumbent, stop, heldout, points)
+
+    def _practice_fits(self, tokens: int, calls: int, cells: Sequence[HeldOutCell]) -> bool:
+        """Whether a full practice batch fits the learning budget in the worst case.
+
+        Every practice episode may use its whole decision budget, and each call is
+        projected at the largest average cost per learning call seen so far.
+        """
+        decisions = len(cells) * HELD_OUT_DECISION_BUDGET
+        if calls + decisions > self._learning_call_budget:
+            return False
+        per_call = tokens / calls if calls else 0.0
+        return tokens + decisions * per_call <= self._learning_token_budget
 
     async def _practice(
         self,
