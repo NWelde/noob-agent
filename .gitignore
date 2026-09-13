@@ -9,3 +9,7 @@ __pycache__/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Written into the working directory by ViZDoom when the Doom env check runs.
+_vizdoom.ini
+_vizdoom/
