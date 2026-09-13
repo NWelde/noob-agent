@@ -163,6 +163,10 @@ step 8a:
   part of `GameConnector`, and none of these values, nor the seed, appears in an
   observation, a step result, a message, or `episode_id`. `terminal_reason` is
   `episode_finished` for every ending.
+- **Episode IDs.** An episode ID is the scenario ID followed by 16 random
+  decimal digits, such as `doom-basic-heldout-a-0123456789012345`. It is unique
+  across connector instances, so episodes from fresh connectors can be recorded
+  in one store. The digits carry no seed.
 - **Rejected requests.** A rejected request advances the public sequence, like
   any other durable result, and charges no primitive.
 
