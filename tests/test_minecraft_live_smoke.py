@@ -114,7 +114,7 @@ def test_live_smoke_refuses_to_start_without_a_configured_model(
     assert "model" in capsys.readouterr().err.lower()
 
 
-def test_chat_transcript_lines_include_every_model_input_and_output() -> None:
+def test_chat_narration_omits_model_details() -> None:
     module = _load_run_script()
 
     lines = module._chat_transcript_lines(
@@ -126,14 +126,7 @@ def test_chat_transcript_lines_include_every_model_input_and_output() -> None:
     )
 
     joined = "\n".join(lines)
-    assert "system" in joined
-    assert "Follow the public controls." in joined
-    assert "prompt" in joined
-    assert "Choose exactly one tool." in joined
-    assert "reasoning" in joined
-    assert "inspect the nearby device" in joined
-    assert "reply" in joined
-    assert '"tool":"observe"' in joined
+    assert joined == "[noob:Doing] looking around."
     assert all(len(line) <= module.MINECRAFT_CHAT_LIMIT for line in lines)
 
 
@@ -168,7 +161,30 @@ def test_chat_transcript_client_announces_before_and_after_a_model_call() -> Non
     )
 
     transcript = "\n".join(connector.messages)
-    assert "System prompt" in transcript
-    assert "User prompt" in transcript
-    assert "I should look around." in transcript
-    assert '"tool":"observe"' in transcript
+    assert transcript == "[noob:Doing] looking around."
+
+
+def test_narration_uses_visible_target_and_handles_invalid_replies() -> None:
+    module = _load_run_script()
+    prompt = (
+        'Current observation (sequence 0):\n{"visible_objects": '
+        '[{"object_id": "obj_1", "label": "Gate Button"}]}\n\nChoose exactly one action'
+    )
+    assert module._chat_transcript_lines(purpose="action", prompt=prompt) == (
+        "[noob:Seeing] Gate Button.",
+    )
+    assert module._chat_transcript_lines(
+        purpose="action",
+        prompt=prompt,
+        reply='{"tool":"use_object","arguments":{"object_id":"obj_1"}}',
+    ) == ("[noob:Pressing] Gate Button.",)
+    assert module._chat_transcript_lines(purpose="action", reply="bad JSON") == (
+        "[noob:Doing] unable to choose an action this turn.",
+    )
+    assert module._chat_transcript_lines(purpose="builder", prompt="private") == (
+        "[noob:Learning] building a skill from this attempt.",
+    )
+    assert module._chat_transcript_lines(purpose="builder", reply="secret code") == ()
+    assert "secret" not in str(
+        module._chat_transcript_lines(purpose="action", error="secret provider payload")
+    )
