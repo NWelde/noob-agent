@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-2026-09-13 03:55 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 22, the loop-optimization milestone: land the isolated validation pipeline, add a loop scorecard and headless bench, make Action decisions reliable and fast with per-role thinking controls and native tool calls, give the Builder the real skill API and observation evidence, make repairs converge within protocol ceilings, parallelize held-out cells and validation, add a multi-round practice-based improvement loop with its learning budget, and confirm on Minecraft.
+2026-09-13 03:43 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 22, the loop-optimization milestone: land the isolated validation pipeline, add a loop scorecard and headless bench, make Action decisions reliable and fast with per-role thinking controls and native tool calls, give the Builder the real skill API and observation evidence, make repairs converge within protocol ceilings, parallelize held-out cells and validation, add a multi-round practice-based improvement loop with its learning budget, and confirm on Minecraft.
 
 2026-09-13 00:14 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 21, a non-benchmark token-budget Doom demo loop: `--live-demo --token-budget 500000` runs fresh learning sequences until the budget is spent, with demo-only Builder caps up to 32,000 output tokens and 3 repairs, a 3,600-second safety deadline, a full-screen display setting for the live demo and replay viewer, a `doom-demo-log.md` written live from the Weave trace, and one paid demo run, split into four reversible pull requests.
 
