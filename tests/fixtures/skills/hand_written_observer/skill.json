@@ -1,0 +1,12 @@
+{
+  "name": "record_visible_state",
+  "version": 1,
+  "parent_version": null,
+  "purpose": "Record one fresh public observation without changing the environment.",
+  "input_schema": {"properties": {}},
+  "required_tools": ["observe"],
+  "max_primitive_actions": 1,
+  "max_wall_time_seconds": 5,
+  "success_claim": "The result cites the newly observed public sequence.",
+  "api_version": "noob-agent.skill.v1"
+}
