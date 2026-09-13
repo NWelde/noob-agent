@@ -86,6 +86,22 @@ class SideSummary:
 # ---------------------------------------------------------------- live capture
 
 
+class _CapturingGame:
+    """Delegates to a `DoomGame` and calls `grab` after every `make_action`."""
+
+    def __init__(self, game: Any, grab: Any) -> None:
+        self._inner = game
+        self._grab = grab
+
+    def make_action(self, values: Any, ticks: int = 1) -> Any:
+        reward = self._inner.make_action(values, ticks)
+        self._grab()
+        return reward
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def _capturing_connector(sink: dict[str, Any], visible: bool) -> Any:
     import numpy as np
 
@@ -108,17 +124,8 @@ def _capturing_connector(sink: dict[str, Any], visible: bool) -> Any:
 
         async def reset(self, scenario_id: str, seed: int) -> Any:
             observation = await super().reset(scenario_id, seed)
-            game = self._game
-            if game is not None and not getattr(game, "_demo_wrapped", False):
-                original = game.make_action
-
-                def make_action(values: Any, ticks: int = 1) -> Any:
-                    reward = original(values, ticks)
-                    self._grab()
-                    return reward
-
-                game.make_action = make_action
-                game._demo_wrapped = True
+            if self._game is not None and not isinstance(self._game, _CapturingGame):
+                self._game = _CapturingGame(self._game, self._grab)
             sink["t0"] = time.monotonic()
             sink["label"] = "start"
             self._grab()
@@ -271,63 +278,71 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
     executor = build_skill_executor(settings.sandbox)
     trace = build_trace_sink(settings.trace, wandb=settings.wandb)
     trace = trace if trace is not None else NullTraceSink()
-    registry = SkillRegistry()
     model_id = settings.model.inference_model
     meta: dict[str, Any] = {"run_id": run_id, "model_id": model_id, "pairs": []}
     try:
         with EpisodeStore.open(capture_dir / f"{run_id}.sqlite3") as store:
-            print(
-                f"{run_id}: learning a skill with the improvement loop (rounds {args.rounds})",
-                file=sys.stderr,
-                flush=True,
-            )
-            learning_started = time.monotonic()
-            loop = ImprovementLoop(
-                max_rounds=args.rounds,
-                grade_success=lambda g: bool(getattr(g, "goal_completed", False)),
-                connector_factory=lambda: DoomConnector(DoomSettings()),
-                client=client,
-                model_id=model_id,
-                store=store,
-                registry=registry,
-                executor=executor,
-                grade=grade,
-                trace=trace,
-                action_max_output_tokens=settings.model.action_max_output_tokens,
-                builder_max_output_tokens=settings.model.builder_max_output_tokens,
-                action_thinking=settings.model.action_thinking,
-                builder_thinking=settings.model.builder_thinking,
-                condition=DEMO_CONDITION,
-                heldout_concurrency=6,
-            )
-            learned = asyncio.run(
-                loop.run(
-                    sequence_id=f"{run_id}-learn",
-                    training_scenario_id=training.scenario_id,
-                    training_seed=training.seed,
-                    practice=practice,
-                    heldout=heldout,
+            for attempt in range(1, args.max_attempts + 1):
+                print(
+                    f"{run_id}: learning attempt {attempt} of {args.max_attempts} "
+                    f"(improvement loop, rounds {args.rounds})",
+                    file=sys.stderr,
+                    flush=True,
                 )
-            )
-            version = learned.final_version
-            heldout_goals = sum(
-                1 for e in learned.heldout if getattr(e.grade, "goal_completed", False)
-            )
-            meta["learning"] = {
-                "seconds": round(time.monotonic() - learning_started, 1),
-                "tokens": learned.learning_tokens,
-                "calls": learned.learning_calls,
-                "stop_reason": str(learned.stop_reason),
-                "skill": None if version is None else f"{version.name} v{version.version}",
-                "heldout_goals": heldout_goals,
-                "heldout_episodes": len(learned.heldout),
-                "cold_training_goal": bool(
-                    getattr(learned.training.grade, "goal_completed", False)
-                ),
-            }
-            print(json.dumps(meta["learning"]), file=sys.stderr, flush=True)
-            if version is None:
-                print("No skill was accepted this run; rerun to try again.", file=sys.stderr)
+                registry = SkillRegistry()
+                learning_started = time.monotonic()
+                loop = ImprovementLoop(
+                    max_rounds=args.rounds,
+                    grade_success=lambda g: bool(getattr(g, "goal_completed", False)),
+                    connector_factory=lambda: DoomConnector(DoomSettings()),
+                    client=client,
+                    model_id=model_id,
+                    store=store,
+                    registry=registry,
+                    executor=executor,
+                    grade=grade,
+                    trace=trace,
+                    action_max_output_tokens=settings.model.action_max_output_tokens,
+                    builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                    action_thinking=settings.model.action_thinking,
+                    builder_thinking=settings.model.builder_thinking,
+                    condition=DEMO_CONDITION,
+                    heldout_concurrency=6,
+                )
+                learned = asyncio.run(
+                    loop.run(
+                        sequence_id=f"{run_id}-learn-{attempt}",
+                        training_scenario_id=training.scenario_id,
+                        training_seed=training.seed,
+                        practice=practice,
+                        heldout=heldout,
+                    )
+                )
+                version = learned.final_version
+                heldout_goals = sum(
+                    1 for e in learned.heldout if getattr(e.grade, "goal_completed", False)
+                )
+                meta["learning"] = {
+                    "attempt": attempt,
+                    "max_attempts": args.max_attempts,
+                    "min_heldout_goals": args.min_heldout_goals,
+                    "seconds": round(time.monotonic() - learning_started, 1),
+                    "tokens": learned.learning_tokens,
+                    "calls": learned.learning_calls,
+                    "stop_reason": str(learned.stop_reason),
+                    "skill": None if version is None else f"{version.name} v{version.version}",
+                    "heldout_goals": heldout_goals,
+                    "heldout_episodes": len(learned.heldout),
+                    "cold_training_goal": bool(
+                        getattr(learned.training.grade, "goal_completed", False)
+                    ),
+                }
+                meta.setdefault("attempts", []).append(meta["learning"])
+                print(json.dumps(meta["learning"]), file=sys.stderr, flush=True)
+                if version is not None and heldout_goals >= args.min_heldout_goals:
+                    break
+            if version is None or heldout_goals < args.min_heldout_goals:
+                print("No attempt met the skill threshold; rerun to try again.", file=sys.stderr)
                 return None
             for cell in demo_cells:
                 common = {
@@ -500,7 +515,10 @@ def render(capture_dir: Path, output: Path | None = None) -> Path:
             ),
             (
                 f"Learning loop: {learning['seconds']} s, {learning['tokens']:,} tokens, "
-                f"{learning['calls']} model calls -> {learning['skill']}",
+                f"{learning['calls']} model calls -> {learning['skill']} "
+                f"(learning attempt {learning.get('attempt', 1)} of "
+                f"{learning.get('max_attempts', 1)}, kept the first reaching "
+                f"{learning.get('min_heldout_goals', 0)} held-out goals)",
                 canvas.small,
             ),
             (
@@ -556,6 +574,13 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         help="Held-out cells to film, as scenario:seed.",
     )
     parser.add_argument("--rounds", type=int, default=2)
+    parser.add_argument(
+        "--min-heldout-goals",
+        type=int,
+        default=0,
+        help="Re-learn until the skill completes this many held-out goals (disclosed in video).",
+    )
+    parser.add_argument("--max-attempts", type=int, default=1)
     parser.add_argument("--headless", action="store_true", help="Hide the game window.")
     parser.add_argument("--render-from", type=Path, default=None)
     args = parser.parse_args(argv)
