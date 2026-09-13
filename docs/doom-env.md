@@ -215,9 +215,9 @@ full-screen diagnostic with Weave tracing enabled:
 
 ```sh
 NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
-  scripts/run_doom_learning_sequence.py --live-demo --token-budget 500000
+  scripts/run_doom_learning_sequence.py --live-demo --token-budget 1000000
 ```
 
-This is not benchmark evidence. It uses a 32,000-token Builder cap, up to three
+This is not benchmark evidence. It uses a 100,000-token Builder cap, up to three
 repairs, a 3,600-second safety deadline, and writes the Weave-derived transcript
 to `.noob-agent/doom-demo-log.md` after trace delivery.
