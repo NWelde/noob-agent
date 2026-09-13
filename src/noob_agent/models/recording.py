@@ -169,9 +169,6 @@ class RecordingModelClient:
             error=error,
             started_at=started_at,
             request_options=request.options(),
-            tool_call=None
-            if response is None or response.tool_call is None
-            else response.tool_call.model_dump(),
         )
 
     def _write(self, record: ModelCallRecord) -> None:
