@@ -118,13 +118,29 @@ def _render_skills(skills: Sequence[SkillVersion]) -> str:
     return "\n".join(lines)
 
 
+MAX_HISTORY_SUBGOAL_CHARS = 100
+
+
+def _compact(value: JsonValue) -> JsonValue:
+    """Drop null values and empty collections, and round floats to two decimals."""
+    if isinstance(value, dict):
+        kept = {key: _compact(item) for key, item in value.items()}
+        return {key: item for key, item in kept.items() if item not in (None, [], {})}
+    if isinstance(value, list):
+        return [_compact(item) for item in value]
+    if isinstance(value, float):
+        return round(value, 2)
+    return value
+
+
 def _render_history(history: Sequence[HistoryEntry]) -> str:
     if not history:
         return "History: no earlier decisions in this attempt."
     lines = ["History (most recent last):"]
     for entry in history:
         lines.append(
-            f"- {entry.action_id}: subgoal {entry.subgoal!r}; chose {entry.chosen}; "
+            f"- {entry.action_id}: subgoal {entry.subgoal[:MAX_HISTORY_SUBGOAL_CHARS]!r}; "
+            f"chose {entry.chosen}; "
             f"outcome {entry.outcome}"
         )
     return "\n".join(lines)
@@ -139,7 +155,8 @@ def render_action_prompt(
     history: Sequence[HistoryEntry],
 ) -> str:
     """Render one decision's prompt from public information only."""
-    # The goal is already the prompt's first line.
+    # The goal is already the prompt's first line. The rest is rendered compactly
+    # (section 24c) so a large observation fits the training token ceiling.
     snapshot = observation.model_dump(mode="json", exclude={"public_goal"})
     return f"""Task: {public_goal}
 
@@ -152,6 +169,6 @@ Learned skills:
 {_render_history(history)}
 
 Current observation (sequence {observation.sequence}):
-{json.dumps(snapshot, sort_keys=True)}
+{json.dumps(_compact(snapshot), sort_keys=True, separators=(",", ":"))}
 
 Choose exactly one action for this turn."""

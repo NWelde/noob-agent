@@ -224,3 +224,43 @@ whose practice cannot fit is rejected with stop `learning_budget`. The rerun,
 Reaching 3 rounds within the protocol needs a separately approved change, such
 as a smaller practice decision budget, two practice seeds per round, or a larger
 learning call budget.
+
+## Compact Action observation (24c)
+
+Step 24c renders the Action prompt's observation JSON without null values or
+empty collections, with compact separators and floats rounded to two decimals,
+and cuts history subgoals to 100 characters. No field with a value and no object
+is removed.
+
+**Minecraft acceptance not met.** One cold `resonator-training-v1` episode (seed
+20260912) on the local server, recorded as `mc-confirm-24c-20260913T154513Z`:
+
+| Metric | `mc-confirm-22g` (before) | `mc-confirm-24c` |
+| --- | --- | --- |
+| Decisions | 10 (`repeated_failure`) | 20 (`decision_limit`) |
+| Unusable Action replies | 0 of 10 | 0 of 20 |
+| Median Action input tokens | about 2,317 (1,212 to 3,003) | **2,371** (1,140 to 2,408) |
+| Median over the first 10 decisions | 2,612 | 2,146 |
+| Input tokens over the first 10 decisions | 23,168 | 19,959 (14% fewer) |
+| Observation text at decision 10 | 4,288 characters | 2,992 characters (30% fewer) |
+| Input tokens over the episode | not reached | 43,752 |
+
+- The observation shrank by about 30%, but the system prompt, primitive list,
+  and history did not. Once the history window is full, each decision takes
+  about 2,370 tokens.
+- The target was a median of at most 2,000 tokens, and a full 20-decision
+  episode still uses 43,752 tokens, above the 40,000-token training ceiling.
+  A Minecraft benchmark run still needs a further approved change, such as a
+  shorter history window, shorter primitive descriptions, fewer visible-object
+  properties, or a per-game token ceiling.
+
+**Doom acceptance met.** `loop-bench-24c` (5 single-pass sequences, basic-v1):
+
+| Metric | `loop-bench-24a` | `loop-bench-24c` |
+| --- | --- | --- |
+| Unusable Action replies | 0 of 370 | **0 of 268** |
+| Action calls ending at their cap | 0 of 370 | 0 of 268 |
+| Median Action input tokens | 1,190 | 1,138 |
+| Sequences with an accepted skill | 5 of 5 | 5 of 5 |
+| Held-out goals completed | 8 of 30 | 6 of 30 |
+| Median sequence wall time | 37.7 s | 35.7 s |

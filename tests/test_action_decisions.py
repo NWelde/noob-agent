@@ -487,3 +487,132 @@ async def test_the_sequence_sends_the_action_thinking_setting_on_every_action_ca
     assert all(request.response_schema is not None for request in actions)
     heldout_enum = actions[-1].response_schema["properties"]["action"]["enum"]  # type: ignore[index]
     assert METADATA["name"] in heldout_enum
+
+
+# --- Compact observation (section 24c) -------------------------------------------
+
+
+def _minecraft_sized_observation() -> Any:
+    from noob_agent.domain.model import (
+        Observation,
+        PublicMessage,
+        PublicPlayerState,
+        PublicPosition,
+        VisibleObject,
+    )
+
+    return Observation(
+        episode_id="ep_mc",
+        sequence=4,
+        game_id="minecraft",
+        scenario_id="resonator-training-v1",
+        public_goal="Open the gateway.",
+        status={"health": 20.0, "food": 20, "held_item": None, "effects": []},
+        player=PublicPlayerState(
+            position=PublicPosition(x=0.51234, y=100.0, z=0.5),
+            orientation={"yaw": 1.570796, "pitch": 0.0},
+            properties={"sneaking": False, "mount": None},
+        ),
+        visible_objects=tuple(
+            VisibleObject(
+                object_id=f"obj_{index:04d}",
+                label="Barrel" if index % 2 else "Hopper",
+                position=PublicPosition(x=-4.0 + index, y=100.0, z=float(index)),
+                distance=4.512345 + index,
+                properties={
+                    "enabled": None,
+                    "facing": "east",
+                    "kind": "block",
+                    "open": False,
+                    "powered": None,
+                    "contents": [],
+                },
+            )
+            for index in range(17)
+        ),
+        messages=(PublicMessage(kind="observation", text="Nearby state refreshed."),),
+        last_action_id=None,
+        terminal=False,
+        terminal_reason=None,
+        logical_time=1200,
+    )
+
+
+def _compact_expected(value: Any) -> Any:
+    if isinstance(value, dict):
+        kept = {k: _compact_expected(v) for k, v in value.items()}
+        return {k: v for k, v in kept.items() if v is not None and v != [] and v != {}}
+    if isinstance(value, list):
+        return [_compact_expected(v) for v in value]
+    if isinstance(value, float):
+        return round(value, 2)
+    return value
+
+
+def _rendered_observation(prompt: str) -> Any:
+    marker = prompt.index("Current observation")
+    start = prompt.index("{", marker)
+    decoded, _ = json.JSONDecoder().raw_decode(prompt[start:])
+    return decoded
+
+
+def test_the_observation_is_rendered_compactly_without_losing_a_value() -> None:
+    from noob_agent.prompts.action import render_action_prompt
+
+    observation = _minecraft_sized_observation()
+    prompt = render_action_prompt(
+        public_goal=observation.public_goal,
+        observation=observation,
+        tools=MANIFEST.tools,
+        skills=(),
+        history=(),
+    )
+
+    rendered = _rendered_observation(prompt)
+    original = observation.model_dump(mode="json", exclude={"public_goal"})
+    assert rendered == _compact_expected(original)
+    assert len(rendered["visible_objects"]) == 17
+    assert '": ' not in prompt[prompt.index("Current observation") :]
+
+
+def test_a_minecraft_sized_observation_prompt_is_at_least_a_fifth_shorter() -> None:
+    from noob_agent.prompts.action import render_action_prompt
+
+    observation = _minecraft_sized_observation()
+    prompt = render_action_prompt(
+        public_goal=observation.public_goal,
+        observation=observation,
+        tools=MANIFEST.tools,
+        skills=(),
+        history=(),
+    )
+    verbose = json.dumps(
+        observation.model_dump(mode="json", exclude={"public_goal"}), sort_keys=True
+    )
+    compact = prompt[prompt.index("{", prompt.index("Current observation")) :]
+
+    assert len(compact) <= 0.8 * len(verbose)
+
+
+def test_history_subgoals_are_cut_to_one_hundred_characters() -> None:
+    from noob_agent.prompts.action import HistoryEntry, render_action_prompt
+
+    observation = _minecraft_sized_observation()
+    long_subgoal = "s" * 300
+    prompt = render_action_prompt(
+        public_goal=observation.public_goal,
+        observation=observation,
+        tools=MANIFEST.tools,
+        skills=(),
+        history=(
+            HistoryEntry(
+                action_id="a_0001",
+                subgoal=long_subgoal,
+                chosen="observe({})",
+                outcome="succeeded/OK",
+            ),
+        ),
+    )
+
+    assert "s" * 101 not in prompt
+    assert "s" * 97 in prompt
