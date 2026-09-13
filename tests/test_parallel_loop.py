@@ -242,3 +242,32 @@ async def test_concurrent_validation_reaches_the_same_verdict_and_first_failure(
         return ("accepted", report.checks, report.variation_object_ids)
 
     assert await verdict(1) == await verdict(8)
+
+
+class FlushWatchingSink:
+    """A real Weave client's flush blocks the event loop until in-flight calls finish,
+    which deadlocks when another episode's model call is still awaiting its reply."""
+
+    def __init__(self) -> None:
+        self.open: set[str] = set()
+        self.open_at_flush: list[int] = []
+
+    def record(self, event: Any) -> None:
+        episode_id = event.attributes.get("episode_id")
+        if event.name == "episode.started":
+            self.open.add(episode_id)
+        elif event.name == "episode.finished":
+            self.open.discard(episode_id)
+
+    def flush(self) -> None:
+        self.open_at_flush.append(len(self.open))
+
+
+async def test_no_trace_flush_happens_while_another_episode_is_running(
+    store: EpisodeStore,
+) -> None:
+    sink = FlushWatchingSink()
+
+    await _run(store, concurrency=4, trace=sink)
+
+    assert sink.open_at_flush and all(count == 0 for count in sink.open_at_flush)
