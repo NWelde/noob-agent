@@ -71,9 +71,10 @@ def test_deadline_option_is_live_demo_only(capsys: pytest.CaptureFixture[str]) -
 
 
 def test_live_demo_refuses_to_start_without_a_graphical_display(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_run_script()
+    monkeypatch.setattr(module.sys, "platform", "linux")
     database = tmp_path / "never-created.sqlite3"
     environ = {
         "NOOB_AGENT_MODEL_PROVIDER": "wandb-inference",
@@ -86,6 +87,63 @@ def test_live_demo_refuses_to_start_without_a_graphical_display(
     assert code == 2
     assert "display" in capsys.readouterr().err.lower()
     assert not database.exists()
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_live_demo_does_not_require_display_variables_off_linux(platform: str) -> None:
+    module = _load_run_script()
+
+    assert module._has_display({}, platform=platform) is True
+
+
+def test_live_demo_on_linux_needs_x11_or_wayland() -> None:
+    module = _load_run_script()
+
+    assert module._has_display({}, platform="linux") is False
+    assert module._has_display({"DISPLAY": ":0"}, platform="linux") is True
+    assert module._has_display({"WAYLAND_DISPLAY": "wayland-0"}, platform="linux") is True
+
+
+def test_run_refuses_early_without_a_wandb_api_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_run_script()
+    database = tmp_path / "never-created.sqlite3"
+    environ = {key: value for key, value in _live_environment().items() if key != "WANDB_API_KEY"}
+
+    code = module.main(["--database", str(database)], environ=environ)
+
+    assert code == 2
+    assert "WANDB_API_KEY" in capsys.readouterr().err
+    assert not database.exists()
+
+
+def test_run_names_missing_integration_packages_and_the_install_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_run_script()
+    monkeypatch.setattr(module, "_missing_packages", lambda settings: ["openai", "weave"])
+    database = tmp_path / "never-created.sqlite3"
+
+    code = module.main(["--database", str(database)], environ=_live_environment())
+
+    assert code == 2
+    error = capsys.readouterr().err
+    assert "openai, weave" in error
+    assert "uv sync --group dev --group integrations" in error
+    assert not database.exists()
+
+
+def test_missing_packages_checks_weave_only_when_tracing_is_enabled() -> None:
+    module = _load_run_script()
+    settings = module.IntegrationSettings.from_environ(
+        {**_live_environment(), "NOOB_AGENT_TRACE_MODE": "weave", "WEAVE_DISABLED": "false"}
+    )
+    untraced = module.IntegrationSettings.from_environ(_live_environment())
+
+    assert module._missing_packages(settings, find_spec=lambda name: None) == ["openai", "weave"]
+    assert module._missing_packages(untraced, find_spec=lambda name: None) == ["openai"]
+    assert module._missing_packages(settings, find_spec=lambda name: object()) == []
 
 
 class _TraceSink:
@@ -102,6 +160,7 @@ class _TraceSink:
 def _live_environment() -> dict[str, str]:
     return {
         "DISPLAY": ":0",
+        "WANDB_API_KEY": "test-key",
         "NOOB_AGENT_MODEL_PROVIDER": "wandb-inference",
         "NOOB_AGENT_INFERENCE_MODEL": "some-model",
         "NOOB_AGENT_SANDBOX_MODE": "local",
@@ -123,6 +182,7 @@ def _isolate_main(monkeypatch: pytest.MonkeyPatch, module: Any, *, block: bool) 
             return object()
 
     monkeypatch.setattr(module, "LearningSequence", FakeSequence)
+    monkeypatch.setattr(module, "_missing_packages", lambda settings: [])
     monkeypatch.setattr(module, "build_trace_sink", lambda *args, **kwargs: sink)
     monkeypatch.setattr(module, "build_model_client", lambda *args, **kwargs: object())
     monkeypatch.setattr(
@@ -273,3 +333,29 @@ def test_live_view_starts_for_the_run_and_stops_after_the_final_flush(
     assert command[1].endswith("live_reasoning_view.py")
     assert command[command.index("--run-id") + 1] == "doom-live-demo-view-test"
     assert "http://127.0.0.1:" in capsys.readouterr().out
+
+
+def test_demo_environment_template_enables_a_runnable_traced_doom_sequence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = dict(
+        line.split("=", 1)
+        for line in Path(".env.demo.example").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    )
+    assert values["WANDB_API_KEY"] == ""
+    module = _load_run_script()
+    settings = module.IntegrationSettings.from_environ(values)
+    assert settings.model.provider == "wandb-inference"
+    assert settings.model.inference_model
+    assert settings.trace.enabled
+    assert settings.sandbox.mode == "local"
+
+    _isolate_main(monkeypatch, module, block=False)
+    code = module.main(
+        ["--live-demo", "--deadline-seconds", "5", "--database", str(tmp_path / "demo.sqlite3")],
+        environ={**values, "WANDB_API_KEY": "judge-key", "DISPLAY": ":0"},
+    )
+
+    assert code == 0
+    assert capsys.readouterr().err == ""
