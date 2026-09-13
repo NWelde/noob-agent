@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+2026-09-12 23:57 PDT | [ADDED] | Kept the visible live-demo training window open and paused on its final frame throughout Builder authoring, then closed it before any fresh held-out connector opens. `EpisodeRunner` retains its close-on-finish default, while explicit external ownership now has tested normal and Builder-error cleanup paths.
+
+2026-09-12 23:56 PDT | [DOCUMENTED] | Approved live-demo window continuity during Builder authoring: keep the finished training ViZDoom instance open and paused on its final frame, close it before a fresh held-out episode, and preserve immediate close behavior for ordinary evaluation plus guaranteed cleanup on errors and deadlines.
+
+2026-09-12 23:49 PDT | [DOCUMENTED] | Approved one paid, non-benchmark live Doom loop diagnostic using the existing maximum validated output caps of 2,000 Action tokens and 8,000 Build/Repair tokens, with the same model, prompts, game budgets, visible real-time connector, 600-second deadline, separate database, local sandbox label, and Weave tracing; no code or persistent environment setting changes.
+
+2026-09-12 23:41 PDT | [ADDED] | Added an explicit `--live-demo` mode to the Doom learning-sequence runner: every game episode opens visibly and runs at native speed, the whole sequence has a configurable deadline capped at 600 seconds, storage and experiment records are labeled `non-benchmark-live-demo`, and timeout cleanup durably records cancelled model calls and finalizes an interrupted episode before closing Doom and flushing Weave. Normal evaluation defaults are unchanged. Manual run `doom-live-demo-20260912-234243-PDT` opened the WSLg game window, completed before its deadline, and remotely delivered the episode with all 20 Action calls and steps plus the separate Builder call; the model made 9 attacks without turning, did not kill the target, and produced no accepted skill.
+
+2026-09-12 23:35 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 20 for a visibly rendered, real-time, Weave-traced Doom learning sequence with a 600-second whole-run deadline, separate storage, cancellation-safe durable records, and explicit `non-benchmark-live-demo` labeling while leaving ordinary evaluation defaults unchanged.
+
 2026-09-12 23:14 PDT | [ADDED] | Added `scripts/replay_doom_episode.py` for step 19b, which lists the Doom episodes in a database or replays one in a visible, real-time ViZDoom window from a temporary copy of the store, checks every step against the record, stops with exit 1 at the first mismatch, refuses non-Doom episodes and other connector versions, and never calls a model, the Builder, a grader, or a skill executor. A headless replay of the first live Doom run matched all 20 steps.
 
 2026-09-12 23:09 PDT | [ADDED] | Added display-only `window_visible` and `realtime` settings to `DoomSettings` for step 19a: a visible ViZDoom window that renders every frame, and real-time pacing that advances accepted actions one tick at a time at 35 ticks per second and stops when the episode ends. Both default to off, the connector version stays `doom-vizdoom-v2`, and real-ViZDoom tests show paced step results identical to the default settings.

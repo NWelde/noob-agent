@@ -8,6 +8,7 @@ service or reads a credential from the environment.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import sqlite3
@@ -394,6 +395,30 @@ async def test_a_failing_provider_call_is_recorded_with_its_error_and_still_rais
     assert (record.finish_reason, record.input_tokens, record.output_tokens) == (None, None, None)
     assert record.model_id == "fake-model"
     assert record.latency_ms == 42
+
+
+async def test_a_cancelled_provider_call_is_recorded_before_cancellation_propagates(
+    store: EpisodeStore, experiment: ExperimentRecord, episode: EpisodeRecord
+) -> None:
+    store.create_experiment(experiment)
+    store.create_episode(episode)
+
+    class CancelledClient:
+        provider = "fake-provider"
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            del request
+            raise asyncio.CancelledError
+
+    recorder = _builder_recorder(store, CancelledClient())
+
+    with pytest.raises(asyncio.CancelledError):
+        await recorder.complete(BUILD_REQUEST)
+
+    (record,) = store.read_model_calls()
+    assert record.error is not None and "CancelledError" in record.error
+    assert record.response_text is None
+    assert (record.finish_reason, record.input_tokens, record.output_tokens) == (None, None, None)
 
 
 def _completion(

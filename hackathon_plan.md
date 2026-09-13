@@ -1976,6 +1976,102 @@ removes the script and its documentation. Reverting 19a removes the two
 settings, and the connector again always runs headless and unpaced. Neither
 step changes stored data, so no database cleanup is needed.
 
+## 20. Approved non-benchmark milestone: live Doom learning demo
+
+This section records the requester's approval on 2026-09-12 for a person to
+watch the real Action agent control Doom while the existing learning sequence
+runs. The demo is intentionally separate from benchmark evidence: it opens a
+visible real-time ViZDoom window, uses a 600-second whole-run deadline, and is
+therefore not comparable with the frozen headless evaluation protocol.
+
+### Scope and behavior
+
+- Extend `scripts/run_doom_learning_sequence.py` with an explicit
+  `--live-demo` mode. The normal command and all defaults remain unchanged.
+- Live-demo mode constructs every Doom connector with
+  `DoomSettings(window_visible=True, realtime=True)`, so training and any
+  held-out episode are visible and paced at Doom's native tick rate. The
+  window may close while the Builder is authoring and reopen for a held-out
+  episode because Builder work does not control a game.
+- The mode runs the same cold-training, Builder, validation, and conditional
+  held-out sequence already implemented. It does not change prompts, tools,
+  scenario seeds, output-token settings, skill policy, grading, or the
+  per-episode decision and primitive limits.
+- The complete sequence has a 600-second monotonic deadline. At the deadline,
+  the active task is cancelled, the connector is closed, any open episode is
+  finalized as an interrupted/unknown result, the cancelled model call is
+  recorded as an error when applicable, and Weave is flushed before exit.
+- The terminal banner, JSON result, experiment condition, sequence ID, and
+  default database name all carry `non-benchmark-live-demo`. A normal
+  benchmark run can never be mistaken for this demonstration.
+- Tracing remains opt-in through the existing environment settings. When
+  enabled, the demo uses the existing persisted Model call records and nested
+  Weave trace sink, including prompt, reply, reasoning, finish reason, usage,
+  and latency. No credential is printed or recorded.
+- The live-demo database is separate and Git-ignored. The script refuses a
+  non-positive deadline and refuses `--live-demo` when no graphical display is
+  available.
+
+### Tests and acceptance
+
+- Tests first cover unchanged normal defaults, visible/realtime connector
+  construction only in live-demo mode, the non-benchmark labels and separate
+  database, the 600-second deadline, invalid deadline/display refusals, trace
+  flushing on success and timeout, cancellation-safe Model call recording,
+  and durable finalization of an interrupted episode.
+- Validation: focused live-demo, Model call, and episode-runner tests, followed
+  by the full test suite, Ruff, and strict mypy. A manual run uses the existing
+  configured W&B model and Weave project with the labeled local skill sandbox.
+- Acceptance: the requester sees the model-controlled Doom window live; can
+  inspect Action and Builder reasoning in Weave as calls finish; the process
+  cannot run beyond the 600-second deadline except for bounded cleanup; every
+  completed or interrupted episode remains readable; and neither the ordinary
+  learning-sequence command nor benchmark records change.
+
+### Rollback
+
+Reverting this milestone removes live-demo mode and its cancellation-specific
+durability handling. Existing databases remain readable because there is no
+schema change. The display and replay features from section 19 remain intact.
+
+### One-run high-token loop diagnostic
+
+The requester approved one additional non-benchmark live run on 2026-09-12 to
+test whether truncation is preventing the complete learning loop. This run may
+override the existing per-call defaults with
+`NOOB_AGENT_ACTION_MAX_OUTPUT_TOKENS=2000` and
+`NOOB_AGENT_BUILDER_MAX_OUTPUT_TOKENS=8000`, the maximum values already
+validated by `ModelSettings`. It keeps the same model, prompts, scenarios,
+decision and primitive limits, visible real-time connector, 600-second overall
+deadline, local skill sandbox label, separate database, and Weave tracing.
+
+This is a paid diagnostic and not benchmark evidence. Success means the Action
+agent completes training, the Builder authors a valid accepted skill, and the
+existing sequence automatically exercises that skill across all six held-out
+cells before the deadline. Model behavior is not forced or scripted: failure,
+truncation, validation rejection, or deadline termination is recorded and
+reported as observed. No code or persistent environment setting changes for
+this diagnostic.
+
+### Live window continuity during Builder work
+
+After watching the first two live demos, the requester approved keeping the
+training window open while the Builder authors a skill. In `--live-demo` mode,
+the training connector retains ownership of its ViZDoom instance after the
+episode finishes; the game simulation stays paused on the final training frame
+while the Builder reasons. The instance closes after Builder completion or
+failure, immediately before any fresh held-out connector opens. A whole-run
+deadline or other exception also closes it without replacing the original
+error.
+
+This changes no game state, Builder evidence, prompt, model setting, budget,
+trace, grade, connector result, or normal evaluation lifecycle. `EpisodeRunner`
+gains an explicit opt-out from its default close-on-finish ownership, and
+`LearningSequence` uses that opt-out only when the live-demo runner requests
+window continuity. Tests prove the default still closes, the Builder observes
+the training connector as open only in continuity mode, and every success,
+failure, or cancellation path ultimately closes it.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)

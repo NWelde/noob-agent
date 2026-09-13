@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -496,6 +497,65 @@ async def test_a_failing_close_surfaces_when_nothing_else_went_wrong(
 
     with pytest.raises(RuntimeError, match="teardown failed"):
         await run_episode(prepared_store, connector, ScriptedPolicy(), clock)
+
+
+async def test_an_explicit_external_owner_can_keep_the_connector_open(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    connector = ScriptedConnector(
+        ScriptedStep(terminal=True, terminal_reason="goal_reached")
+    )
+    runner = EpisodeRunner(
+        connector=connector,
+        store=prepared_store,
+        policy=ScriptedPolicy(),
+        clock=clock,
+        close_connector=False,
+    )
+
+    result = await runner.run(
+        experiment=make_experiment(), scenario_id=SCENARIO_ID, seed=7
+    )
+
+    assert result.stop_reason == "terminal_state"
+    assert connector.closed is False
+    await connector.close()
+
+
+async def test_cancellation_finalizes_an_open_episode_before_it_propagates(
+    prepared_store: EpisodeStore, clock: FakeClock
+) -> None:
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    class BlockingPolicy:
+        async def choose(self, observation: object) -> ToolRequest:
+            del observation
+            started.set()
+            await never.wait()
+            raise AssertionError("the blocking policy unexpectedly resumed")
+
+    connector = ScriptedConnector(episode_id="ep_cancelled")
+    runner = EpisodeRunner(
+        connector=connector,
+        store=prepared_store,
+        policy=BlockingPolicy(),
+        clock=clock,
+    )
+    task = asyncio.create_task(
+        runner.run(experiment=make_experiment(), scenario_id=SCENARIO_ID, seed=7)
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    stored = prepared_store.read_episode("ep_cancelled")
+    assert stored.outcome is not None
+    assert stored.outcome.stop_reason == "unknown_result"
+    assert (stored.outcome.total_decisions, stored.outcome.total_primitives) == (0, 0)
+    assert connector.closed is True
 
 
 class RecordingTraceSink:
