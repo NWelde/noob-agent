@@ -2,6 +2,9 @@
 requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["/src/noob_agent/connectors/minecraft_sidecar/node_modules"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/noob_agent"]
 
