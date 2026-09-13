@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 21:52 PDT | [ADDED] | Added the independent Doom grader for build-order step 8b: a private outcome pinned to its episode, a grade decided only after a finished Doom episode from kills and player death alone, refusal of mismatched or foreign-game episodes, and a scripted center-and-fire oracle that solves every precommitted held-out cell within the frozen 12-decision, 24-primitive budget.
+
 2026-09-12 21:46 PDT | [FIXED] | A rejected Doom request now advances the public sequence like any other durable result, so the episode runner records it as a step instead of ending the episode on a sequence mismatch.
 
 2026-09-12 21:46 PDT | [ADDED] | Added Doom connector `doom-vizdoom-v2` for build-order step 8a: declared training and held-out `basic.cfg` scenarios with repeatable reset-time starting offsets, precommitted seeds in `scenarios/doom/basic-v1/manifest.json`, the public target-elimination goal, a bounded `screen_offset` aiming property on visible objects without the player's own label, seed-free episode IDs, and a harness-only private outcome for kills, death, and timeout.
