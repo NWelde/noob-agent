@@ -176,3 +176,35 @@ step 8a:
   any other durable result, and charges no primitive.
 
 Verify with `uv run pytest tests/test_connectors_doom.py -v`.
+
+## Watching a recorded episode
+
+`scripts/replay_doom_episode.py` (`hackathon_plan.md` §19, step 19b) replays a
+recorded Doom episode in a visible ViZDoom window. It resets the recorded
+scenario with the recorded seed, sends the recorded requests, and checks every
+result against the record, ignoring only the per-reset episode ID and host wall
+time. It stops at the first step that differs and exits 1, so a diverged replay
+is never shown as the agent's play. It is labeled as a replay, reads only a
+temporary copy of the database, and never calls a model, the Builder, a grader,
+or a skill executor.
+
+List the Doom episodes in a database:
+
+```sh
+uv run python scripts/replay_doom_episode.py --database .noob-agent/doom-learning-live.sqlite3
+```
+
+Watch one. The window paces actions at 35 ticks per second and pauses
+`--step-pause-seconds` (default 0.5) after each step, including rejected ones:
+
+```sh
+uv run python scripts/replay_doom_episode.py \
+  --database .noob-agent/doom-learning-live.sqlite3 \
+  --episode-id doom-basic-training-2716044773193143
+```
+
+Add `--headless` to check a replay without a display. The script refuses (exit
+2) a missing database or episode, a non-Doom episode, and an episode recorded
+with a connector version other than the current one. A replay also depends on
+the ViZDoom build and bundled scenario files matching the recording, which the
+record does not store; a difference shows up as a mismatch.
