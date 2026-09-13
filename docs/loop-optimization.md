@@ -66,6 +66,7 @@ Observations:
 | 22.A native tool calls (superseded) | `loop-bench-22a` | 0/100 | 634 | 0/5 | 5/5 | 50 | 71,133 (training Action tokens over ceiling) |
 | 22.A trimmed tool calls (superseded) | `loop-bench-22a-r2` | 0/100 | 620 | 0/5 | 5/5 | 47 | 53,360 (training Action tokens over ceiling) |
 | 22.A JSON-schema decisions | `loop-bench-22a-r3` | 0/100 | 561 | 0/5 | 5/5 | 45 | 32,251 (no ceiling exceeded) |
+| 22.B grounded Builder, thinking off | `loop-bench-22b` (stopped after 1 of 5 sequences) | 0/20 | 528 | 0/1 | 0/2 | 23 | 31,169 (no ceiling exceeded) |
 
 22.A runs use Action thinking off and Builder thinking at the provider default
 (on), so every build still ends at its 6,000-token cap and no skill is accepted.
@@ -73,3 +74,10 @@ Step 22.B turns Builder thinking off. Median Action input was 3,156 tokens with
 native tools, 2,273 after trimming, and 1,188 with the JSON schema. In the last
 run the model chose `attack` 61 times, `turn_right` 23, `turn_left` 7, `observe`
 7, and `move_forward` 2; the baseline almost never turned.
+
+In `loop-bench-22b` the first build used the real API, took 2.1 s and 550 output
+tokens, and was rejected because it claimed success in the missing-target
+negative case. The repair fixed exactly that check in 2.2 s and 546 tokens, but
+renamed the skill in its metadata. The registry refused a repair whose parent
+has a different name and raised `UnknownSkillVersionError`, which ended the
+bench. Step 22.C makes a renamed repair a public rejection instead of a crash.

@@ -31,6 +31,7 @@ from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient, ModelRequest
 from noob_agent.prompts.builder import (
     BUILDER_SYSTEM,
+    DEFAULT_BUILD_MAX_OUTPUT_TOKENS,
     render_builder_prompt,
     render_repair_prompt,
 )
@@ -39,7 +40,7 @@ from noob_agent.skills.executor import SkillExecutor
 from noob_agent.skills.registry import SkillRegistry
 from noob_agent.verification.validator import SkillValidationReport, validate_candidate
 
-DEFAULT_MAX_OUTPUT_TOKENS = 2048
+DEFAULT_MAX_OUTPUT_TOKENS = DEFAULT_BUILD_MAX_OUTPUT_TOKENS
 
 _PYTHON_BLOCK = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
 _JSON_BLOCK = re.compile(r"```json\s*\n(.*?)```", re.DOTALL)
@@ -135,6 +136,7 @@ class BuilderAgent:
         executor: SkillExecutor,
         max_repairs: int = 1,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        thinking: bool | None = None,
     ) -> None:
         if max_repairs < 0:
             raise ValueError("max_repairs cannot be negative.")
@@ -143,6 +145,7 @@ class BuilderAgent:
         self._executor = executor
         self._max_repairs = max_repairs
         self._max_output_tokens = max_output_tokens
+        self._thinking = thinking
 
     async def build(
         self,
@@ -155,7 +158,9 @@ class BuilderAgent:
     ) -> BuilderOutcome:
         """Author, record, and validate one candidate, repairing it while budget lasts."""
         names = tuple(primitive_names)
-        prompt = render_builder_prompt(evidence, primitive_names=names)
+        prompt = render_builder_prompt(
+            evidence, primitive_names=names, tools=training_trace.episode.manifest.tools
+        )
         usage: list[ModelUsage] = []
         parent_version: int | None = None
         attempts = 0
@@ -167,6 +172,7 @@ class BuilderAgent:
                     system=BUILDER_SYSTEM,
                     prompt=prompt,
                     max_output_tokens=self._max_output_tokens,
+                    thinking=self._thinking,
                 )
             )
             usage.append(

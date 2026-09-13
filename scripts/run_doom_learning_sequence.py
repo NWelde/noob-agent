@@ -283,6 +283,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                 action_max_output_tokens=settings.model.action_max_output_tokens,
                 builder_max_output_tokens=settings.model.builder_max_output_tokens,
                 action_thinking=settings.model.action_thinking,
+                builder_thinking=settings.model.builder_thinking,
                 condition=_condition_for(args),
                 persistent_connector=args.live_demo,
             )
