@@ -120,10 +120,11 @@ observation. The BDP scenario is the connector issue's decision.
 | First `init()` takes ~12s | Cold start only, typically the first scan of a new binary. Later inits are under a second. |
 | `pip` tries to build from source | The interpreter is outside 3.9–3.14, or the platform has no wheel. Use a supported Python. |
 
-## Next
+## Connector
 
-The `DoomConnector` implementation (`src/noob_agent/connectors/doom.py`) is out
-of scope here and is gated by the core-loop rules in
-[`CLAUDE.md`](../CLAUDE.md) and [`AGENTS.md`](../AGENTS.md). When it is taken up,
-it will need the three behaviors above, a decision on the BDP scenario, and
-ViZDoom added to `pyproject.toml` as a dependency of the game layer.
+`src/noob_agent/connectors/doom.py` implements the ten declared Doom BDP
+primitives against the included `basic.cfg` scenario. It uses the one-tick,
+signed delta behavior above for turns; emits only HUD health/ammunition, player
+angle, and visible object labels; and is exercised by
+`uv run pytest tests/test_connectors_doom.py -v`. ViZDoom is now a declared
+runtime dependency because the connector imports it when a game starts.
