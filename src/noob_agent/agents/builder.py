@@ -5,8 +5,8 @@ section 7.2, steps 4-8). The ordering matters more than it looks:
 
 1. The candidate is recorded in the registry as `proposed` *before* it is
    validated, so a rejected attempt stays visible instead of disappearing.
-2. Validation is the existing non-executing package and static-policy check.
-   Nothing here imports, compiles, or runs candidate source.
+2. Validation executes the candidate only through the configured isolated
+   executor against public replay, negative-case, and variation fixtures.
 3. A rejection produces a *new* version carrying `parent_version`, never an
    edit of the rejected record, and the repair budget is small and finite.
 
@@ -25,6 +25,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from noob_agent.agents.evidence import TraceEvidence
+from noob_agent.domain.records import StoredEpisode
 from noob_agent.domain.skills import SkillPackage as RegistryPackage
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient, ModelRequest
@@ -34,8 +35,9 @@ from noob_agent.prompts.builder import (
     render_repair_prompt,
 )
 from noob_agent.skills.errors import SkillValidationError, SkillValidationIssue
-from noob_agent.skills.package import validate_skill_package
+from noob_agent.skills.executor import SkillExecutor
 from noob_agent.skills.registry import SkillRegistry
+from noob_agent.verification.validator import SkillValidationReport, validate_candidate
 
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
 
@@ -76,6 +78,7 @@ class BuilderOutcome(BaseModel):
     stop_reason: BuilderStopReason
     attempts: int = Field(ge=1)
     version: SkillVersion | None = None
+    validation: SkillValidationReport | None = None
     usage: tuple[ModelUsage, ...] = ()
 
 
@@ -129,6 +132,7 @@ class BuilderAgent:
         client: ModelClient,
         registry: SkillRegistry,
         *,
+        executor: SkillExecutor,
         max_repairs: int = 1,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> None:
@@ -136,6 +140,7 @@ class BuilderAgent:
             raise ValueError("max_repairs cannot be negative.")
         self._client = client
         self._registry = registry
+        self._executor = executor
         self._max_repairs = max_repairs
         self._max_output_tokens = max_output_tokens
 
@@ -143,6 +148,7 @@ class BuilderAgent:
         self,
         evidence: TraceEvidence,
         *,
+        training_trace: StoredEpisode,
         primitive_names: Iterable[str],
         authoring_model_id: str,
         created_at: datetime,
@@ -199,10 +205,12 @@ class BuilderAgent:
             )
 
             try:
-                validate_skill_package(
+                validation = await validate_candidate(
                     candidate.source,
                     candidate.metadata_json,
                     known_primitive_names=names,
+                    training_trace=training_trace,
+                    executor=self._executor,
                 )
             except SkillValidationError as error:
                 issues = tuple(error.issues)
@@ -223,12 +231,13 @@ class BuilderAgent:
             accepted = self._registry.accept(
                 candidate.name,
                 recorded.version,
-                reason="Package check and static policy check passed.",
+                reason="All mandatory isolated validation checks passed.",
             )
             return BuilderOutcome(
                 accepted=True,
                 stop_reason="accepted",
                 attempts=attempts,
                 version=accepted,
+                validation=validation,
                 usage=tuple(usage),
             )
