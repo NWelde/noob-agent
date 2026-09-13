@@ -2638,6 +2638,23 @@ never worked around by changing budgets, seeds, or grading.
   score never decreases between kept versions, and the scorecard reports the
   practice-grade agreement rate and held-out results next to cold results on
   the same seeds.
+- **Implementation details (2026-09-13).**
+  - The registry now also accepts an *accepted* version as a parent, for a
+    refinement. `skill_contract.md` states the refinement lineage.
+  - `BuilderAgent.refine` stops at `validated`, and the loop then accepts or
+    rejects the version.
+  - `HeldOutRunner` takes an explicit offering and split, so a validated
+    refinement can play practice before acceptance.
+  - `LearningSequence` exposes its training, Builder, and cell helpers.
+  - The validator no longer rejects a no-input skill for succeeding in the
+    invalid-input case when no invalid input exists; this bug surfaced while
+    building the loop.
+  - A refinement call is recorded with purpose `build`, because each Builder
+    recorder labels its first call a build.
+  - The file list also includes `skills/registry.py`, `agents/builder.py`,
+    `runtime/heldout.py`, `runtime/sequence.py`,
+    `verification/validator.py`, `observability/loop_scorecard.py`, and
+    `skill_contract.md`.
 
 ### Step 22.G - Minecraft confirmation
 
