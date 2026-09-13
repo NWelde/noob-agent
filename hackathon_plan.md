@@ -1161,6 +1161,115 @@ comparison runner (build-order steps 4-10) are out of scope here.
 - Acceptance: BDP criteria 5-6 (one skill produced; sandbox or local fallback
   accepts or rejects it via automated checks).
 
+## 14. Approved core-loop milestone: build-order steps 4-6
+
+This section is the explicit approval required by `CLAUDE.md` and `AGENTS.md`
+before touching protected core-loop interfaces. It extends section 13 to cover
+exactly build-order steps 4-6 from section 10: a Builder-generated candidate
+replacing the hand-written skill, a held-out reset with successful skill reuse,
+and a matched clean/faulty pair with independent reproduction. Tracked as
+GitHub issues #22, #23, and #24.
+
+It authorizes touching the Builder agent, the Action agent, the model-provider
+seam, the generated-skill runtime, the private grader, the held-out evaluation
+path, and the storage schema where findings and reproductions must be recorded.
+It does not authorize touching the comparison runner or the report-generation
+path (build-order step 9), the connector contract, the budgets and stop rules,
+the evaluation prompts, or the held-out scenario contents; section 7.3 holds
+those fixed. The ViZDoom connector (step 7) and the Doom sequence (step 8)
+remain out of scope here.
+
+### Prerequisites
+
+- **A configured model provider.** `NOOB_AGENT_MODEL_PROVIDER` defaults to
+  `disabled` and there is no `.env`. Step 4 is defined by a model writing the
+  skill, so the automated tests run against a deterministic fake provider and
+  one live run is a manual validation step. No test may require credentials or
+  a network call.
+- **The skill-runtime milestone below**, which is what permits executing a
+  generated candidate at all.
+
+### Skill-runtime milestone: executing a generated candidate
+
+Section 10 states that the sandbox seam "does not execute generated code until
+the approved skill-runtime milestone." This is that approval, and it is narrow.
+
+- Candidate code is executed only through `SandboxExecutor`. The harness never
+  imports, `exec`s, or otherwise loads a candidate into its own process.
+- `DisabledSandboxExecutor` remains the default. Execution happens only when a
+  sandbox mode is explicitly configured.
+- A candidate is recorded in the registry as `proposed` before any execution is
+  attempted, so a rejected attempt stays visible (section 7.2, step 6).
+- Execution sits behind the package and static-policy checks that already
+  reject forbidden imports and constructs. A candidate failing those is never
+  executed.
+- When CoreWeave Sandbox is unavailable, the local fallback is a restricted
+  subprocess and must be labeled as weaker isolation wherever a result is
+  reported, per section 6.5.
+
+### Step 4 - Builder-generated candidate (#22)
+
+- Files: new `src/noob_agent/models/client.py` (provider-neutral model client
+  over the existing `settings.py` seam); new
+  `src/noob_agent/agents/evidence.py` (bounded public-trace selection from a
+  recorded episode); new `src/noob_agent/agents/builder.py`; new
+  `src/noob_agent/prompts/builder.py`. The candidate carries what section 6.4
+  requires: name, purpose, required inputs, connector calls, a visible success
+  check, expected changes, failure results, and bounded recovery.
+- Tests first: `tests/test_builder_agent.py` - a fake provider yields a
+  deterministic candidate; the candidate is recorded `proposed` before
+  validation runs; a rejection produces a repair carrying `parent_version`
+  while the rejected record is unchanged; the repair budget is finite and
+  exhausting it ends the loop with a recorded reason; the Builder's evidence
+  never carries private grader state, held-out data, or clean/faulty identity.
+- Validation: `uv run pytest tests/test_builder_agent.py -v` against the fake
+  provider; manual: one live run once a provider is configured.
+- Acceptance: BDP criteria 5-7 (the Builder produces one skill from the trace,
+  automated checks accept or reject it, an accepted skill reaches the next
+  Action agent's tool list).
+
+### Step 5 - Held-out reset and skill reuse (#23)
+
+- Files: new `src/noob_agent/agents/action.py`; new
+  `src/noob_agent/skills/runtime.py` (invoke an accepted skill, recording and
+  charging every nested primitive per `connector_contract.md`); new
+  `src/noob_agent/runtime/heldout.py`; new `src/noob_agent/prompts/action.py`.
+  The evaluation prompt is fixed across compared models once written.
+- Tests first: `tests/test_heldout_episode.py` and
+  `tests/test_skill_runtime.py` - an accepted skill appears in the tool list
+  and proposed, rejected, and retired versions do not; nested primitives are
+  recorded and charged; reset clears the model conversation so no prior-episode
+  content survives; a skill cannot call another generated skill; budgets still
+  stop the episode with a recorded stop reason when a skill is in play; a
+  held-out scenario is never handed to validation.
+- Validation: `uv run pytest tests/test_heldout_episode.py
+  tests/test_skill_runtime.py -v` against the fake connector; manual: one
+  held-out run against the local server per `docs/minecraft-server.md`.
+- Acceptance: BDP criteria 7-8 (accepted skill in the tool list; a fresh
+  held-out variation uses it successfully).
+
+### Step 6 - Clean/faulty pair and independent reproduction (#24)
+
+- Files: new `src/noob_agent/domain/findings.py` (`Finding` and `Reproduction`
+  records per section 9); new `src/noob_agent/grading/grader.py`; new
+  `src/noob_agent/grading/reproduction.py`; extend
+  `src/noob_agent/storage/schema.py` and `repository.py` to persist findings
+  and reproductions. This schema extension is approved here: it adds tables and
+  raises `SCHEMA_VERSION`, and the pull request must state how an existing
+  database at the previous version is handled.
+- Tests first: `tests/test_grader.py` and `tests/test_reproduction.py` - a
+  claimed defect with no private predicate hit is rejected however confidently
+  it was reported; a defect present in the faulty variation and absent in the
+  matched clean twin is confirmed; a defect that also fires in the clean twin
+  is rejected as normal behavior; a failed reproduction records the first
+  mismatch; no grader predicate, private state, or clean/faulty label ever
+  reaches a prompt or a public record; `scenario_id` never encodes clean or
+  faulty identity.
+- Validation: `uv run pytest tests/test_grader.py tests/test_reproduction.py
+  -v`; manual: one clean/faulty pair run against the local server.
+- Acceptance: BDP criteria 9-10 (a matched faulty variation produces a
+  candidate defect; a fresh reset independently reproduces or rejects it).
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
