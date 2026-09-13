@@ -2636,6 +2636,102 @@ column unused and readable. Reverting 22.D removes the multi-round condition
 and its protocol amendment while leaving `basic-v1` and every single-pass result
 intact. Bench databases are Git-ignored.
 
+## 23. Approved non-benchmark milestone: persistent game and live Weave reasoning view
+
+The requester approved this milestone on 2026-09-13 to strengthen the Best Use
+of Weave demonstration: "Lets use the weave trace to show model reasoning in
+real time alongside the game" and "Make the game not quit everytime it needs to
+do something new. It should be able to persist."
+
+### Evidence
+
+- In `--live-demo`, every episode builds a new `DoomConnector` from the factory,
+  so a fresh ViZDoom window opens for training and for each held-out cell. The
+  section 20 continuity change keeps only the training window open during
+  Builder work.
+- `DoomConnector.reset` already reuses its ViZDoom instance with `set_seed` and
+  `new_episode`, gives each episode a unique ID, and resets its private outcome.
+  Only the sequence's connector ownership forces a new window.
+- Every Action model call, step, and episode is already mirrored to Weave as
+  nested `noob_agent.*` calls. Since step 22.A each Action reply is a JSON object
+  carrying `subgoal`, `expected_evidence`, `action`, and `arguments`. Weave 0.53.9
+  serves incremental queries on call inputs and start time.
+
+### What this approves
+
+- A `persistent_connector` option on `LearningSequence` and the held-out runner.
+  One connector is created for the whole sequence and reset for every episode:
+  training, the Builder pause, and every held-out cell. It closes once at the end,
+  including on error or cancellation. `--live-demo` always uses it, replacing the
+  section 20 training-window continuity flag.
+- A stdlib-only local web view, `scripts/live_reasoning_view.py`, that reads the
+  run's calls from Weave, never from SQLite. It shows each Action decision's
+  subgoal, expected evidence, action, arguments, result, latency, and tokens as
+  they arrive; any provider reasoning; each Builder call's finish reason and
+  code; episode outcomes; and a link to each call in the Weave UI.
+- `--live-view` on `--live-demo`, which starts the view as a child process for
+  the run's sequence ID, prints its local URL, and stops it after the final
+  trace flush.
+
+It does not approve changing what any model, connector, grader, or budget sees
+or computes. The view is display only, and persistence changes no observation,
+reset, or step result. Concurrent held-out cells (step 22.E) are not allowed
+with a persistent connector.
+
+### Step 23a - Persistent game across a sequence
+
+- Files: `src/noob_agent/runtime/sequence.py`, `src/noob_agent/runtime/heldout.py`,
+  `scripts/run_doom_learning_sequence.py`, `tests/test_learning_sequence.py`,
+  `tests/test_doom_live_demo.py`, `tests/test_connectors_doom.py`,
+  `docs/doom-env.md`, `CHANGELOG.md`.
+- Tests first:
+  - With `persistent_connector`, the factory is called once, every episode
+    resets that one connector, every episode gets its own ID and grade, and the
+    connector closes exactly once after the last held-out episode.
+  - It also closes once when the Builder raises and when the sequence is
+    cancelled.
+  - The default still creates and closes one connector per episode.
+  - With real ViZDoom, headless, a reset after a finished episode yields the same
+    observation (apart from the episode ID) and the same step results as a reset
+    on a fresh connector with the same scenario and seed.
+  - `--live-demo` constructs the sequence with `persistent_connector=True`.
+- Acceptance: a live demo keeps one Doom window open from training through the
+  last held-out cell.
+
+### Step 23b - Live Weave reasoning view
+
+- Files: new `scripts/live_reasoning_view.py`, new
+  `tests/test_live_reasoning_view.py`, `scripts/run_doom_learning_sequence.py`,
+  `tests/test_doom_live_demo.py`, `docs/doom-env.md`, `CHANGELOG.md`.
+- Behavior:
+  - `uv run --env-file .env python scripts/live_reasoning_view.py --run-id
+    <sequence-id> [--port 8765]` polls Weave about once a second for new calls
+    whose `experiment_id` or `episode_id` belongs to the run, and serves a page
+    and a JSON event feed on `127.0.0.1`.
+  - The page updates without reloading. It shows the current episode and its
+    latest decision prominently, then a timeline, a Builder panel, and episode
+    outcomes.
+  - A Weave read error keeps the last good events and retries. No prompt text or
+    credential is served.
+- Tests first, with a stand-in Weave client:
+  - events are built from episode, step, Action, Build, and Repair calls;
+  - other runs are excluded;
+  - repeated polls add no duplicates;
+  - structured decision fields and Builder code are extracted;
+  - a read error keeps the last events;
+  - the HTTP server serves the page and the feed;
+  - the served feed carries no prompt or system text;
+  - `--live-view` starts and stops the child process and is refused without
+    `--live-demo` or with tracing disabled.
+- Acceptance: during a live demo, the view beside the Doom window shows each
+  decision from Weave while the game plays.
+
+### Rollback
+
+Each step reverts alone. Reverting 23a restores a new window per episode;
+reverting 23b removes the view. Neither changes the schema or any recorded
+value.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)

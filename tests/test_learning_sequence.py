@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import itertools
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 from fakes.connector import FakeClock, ScriptedConnector, ScriptedStep
 
+from noob_agent.domain.model import Observation
 from noob_agent.domain.records import StoredEpisode
 from noob_agent.models.client import ModelRequest, ModelResponse
 from noob_agent.prompts.builder import BUILDER_SYSTEM
@@ -290,76 +292,161 @@ async def test_a_non_benchmark_condition_labels_both_experiments(store: EpisodeS
     assert result.heldout_experiment.condition == "non-benchmark-live-demo"
 
 
-async def test_live_demo_keeps_training_open_for_builder_then_closes_before_heldout(
+class PersistentConnector(ScriptedConnector):
+    """One scripted game reused for every episode, with a fresh episode ID per reset."""
+
+    def __init__(self, *script: ScriptedStep) -> None:
+        super().__init__(*script)
+        self.close_calls = 0
+        self._resets = itertools.count(1)
+
+    async def reset(self, scenario_id: str, seed: int) -> Observation:
+        self._episode_id = f"ep_persistent_{next(self._resets):04d}"
+        return await super().reset(scenario_id, seed)
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        await super().close()
+
+
+class OneConnectorFactory:
+    def __init__(self, connector: PersistentConnector) -> None:
+        self.connector = connector
+        self.calls = 0
+
+    def __call__(self) -> PersistentConnector:
+        self.calls += 1
+        return self.connector
+
+
+def _persistent_script() -> PersistentConnector:
+    # Training: one observe, then a terminal step. Each held-out cell: one terminal step.
+    return PersistentConnector(
+        ScriptedStep(),
+        ScriptedStep(terminal=True, terminal_reason="done"),
+        *(ScriptedStep(terminal=True, terminal_reason="done") for _ in HELDOUT_CELLS),
+    )
+
+
+def _persistent_sequence(
     store: EpisodeStore,
-) -> None:
-    class ContinuityFactory(ConnectorFactory):
-        def __call__(self) -> ScriptedConnector:
-            if self.created:
-                assert self.created[0].closed is True
-            return super().__call__()
-
-    factory = ContinuityFactory()
-
-    class CheckingClient(RoutingModelClient):
-        async def complete(self, request: ModelRequest) -> ModelResponse:
-            if request.system == BUILDER_SYSTEM:
-                assert factory.created[0].closed is False
-            return await super().complete(request)
-
-    sequence = LearningSequence(
+    client: RoutingModelClient,
+    factory: OneConnectorFactory,
+    grade_calls: list[GradeCall],
+) -> LearningSequence[PersistentConnector, str]:
+    return LearningSequence(
         connector_factory=factory,
-        client=CheckingClient(ACCEPTABLE_CANDIDATE),
+        client=client,
         model_id="fake-model",
         store=store,
         registry=SkillRegistry(),
         executor=LocalSubprocessSkillExecutor(),
-        grade=recording_grader([]),
+        grade=recording_grader(grade_calls),
         clock=FakeClock(wall=STARTED_AT),
-        keep_training_connector_open_during_builder=True,
+        persistent_connector=True,
     )
 
-    await sequence.run(
-        sequence_id="live-window-seq",
+
+async def test_a_persistent_connector_is_reset_for_every_episode_and_closed_once(
+    store: EpisodeStore,
+) -> None:
+    connector = _persistent_script()
+    factory = OneConnectorFactory(connector)
+    grade_calls: list[GradeCall] = []
+
+    class CheckingClient(RoutingModelClient):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            assert connector.close_calls == 0
+            return await super().complete(request)
+
+    result = await _persistent_sequence(
+        store, CheckingClient(ACCEPTABLE_CANDIDATE), factory, grade_calls
+    ).run(
+        sequence_id="persistent-seq",
         training_scenario_id=TRAINING,
         training_seed=7,
         heldout=HELDOUT_CELLS,
     )
 
-    assert all(connector.closed for connector in factory.created)
+    assert factory.calls == 1
+    assert connector.reset_calls == [
+        (TRAINING, 7),
+        *((c.scenario_id, c.seed) for c in HELDOUT_CELLS),
+    ]
+    episode_ids = [result.training.episode_id, *(e.episode_id for e in result.heldout)]
+    assert len(set(episode_ids)) == 1 + len(HELDOUT_CELLS)
+    # Every grade is taken while the game is still open, before the next reset.
+    assert [call[0] for call in grade_calls] == episode_ids
+    assert all(call[1] and not call[2] for call in grade_calls)
+    assert connector.close_calls == 1
 
 
-async def test_live_demo_closes_training_when_builder_fails(store: EpisodeStore) -> None:
-    factory = ConnectorFactory()
+async def test_a_persistent_connector_closes_once_when_the_builder_fails(
+    store: EpisodeStore,
+) -> None:
+    connector = _persistent_script()
 
     class FailingBuilderClient(RoutingModelClient):
         async def complete(self, request: ModelRequest) -> ModelResponse:
             if request.system == BUILDER_SYSTEM:
-                assert factory.created[0].closed is False
+                assert connector.close_calls == 0
                 raise ConnectionError("builder unavailable")
             return await super().complete(request)
 
-    sequence = LearningSequence(
-        connector_factory=factory,
-        client=FailingBuilderClient(),
-        model_id="fake-model",
-        store=store,
-        registry=SkillRegistry(),
-        executor=LocalSubprocessSkillExecutor(),
-        grade=recording_grader([]),
-        clock=FakeClock(wall=STARTED_AT),
-        keep_training_connector_open_during_builder=True,
-    )
-
     with pytest.raises(ConnectionError, match="builder unavailable"):
-        await sequence.run(
-            sequence_id="live-window-failure",
+        await _persistent_sequence(
+            store, FailingBuilderClient(), OneConnectorFactory(connector), []
+        ).run(
+            sequence_id="persistent-failure",
             training_scenario_id=TRAINING,
             training_seed=7,
             heldout=HELDOUT_CELLS,
         )
 
-    assert factory.created[0].closed is True
+    assert connector.close_calls == 1
+
+
+async def test_a_persistent_connector_closes_once_when_the_sequence_is_cancelled(
+    store: EpisodeStore,
+) -> None:
+    connector = _persistent_script()
+
+    class BlockingBuilderClient(RoutingModelClient):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            if request.system == BUILDER_SYSTEM:
+                await asyncio.Event().wait()
+            return await super().complete(request)
+
+    task = asyncio.ensure_future(
+        _persistent_sequence(
+            store, BlockingBuilderClient(ACCEPTABLE_CANDIDATE), OneConnectorFactory(connector), []
+        ).run(
+            sequence_id="persistent-cancel",
+            training_scenario_id=TRAINING,
+            training_seed=7,
+            heldout=HELDOUT_CELLS,
+        )
+    )
+    while not connector.reset_calls or len(connector.requests) < 2:
+        await asyncio.sleep(0)
+    for _ in range(50):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert connector.close_calls == 1
+
+
+async def test_without_persistence_each_episode_gets_and_closes_its_own_connector(
+    store: EpisodeStore,
+) -> None:
+    factory = ConnectorFactory()
+
+    await run_sequence(store, RoutingModelClient(ACCEPTABLE_CANDIDATE), factory)
+
+    assert len(factory.created) == 1 + len(HELDOUT_CELLS)
+    assert all(connector.closed for connector in factory.created)
 
 
 @pytest.mark.parametrize(

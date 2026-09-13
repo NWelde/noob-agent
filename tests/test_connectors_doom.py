@@ -369,3 +369,38 @@ def test_agent_facing_code_never_references_the_doom_scenario_manifest() -> None
             text = source.read_text(encoding="utf-8")
             assert "scenarios/doom" not in text, source
             assert "manifest.json" not in text, source
+
+
+def _without_ids(result: StepResult) -> dict[str, object]:
+    dumped = result.model_dump(exclude={"wall_time_ms"})
+    dumped["observation"] = _without_episode_id(result.observation)
+    return dumped
+
+
+async def test_a_reused_connector_after_a_finished_episode_matches_a_fresh_one() -> None:
+    requests = (
+        ToolRequest(action_id="p1", tool_name="turn_left", arguments={"degrees": 10}),
+        ToolRequest(action_id="p2", tool_name="attack", arguments={"ticks": 4}),
+        ToolRequest(action_id="p3", tool_name="move_forward", arguments={"ticks": 6}),
+    )
+    reused = DoomConnector()
+    fresh = DoomConnector()
+    try:
+        await reused.reset(TRAINING, CENTERED_SEED)
+        await _center_and_fire(reused)
+        assert await reused.is_terminal()
+        finished_id = (await reused.reset(HELDOUT_B, SEED)).episode_id
+
+        again = await reused.reset(HELDOUT_B, SEED)
+        baseline = await fresh.reset(HELDOUT_B, SEED)
+        assert again.episode_id != finished_id
+        assert _without_episode_id(again) == _without_episode_id(baseline)
+        assert reused.private_outcome().kills == 0
+        assert reused.private_outcome().finished is False
+        for request in requests:
+            assert _without_ids(await reused.step(request)) == _without_ids(
+                await fresh.step(request)
+            )
+    finally:
+        await reused.close()
+        await fresh.close()
