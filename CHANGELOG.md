@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+2026-09-13 11:39 PDT | [ADDED] | Added a non-benchmark Minecraft easy-mode live diagnostic: a separate `easy-button-gate-v1` data pack where pressing a labelled nearby button visibly opens iron bars, with infinite Night Vision on every reset, and `scripts/run_minecraft_easy_live_smoke.py --live-easy-smoke`, which states the task as its public goal, ends on the room's public success message, reuses the existing `[noob:...]` chat transcript, has no wall-clock deadline, allows 32,000 Action and 100,000 Builder output tokens, and prints a compact labelled summary. The frozen manifest, connector, and benchmark budgets are unchanged.
+
+2026-09-13 11:22 PDT | [ADDED] | Made the non-benchmark first-person Minecraft smoke runner mirror each Action and Builder system prompt, prompt, reasoning, reply, and provider error into local Minecraft chat without changing the frozen agent tool surface or action accounting.
+
+2026-09-13 10:50 PDT | [FIXED] | Assigned unique bookkeeping seeds to every Minecraft smoke cycle and same-room reuse phase, preventing fresh connector reset IDs from colliding inside one run database while leaving the fixed training-room layout unchanged.
+
+2026-09-13 10:45 PDT | [FIXED] | Made the Minecraft live smoke loop build and iterate aggressively: each cold cycle now hands its trace to the Builder after at most 12 decisions, 24 primitives, or 90 seconds, with earlier stops after two stale-target failures or five unchanged actions; accepted skills get a same-room reuse attempt before a fresh cycle, while the 500-call, 2,000,000-token, 1,000-primitive, and 10-minute limits remain global.
+
+2026-09-13 10:29 PDT | [FIXED] | Made the real-server Minecraft smoke loop actionable: Action calls use a smoke-only 3,000-token cap, and an opt-in public-outcome tracker now ends stale-target loops after three `NO_VISIBLE_TARGET` results or no-progress runs after twelve unchanged actions, allowing the Builder to receive a bounded cold trace. Added `no_progress` as a durable episode stop reason without changing normal evaluation policies.
+
+2026-09-13 10:12 PDT | [ADDED] | Added a non-benchmark real-server Minecraft learning-loop smoke runner. It requires Weave tracing, drives the documented local Mineflayer/vanilla-server training room through repeated fresh cold, Builder-validation, and same-room skill-reuse sequences, and enforces a 600-second deadline, 2,000,000-token budget, 500 model-call budget, 1,000 delivered primitive actions per sequence, and five Builder repairs without changing evaluation defaults.
+
+2026-09-13 02:50 PDT | [ADDED] | Raised the explicitly non-benchmark Doom token-budget demo ceiling to 1,000,000 total tokens and its Builder default and maximum to 100,000 output tokens, preserving the existing one-call overshoot rule and all other demo constraints.
+
+2026-09-13 02:29 PDT | [ADDED] | Added mandatory isolated skill validation before registry acceptance: real load and API-contract checks, public training-trace replay through a fake connector, missing-target/failed/unknown/invalid-input/exhausted-budget cases, three-run repeatability, a generated object-ID variation, and public failure evidence for the Builder's bounded repair.
+
 2026-09-13 00:00 PDT | [ADDED] | Added the non-benchmark full-screen Doom token-budget demo loop, including a 500,000-token cap, 32,000-token Builder calls with up to three repairs, a 3,600-second safety deadline, and a Weave-derived Markdown transcript.
 
 2026-09-13 00:14 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 21, a non-benchmark token-budget Doom demo loop: `--live-demo --token-budget 500000` runs fresh learning sequences until the budget is spent, with demo-only Builder caps up to 32,000 output tokens and 3 repairs, a 3,600-second safety deadline, a full-screen display setting for the live demo and replay viewer, a `doom-demo-log.md` written live from the Weave trace, and one paid demo run, split into four reversible pull requests.
