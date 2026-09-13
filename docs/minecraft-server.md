@@ -18,7 +18,7 @@ logs, allowlist state, and generated scenario data are never committed.
 | Port | `25566` |
 | Client address | `localhost:25566` from Windows, subject to WSL localhost forwarding |
 | Authentication | Offline mode; no Microsoft or TLauncher credentials |
-| Agent player name | `NoobAgentBot` |
+| Agent player name | `noobagentbot` |
 | World name | `noob-agent-training` |
 
 The official download source was Mojang's version manifest and the official
@@ -64,11 +64,25 @@ At the Minecraft server console, add the human client and connector bot:
 
 ```text
 whitelist add <your-TLauncher-player-name>
-whitelist add NoobAgentBot
+whitelist add noobagentbot
 ```
 
-The bot does not need an account or secret. Do not add its name to `ops.json`
-unless a later approved connector requirement needs administrative commands.
+The bot does not need an account or secret. The approved step-1 connector uses
+the scenario data pack's deterministic reset function, so grant only its local
+development identity permission to issue that command:
+
+```text
+op noobagentbot
+```
+
+Never reuse this offline-mode operator identity on a public server.
+
+Install the connector sidecar dependency from its own package directory:
+
+```sh
+cd src/noob_agent/connectors/minecraft_sidecar
+npm install
+```
 
 Stop cleanly with `stop` at the server console. Do not kill the Java process;
 the clean stop saves the world.

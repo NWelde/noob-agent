@@ -1,0 +1,16 @@
+{
+  "name": "noob-agent-minecraft-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JSON Lines Mineflayer transport for the noob-agent Minecraft connector",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mineflayer": "4.39.0"
+  }
+}

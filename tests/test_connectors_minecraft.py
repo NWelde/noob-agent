@@ -139,6 +139,10 @@ async def test_manifest_declares_observe_and_defers_the_remaining_primitives() -
     assert "move_to" in DEFERRED_TOOLS and "use_object" in DEFERRED_TOOLS
 
 
+def test_default_player_name_matches_the_offline_server_whitelist() -> None:
+    assert MinecraftSettings().username == "noobagentbot"
+
+
 async def test_manifest_is_unchanged_by_a_reset() -> None:
     connector, _ = stubbed(observe_reply())
     before = await connector.manifest()
