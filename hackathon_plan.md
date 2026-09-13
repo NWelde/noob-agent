@@ -1811,6 +1811,171 @@ restores the 512 and 2,048 code defaults, the per-episode-only Weave flush, and
 the blank `WANDB_BASE_URL` example; a local `.env` copied from the new example
 keeps its base URL value until edited. 18c changes only documentation.
 
+## 19. Approved core-loop milestone: Doom episode replay viewer
+
+This section is the explicit approval required by `CLAUDE.md` and `AGENTS.md`
+for a replay viewer that shows a recorded Doom episode in a visible ViZDoom
+window. It lets a person watch what an agent did, starting with the first live
+run and then the step 18c run, and it provides the exact replay of a real cold
+attempt that section 11 asks for. It changes nothing an agent sees, and it
+calls no model.
+
+### Evidence
+
+- **Nothing can be watched today.** `DoomConnector._ensure_game` hard-codes
+  `set_window_visible(False)`, and the repository has no replay or video tool.
+  Recorded episodes can only be read as rows in the database.
+- **A recorded episode has what a replay needs.** Each episode stores its
+  scenario ID, seed, and manifest (including `connector_version`), and every
+  step stores the exact `ToolRequest` and `StepResult`. Primitives called by a
+  skill are recorded as ordinary steps, so a replay never runs skill code. The
+  first live run's episode `doom-basic-training-2716044773193143` is
+  `doom-vizdoom-v2`, seed 20260912, with 20 steps.
+- **Resets are repeatable by contract.** The connector resets from a fixed
+  seed with fixed offset and settle ticks, and its tests already compare
+  observations across fresh connectors, ignoring the episode ID.
+- **A display is available.** This WSL machine runs WSLg (`DISPLAY=:0`), so a
+  visible ViZDoom window can open locally. CI stays headless.
+- **Uncapped playback is too fast to watch.** ViZDoom's synchronous player mode
+  runs a 35-tick `make_action` as fast as the machine allows and, by default,
+  renders only its last frame.
+
+It authorizes: two display-only `DoomSettings` fields in the Doom connector;
+a replay script that reads a copy of a store and drives the connector with the
+recorded requests; a check that each replayed result matches the recorded
+one; and documentation.
+
+It does not authorize changes to the Doom manifest, tools, observations, step
+results, reset behavior, timing model, episode ID scheme, or connector version;
+recording frames or video; writing to any store; calling a model, the Builder,
+a grader, or a skill executor from the viewer; any Minecraft change; making
+replay part of the evaluation, comparison, or report path; dependencies; or the
+step 18c run. Each of those needs its own approval.
+
+### Design constraints
+
+- **Default behavior does not change.** With the new settings at their
+  defaults, the connector makes exactly the same ViZDoom calls as today, and
+  `CONNECTOR_VERSION` stays `doom-vizdoom-v2`. The settings affect only display
+  and pacing, never what the game computes.
+- **Replays are exact or they stop.** Every replayed step is compared with the
+  recorded step on `status`, `code`, `message`, `state_changed`,
+  `primitive_actions_charged`, `logical_duration`, and the full observation
+  except `episode_id`. The episode ID is random per reset, and `wall_time_ms`
+  is host timing. At the first mismatch the replay stops, prints the recorded
+  and replayed values, and exits non-zero. A diverged replay is never shown as
+  the agent's play.
+- **Replays are labeled.** The terminal output says the episode is a replay of
+  a recorded episode, not a live model run, and names the episode, scenario,
+  seed, and split.
+- **The source database is never written.** The script copies the database to
+  a temporary directory and reads only the copy. `EpisodeStore.open` may
+  upgrade that copy's schema, but the original file stays byte-identical.
+- **No private data is shown.** The terminal shows only the recorded public
+  request and result fields. It does not call `private_outcome()` or read
+  grades.
+
+### Step 19a - Display and real-time pacing settings in the Doom connector
+
+- Files: `src/noob_agent/connectors/doom.py`, which adds
+  `window_visible: bool = False` and `realtime: bool = False` to
+  `DoomSettings`. New `tests/test_doom_display_settings.py`.
+  `docs/doom-env.md`, which replaces the "No display" note. `CHANGELOG.md`.
+- Behavior:
+  - `window_visible=True` calls `set_window_visible(True)` and
+    `set_render_all_frames(True)` before `init()`. The default keeps
+    `set_window_visible(False)` and does not call `set_render_all_frames`.
+  - `realtime=True` makes `step` advance an accepted action one tick at a time
+    with the same button values, pausing so that each tick takes at least 1/35
+    of a second, which is Doom's native rate. Turns stay a single tick. A
+    35-tick action then takes about one second, within the default 3-second
+    call timeout. `reset` is not paced. Rejected requests never touch the game
+    in either mode.
+- Tests first:
+  - `DoomSettings()` defaults both fields to `False`, and the manifest and
+    `CONNECTOR_VERSION` are unchanged.
+  - With a stand-in `vizdoom` module, the default settings call
+    `set_window_visible(False)` and never call `set_render_all_frames`, while
+    `window_visible=True` calls `set_window_visible(True)` and
+    `set_render_all_frames(True)`.
+  - With real ViZDoom, headless, and the pause patched out, `realtime=True`
+    produces step results identical to the default settings, ignoring the
+    episode ID and wall time. The script covers every tool, multi-tick moves
+    and attacks, both turns, `wait`, `observe`, an invalid tool, and an invalid
+    argument, on `doom-basic-training` and `doom-basic-heldout-a`.
+  - With the pause patched to count calls, a 35-tick action pauses 35 times, a
+    turn pauses once, and a rejected request pauses zero times.
+- Validation: `uv run pytest tests/test_doom_display_settings.py -v`, then the
+  full test, Ruff, and strict mypy suites. The existing Doom connector tests
+  must pass unchanged.
+- Acceptance: the connector can open a visible window and pace actions in
+  real time, and neither setting changes a single recorded value.
+
+### Step 19b - Replay script
+
+- Files: new `scripts/replay_doom_episode.py`. New
+  `tests/test_replay_doom_episode.py`. `docs/doom-env.md`, with the watch
+  command. `CHANGELOG.md`.
+- Command:
+
+  ```sh
+  uv run python scripts/replay_doom_episode.py \
+    --database .noob-agent/doom-learning-live.sqlite3 \
+    --episode-id doom-basic-training-2716044773193143
+  ```
+
+  - Without `--episode-id`, the script lists the Doom episodes in the database
+    (ID, scenario, seed, split, steps, stop reason) and exits 0 without
+    starting the game.
+  - By default it opens a visible window with real-time pacing and waits
+    `--step-pause-seconds` (default 0.5) after each step, including rejected
+    ones, so an unusable reply is visible as time passing with nothing
+    happening.
+  - `--headless` hides the window and turns off pacing and pauses. It checks
+    that a replay is exact without a display.
+  - For each step it prints the sequence, tool, arguments, status and code,
+    visible labels with their `screen_offset`, health, ammo, and whether the
+    step matched.
+- Refusals, each exiting 2 before a game starts: a database or episode that
+  does not exist; an episode whose `game_id` is not `doom-vizdoom`; and a
+  recorded `connector_version` different from the current `CONNECTOR_VERSION`.
+- Tests first (headless, with real ViZDoom):
+  - An episode recorded through `EpisodeRunner`, `DoomConnector`, and a
+    scripted policy, including rejected requests, replays with every step
+    matched, and the script exits 0.
+  - A copy of that store with one recorded observation changed makes the
+    replay stop at that sequence, print both values, and exit 1.
+  - A non-Doom episode, a different connector version, and an unknown
+    episode ID are each refused with exit 2.
+  - Listing without `--episode-id` prints every episode and starts no game.
+  - The source database's SHA-256 is identical before and after a replay.
+  - The output labels the run as a replay.
+  - Importing the script does not import `noob_agent.models`,
+    `noob_agent.agents`, `noob_agent.grading`, or `noob_agent.skills.executor`.
+- Validation: `uv run pytest tests/test_replay_doom_episode.py -v`, then the
+  full test, Ruff, and strict mypy suites.
+- Manual verification, reported in the pull request:
+  - A headless replay of the first live run's episode matches all 20 steps.
+    If it does not, the pull request reports the first mismatch, and the viewer
+    is not used for that episode.
+  - The requester watches the windowed replay of that episode on WSLg.
+- Acceptance: a person can watch any recorded `doom-vizdoom-v2` episode in a
+  visible window, and every step shown is verified against the record.
+
+### Relationship to other work
+
+Step 18c does not depend on this section and can run before or after it. Once
+both land, the viewer replays 18c's training and held-out episodes. A frame or
+video recording for the section 11 screen recording is a later, separate
+approval.
+
+### Rollback
+
+Each step is its own pull request and can be reverted alone. Reverting 19b
+removes the script and its documentation. Reverting 19a removes the two
+settings, and the connector again always runs headless and unpaced. Neither
+step changes stored data, so no database cleanup is needed.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
