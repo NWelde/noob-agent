@@ -1,0 +1,35 @@
+{
+  "scenario_family": "doom-basic-v3",
+  "connector_version": "doom-vizdoom-v2",
+  "base_config": "basic.cfg",
+  "scenarios": {
+    "doom-basic-training": {
+      "split": "training",
+      "seeds": [
+        20260912
+      ],
+      "practice_seeds": [
+        20260913,
+        20260915,
+        20260916,
+        20260917
+      ]
+    },
+    "doom-basic-heldout-a": {
+      "split": "held-out",
+      "seeds": [
+        101,
+        102,
+        103
+      ]
+    },
+    "doom-basic-heldout-b": {
+      "split": "held-out",
+      "seeds": [
+        201,
+        202,
+        203
+      ]
+    }
+  }
+}
