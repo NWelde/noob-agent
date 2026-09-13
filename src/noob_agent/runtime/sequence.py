@@ -28,7 +28,13 @@ from noob_agent.agents.action import ActionAgent
 from noob_agent.agents.builder import BuilderAgent, BuilderOutcome
 from noob_agent.agents.evidence import select_evidence
 from noob_agent.connectors.protocol import GameConnector
-from noob_agent.domain.records import EpisodeSplit, ExperimentRecord, StopReason, StoredEpisode
+from noob_agent.domain.records import (
+    EpisodeSplit,
+    ExperimentRecord,
+    ModelCallPurpose,
+    StopReason,
+    StoredEpisode,
+)
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient
 from noob_agent.models.recording import ModelRole, RecordingModelClient
@@ -296,9 +302,25 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
                 with suppress(Exception):
                     self._trace.flush()
 
-    def _builder(self, training_record: ExperimentRecord, episode_id: str) -> BuilderAgent:
+    def _builder(
+        self,
+        training_record: ExperimentRecord,
+        episode_id: str,
+        *,
+        first_purpose: ModelCallPurpose = "build",
+    ) -> BuilderAgent:
         return BuilderAgent(
-            self._recording(training_record, role="builder", episode_id=episode_id),
+            RecordingModelClient(
+                self._client,
+                store=self._store,
+                experiment_id=training_record.experiment_id,
+                role="builder",
+                model_id=self._model_id,
+                episode_id=episode_id,
+                clock=self._clock,
+                trace=self._trace,
+                first_purpose=first_purpose,
+            ),
             self._registry,
             executor=self._executor,
             max_repairs=self._max_repairs,

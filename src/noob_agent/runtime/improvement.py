@@ -5,8 +5,9 @@ training episode and build. The accepted skill then plays a fixed set of
 training-split practice seeds under held-out budgets. Each later round asks the
 Builder for one refinement from the incumbent's public practice evidence. A
 refinement that passes validation plays the same practice seeds and replaces the
-incumbent only if its public practice score is better; otherwise it is rejected
-and the loop stops. Held-out cells run once, after the loop has ended.
+incumbent only if its public practice score is better; otherwise it is rejected.
+The loop stops after `patience` consecutive rounds without a kept version.
+Held-out cells run once, after the loop has ended.
 
 The practice score uses public records only: the fraction of practice episodes
 that ended in a terminal state, with total primitive actions as the tie-breaker.
@@ -27,7 +28,7 @@ from noob_agent.agents.evidence import select_evidence
 from noob_agent.domain.records import ExperimentRecord
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.prompts.refine import PracticeAttempt, render_refine_prompt
-from noob_agent.runtime.heldout import heldout_experiment
+from noob_agent.runtime.heldout import HELD_OUT_DECISION_BUDGET, heldout_experiment
 from noob_agent.runtime.sequence import (
     ConnectorT,
     GradeT,
@@ -38,6 +39,8 @@ from noob_agent.runtime.sequence import (
 )
 
 DEFAULT_MAX_ROUNDS = 3
+# Consecutive rounds without a kept version that end the loop (section 24b).
+DEFAULT_PATIENCE = 2
 # The multi-round learning budget in eval_protocol.md: training, every Builder
 # call, and every practice episode's model calls.
 MULTI_ROUND_TOKEN_BUDGET = 300_000
@@ -116,16 +119,20 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
         learning_call_budget: int = MULTI_ROUND_CALL_BUDGET,
         learning_wall_seconds: float = MULTI_ROUND_WALL_TIME_SECONDS,
         grade_success: Callable[[GradeT], bool] | None = None,
+        patience: int = DEFAULT_PATIENCE,
         **options: Any,
     ) -> None:
         if max_rounds < 0:
             raise ValueError("max_rounds cannot be negative.")
+        if patience < 1:
+            raise ValueError("patience must be at least 1.")
         super().__init__(**options)
         self._max_rounds = max_rounds
         self._learning_token_budget = learning_token_budget
         self._learning_call_budget = learning_call_budget
         self._learning_wall_ms = int(learning_wall_seconds * 1000)
         self._grade_success = grade_success
+        self._patience = patience
 
     async def run(  # type: ignore[override]
         self,
@@ -221,6 +228,12 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
             return result((), None, "no_skill")
 
         incumbent = trained.outcome.version
+        if not self._practice_fits(tokens, calls, practice_cells):
+            heldout = await self._run_cells(connector, trained.heldout_record, heldout_cells)
+            round_zero: RoundReport[GradeT] = RoundReport(
+                0, incumbent, trained.outcome, (), None, "incumbent"
+            )
+            return result([round_zero], incumbent, "learning_budget", heldout)
         practice = await self._practice(connector, practice_record, practice_cells, incumbent)
         tokens += _tokens(practice)
         calls += _calls(practice)
@@ -231,6 +244,7 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
         kept: list[tuple[SkillVersion, int]] = [(incumbent, tokens)]
 
         stop: ImprovementStop | None = None
+        misses = 0
         for number in range(1, self._max_rounds + 1):
             if score.terminal_rate == 1.0:
                 stop = "perfect_practice"
@@ -239,7 +253,7 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                 stop = "learning_budget"
                 break
             outcome = await self._builder(
-                trained.training_record, trained.training.episode_id
+                trained.training_record, trained.training.episode_id, first_purpose="refine"
             ).refine(
                 incumbent,
                 prompt=render_refine_prompt(
@@ -263,10 +277,21 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                 break
             if outcome.stop_reason != "validated" or outcome.version is None:
                 rounds.append(RoundReport(number, None, outcome, (), None, "not_validated"))
-                stop = "no_improvement"
-                break
+                misses += 1
+                if misses >= self._patience:
+                    stop = "no_improvement"
+                    break
+                continue
 
             challenger = outcome.version
+            if not self._practice_fits(tokens, calls, practice_cells):
+                self._registry.reject(
+                    challenger.name,
+                    challenger.version,
+                    reason="Validated, but the learning budget could not cover its practice.",
+                )
+                stop = "learning_budget"
+                break
             challenger_practice = await self._practice(
                 connector, practice_record, practice_cells, challenger
             )
@@ -291,6 +316,7 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                     ),
                 )
                 practice, score = challenger_practice, challenger_score
+                misses = 0
                 kept.append((incumbent, tokens))
                 rounds.append(
                     RoundReport(number, incumbent, outcome, challenger_practice, score, "kept")
@@ -316,8 +342,10 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                         "not_improved",
                     )
                 )
-                stop = "no_improvement"
-                break
+                misses += 1
+                if misses >= self._patience:
+                    stop = "no_improvement"
+                    break
         if stop is None:
             stop = "perfect_practice" if score.terminal_rate == 1.0 else "max_rounds"
 
@@ -329,6 +357,18 @@ class ImprovementLoop(LearningSequence[ConnectorT, GradeT]):
                 connector, sequence_id, trained.connector_version, heldout_cells, kept, heldout
             )
         return result(rounds, incumbent, stop, heldout, points)
+
+    def _practice_fits(self, tokens: int, calls: int, cells: Sequence[HeldOutCell]) -> bool:
+        """Whether a full practice batch fits the learning budget in the worst case.
+
+        Every practice episode may use its whole decision budget, and each call is
+        projected at the largest average cost per learning call seen so far.
+        """
+        decisions = len(cells) * HELD_OUT_DECISION_BUDGET
+        if calls + decisions > self._learning_call_budget:
+            return False
+        per_call = tokens / calls if calls else 0.0
+        return tokens + decisions * per_call <= self._learning_token_budget
 
     async def _practice(
         self,
