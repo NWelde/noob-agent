@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+2026-09-13 12:06 PDT | [FIXED] | Fixed three problems found by the first live easy-mode Minecraft run: the sidecar now records `title ... actionbar` feedback from its `action_bar` packet (previously no action-bar feedback, including the Resonator room's, reached observations) and drops operator command echoes such as `[Server: ...]`; the easy room's duplicate `tellraw` success message is removed; and both Builder prompts now document the real skill contract (`context.observe`, `context.call`, `SkillResult`, and `EvidenceRef` kinds), after a repair call spent its full 100,000-token output cap guessing that API and returned no reply.
+
+2026-09-13 12:00 PDT | [FIXED] | Replaced Minecraft demo chat transcript dumps with concise Seeing, Doing, Pressing, and Learning narration, colored through tellraw. Full model records remain unchanged, and narration echoes are excluded from observations. Colored chat uses the local demo bot's existing command permission.
+
 2026-09-13 11:39 PDT | [ADDED] | Added a non-benchmark Minecraft easy-mode live diagnostic: a separate `easy-button-gate-v1` data pack where pressing a labelled nearby button visibly opens iron bars, with infinite Night Vision on every reset, and `scripts/run_minecraft_easy_live_smoke.py --live-easy-smoke`, which states the task as its public goal, ends on the room's public success message, reuses the existing `[noob:...]` chat transcript, has no wall-clock deadline, allows 32,000 Action and 100,000 Builder output tokens, and prints a compact labelled summary. The frozen manifest, connector, and benchmark budgets are unchanged.
 
 2026-09-13 11:22 PDT | [ADDED] | Made the non-benchmark first-person Minecraft smoke runner mirror each Action and Builder system prompt, prompt, reasoning, reply, and provider error into local Minecraft chat without changing the frozen agent tool surface or action accounting.
