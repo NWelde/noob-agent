@@ -3,6 +3,7 @@
 const { once } = require("node:events");
 const readline = require("node:readline");
 const mineflayer = require("mineflayer");
+const { chatCommand, isNarration } = require("./chat");
 
 const MAX_MESSAGES = 20;
 const MAX_OBJECTS = 64;
@@ -64,12 +65,19 @@ function publicName(value) {
   }
 }
 
-function rememberMessage(value) {
-  const rendered = text(value).trim();
-  if (!rendered) return;
+// Operator command echoes such as `[Server: Set ...]` are administrative
+// transport detail, not game state.
+const OPERATOR_ECHO = /^\[[^\]:]+: .*\]$/;
+
+function isPublicMessage(rendered) {
   // Diagnostic narration is deliberately human-visible but must not be
   // reflected into the model's next public observation.
-  if (rendered.startsWith("[noob:")) return;
+  return Boolean(rendered) && !isNarration(rendered) && !OPERATOR_ECHO.test(rendered);
+}
+
+function rememberMessage(value) {
+  const rendered = text(value).trim();
+  if (!isPublicMessage(rendered)) return;
   publicMessages.push({ kind: "game", text: rendered });
   publicMessages = publicMessages.slice(-MAX_MESSAGES);
 }
@@ -237,8 +245,10 @@ async function connect(message) {
     auth: "offline",
     hideErrors: true,
   });
+  // `messagestr` already covers overlay system chat. `title ... actionbar`
+  // arrives as its own packet, which Mineflayer's `actionBar` event ignores.
   bot.on("messagestr", rememberMessage);
-  bot.on("actionBar", rememberMessage);
+  bot._client.on("action_bar", (packet) => rememberMessage(packet.text));
   bot.on("error", (error) => diagnose(error.message));
 
   await Promise.race([
@@ -520,7 +530,7 @@ async function handle(message) {
       if (typeof message.text !== "string" || !message.text || message.text.length > 256) {
         throw new Error("chat text must contain 1 to 256 characters");
       }
-      bot.chat(message.text);
+      bot.chat(chatCommand(message.text));
       write({ id, ok: true });
     } else if (
       [
@@ -556,17 +566,24 @@ async function handle(message) {
   }
 }
 
-const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-let queue = Promise.resolve();
-input.on("line", (line) => {
-  queue = queue.then(async () => {
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      write({ id: null, ok: false, code: "GAME_REJECTED", error: "Invalid JSON request." });
-      return;
-    }
-    await handle(message);
+let input = null;
+
+if (require.main === module) {
+  input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  let queue = Promise.resolve();
+  input.on("line", (line) => {
+    queue = queue.then(async () => {
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        write({ id: null, ok: false, code: "GAME_REJECTED", error: "Invalid JSON request." });
+        return;
+      }
+      await handle(message);
+    });
   });
-});
+}
+
+// Exported only so pure message helpers can be tested without a game server.
+module.exports = { isPublicMessage, text };
