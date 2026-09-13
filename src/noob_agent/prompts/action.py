@@ -33,7 +33,18 @@ _REPLY_FORMAT = """Reply with exactly one JSON object in one of these two shapes
 
 {"subgoal": "...", "expected_evidence": "...", "skill": "<skill name>", "inputs": {...}}
 
-Use a tool name or skill name exactly as listed. Do not invent controls."""
+Use a tool name or skill name exactly as listed. Do not invent controls.
+
+If a visible result contradicts evidence you established earlier in this attempt,
+add a "finding" object to the same reply, describing expected and observed behavior
+separately, with counts and references to public records from this attempt:
+
+"finding": {"expected_behavior": "...", "expected_basis": "...", "actual_behavior": "...",
+            "expected_count": <int>, "actual_count": <int>,
+            "evidence": [{"kind": "<action_id | observation_sequence | object_id | message>",
+                          "value": "..."}]}
+
+Add a finding only when you have that evidence; a finding without it is not counted."""
 
 _SKILL_RESULT_SHAPE = (
     "Returns status (succeeded, failed, or inconclusive), a summary, public "
