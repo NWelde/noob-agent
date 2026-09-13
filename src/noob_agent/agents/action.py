@@ -19,6 +19,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from noob_agent.domain.findings import FindingReport, parse_finding_report
 from noob_agent.domain.model import ConnectorManifest, Observation, StepResult, ToolRequest
 from noob_agent.domain.skills import SkillVersion
 from noob_agent.models.client import ModelClient, ModelRequest
@@ -47,6 +48,8 @@ class ParsedDecision(BaseModel):
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
     subgoal: str = ""
     expected_evidence: str = ""
+    # A candidate defect the model attached to this decision, if it did.
+    finding: FindingReport | None = None
 
 
 class Decision(BaseModel):
@@ -60,6 +63,7 @@ class Decision(BaseModel):
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
     subgoal: str
     expected_evidence: str
+    finding: FindingReport | None = None
 
 
 def _first_json_object(reply: str) -> dict[str, JsonValue] | None:
@@ -90,6 +94,7 @@ def parse_decision(reply: str) -> ParsedDecision:
     expected = parsed.get("expected_evidence")
     stated_subgoal = subgoal if isinstance(subgoal, str) else ""
     stated_evidence = expected if isinstance(expected, str) else ""
+    finding = parse_finding_report(parsed.get("finding"))
 
     skill = parsed.get("skill")
     if isinstance(skill, str) and skill:
@@ -100,6 +105,7 @@ def parse_decision(reply: str) -> ParsedDecision:
             arguments=inputs if isinstance(inputs, dict) else {},
             subgoal=stated_subgoal,
             expected_evidence=stated_evidence,
+            finding=finding,
         )
     tool = parsed.get("tool")
     if isinstance(tool, str) and tool:
@@ -110,9 +116,13 @@ def parse_decision(reply: str) -> ParsedDecision:
             arguments=arguments if isinstance(arguments, dict) else {},
             subgoal=stated_subgoal,
             expected_evidence=stated_evidence,
+            finding=finding,
         )
     return ParsedDecision(
-        kind="unusable", subgoal=stated_subgoal, expected_evidence=stated_evidence
+        kind="unusable",
+        subgoal=stated_subgoal,
+        expected_evidence=stated_evidence,
+        finding=finding,
     )
 
 
@@ -209,6 +219,7 @@ class ActionAgent:
             arguments=parsed.arguments,
             subgoal=parsed.subgoal,
             expected_evidence=parsed.expected_evidence,
+            finding=parsed.finding,
         )
         self._decisions.append(decision)
         self._pending[action_id] = decision
