@@ -114,7 +114,7 @@ def _isolate_main(monkeypatch: pytest.MonkeyPatch, module: Any, *, block: bool) 
     class FakeSequence:
         def __init__(self, **kwargs: object) -> None:
             assert kwargs["condition"] == "non-benchmark-live-demo"
-            assert kwargs["keep_training_connector_open_during_builder"] is True
+            assert kwargs["persistent_connector"] is True
 
         async def run(self, **kwargs: object) -> object:
             del kwargs
