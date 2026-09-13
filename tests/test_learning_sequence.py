@@ -45,6 +45,8 @@ from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
     """Record one fresh public observation without changing the environment."""
+    if inputs:
+        return SkillResult(status="failed", summary="Unexpected input.", primitive_actions_used=0)
     observation = await context.observe()
     return SkillResult(
         status="inconclusive",
