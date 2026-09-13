@@ -1,7 +1,8 @@
-"""Step 22.A: reliable, fast Action decisions through native tool calls and thinking controls."""
+"""Step 22.A: reliable, fast Action decisions through structured replies and thinking controls."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -11,37 +12,31 @@ from typing import Any
 
 import pytest
 from fakes.connector import MANIFEST, FakeClock, ScriptedConnector, ScriptedStep
+from test_loop_bench import CANDIDATE, METADATA, SKILL_SOURCE
 
-from noob_agent.agents.action import UNUSABLE_REPLY_TOOL, ActionAgent
+from noob_agent.agents.action import UNUSABLE_REPLY_TOOL, ActionAgent, decision_schema
+from noob_agent.connectors.doom import MANIFEST as DOOM
 from noob_agent.domain.records import ExperimentRecord
-from noob_agent.models.client import (
-    ModelRequest,
-    ModelResponse,
-    ToolCall,
-    ToolSpec,
-    WandbInferenceClient,
-)
+from noob_agent.domain.skills import SkillPackage, SkillVersion
+from noob_agent.models.client import ModelRequest, ModelResponse, WandbInferenceClient
 from noob_agent.models.recording import RecordingModelClient
 from noob_agent.prompts.action import ACTION_SYSTEM
+from noob_agent.prompts.builder import BUILDER_SYSTEM
 from noob_agent.runtime.runner import EpisodeRunner
+from noob_agent.runtime.sequence import HeldOutCell, LearningSequence
 from noob_agent.settings import IntegrationSettings, ModelSettings, WandbSettings
+from noob_agent.skills.executor import LocalSubprocessSkillExecutor
+from noob_agent.skills.registry import SkillRegistry
 from noob_agent.skills.runtime import SkillRequest
 from noob_agent.storage import EpisodeStore
 from noob_agent.storage.schema import SCHEMA_VERSION
 
 STARTED_AT = datetime(2026, 9, 13, 4, 0, tzinfo=UTC)
-TOOL_REQUEST = ModelRequest(
-    system="system",
-    prompt="prompt",
-    max_output_tokens=64,
-    tools=(
-        ToolSpec(
-            name="observe",
-            description="Look.",
-            parameters={"type": "object", "properties": {}},
-        ),
-    ),
-)
+SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"action": {"type": "string", "enum": ["observe"]}},
+    "required": ["action"],
+}
 
 
 # --- The provider adapter ------------------------------------------------------
@@ -63,26 +58,12 @@ def _adapter(completion: SimpleNamespace) -> tuple[WandbInferenceClient, list[di
     return client, sent
 
 
-def _completion(
-    *,
-    content: str | None = "",
-    tool_calls: list[SimpleNamespace] | None = None,
-    finish_reason: str = "stop",
-) -> SimpleNamespace:
+def _completion(content: str = "{}") -> SimpleNamespace:
     return SimpleNamespace(
         model="provider/model",
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-        choices=[
-            SimpleNamespace(
-                finish_reason=finish_reason,
-                message=SimpleNamespace(content=content, tool_calls=tool_calls),
-            )
-        ],
+        choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=content))],
     )
-
-
-def _tool_call(name: str, arguments: str) -> SimpleNamespace:
-    return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
 
 
 @pytest.mark.parametrize(
@@ -96,7 +77,7 @@ def _tool_call(name: str, arguments: str) -> SimpleNamespace:
 async def test_the_adapter_sends_the_thinking_setting_only_when_it_is_set(
     thinking: bool | None, expected: dict[str, object] | None
 ) -> None:
-    client, sent = _adapter(_completion(content="{}"))
+    client, sent = _adapter(_completion())
 
     await client.complete(
         ModelRequest(system="s", prompt="p", max_output_tokens=8, thinking=thinking)
@@ -105,51 +86,93 @@ async def test_the_adapter_sends_the_thinking_setting_only_when_it_is_set(
     assert sent[0].get("extra_body") == expected
 
 
-async def test_the_adapter_offers_tools_and_requires_one_call() -> None:
-    client, sent = _adapter(_completion(tool_calls=[_tool_call("observe", "{}")]))
+async def test_the_adapter_asks_for_a_strict_json_schema_reply() -> None:
+    client, sent = _adapter(_completion())
 
-    await client.complete(TOOL_REQUEST)
+    await client.complete(
+        ModelRequest(system="s", prompt="p", max_output_tokens=8, response_schema=SCHEMA)
+    )
 
-    assert sent[0]["tool_choice"] == "required"
-    assert sent[0]["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "observe",
-                "description": "Look.",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }
-    ]
+    assert sent[0]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "decision", "strict": True, "schema": SCHEMA},
+    }
 
 
-async def test_a_request_without_tools_sends_no_tool_fields() -> None:
-    client, sent = _adapter(_completion(content="{}"))
+async def test_a_request_without_a_schema_sends_no_response_format() -> None:
+    client, sent = _adapter(_completion())
 
     await client.complete(ModelRequest(system="s", prompt="p", max_output_tokens=8))
 
-    assert "tools" not in sent[0] and "tool_choice" not in sent[0]
+    assert "response_format" not in sent[0]
 
 
-async def test_the_adapter_returns_the_first_tool_call() -> None:
-    client, _ = _adapter(
-        _completion(
-            content=None,
-            tool_calls=[_tool_call("turn_left", '{"degrees": 5}'), _tool_call("attack", "{}")],
-            finish_reason="tool_calls",
-        )
+async def test_the_adapter_closes_its_provider_client_after_each_call() -> None:
+    client, _ = _adapter(_completion())
+    closed: list[bool] = []
+    inner = client._client()
+
+    async def close() -> None:
+        closed.append(True)
+
+    inner.close = close
+    client._client = lambda: inner  # type: ignore[method-assign]
+
+    await client.complete(ModelRequest(system="s", prompt="p", max_output_tokens=8))
+
+    assert closed == [True]
+
+
+# --- The decision schema ----------------------------------------------------------
+
+
+def _accepted_skill(input_schema: dict[str, object]) -> SkillVersion:
+    registry = SkillRegistry()
+    metadata = {**METADATA, "input_schema": input_schema}
+    proposed = registry.propose(
+        SkillPackage(name=str(metadata["name"]), source=SKILL_SOURCE, metadata=metadata),
+        authoring_episode_id="ep",
+        authoring_model_id="f",
+        created_at=STARTED_AT,
     )
+    registry.begin_validation(proposed.name, proposed.version, reason="test")
+    return registry.accept(proposed.name, proposed.version, reason="test")
 
-    response = await client.complete(TOOL_REQUEST)
 
-    assert response.tool_call == ToolCall(name="turn_left", arguments='{"degrees": 5}')
-    assert response.text == ""
+def test_the_schema_allows_only_offered_primitives_and_skills() -> None:
+    skill = _accepted_skill({"properties": {}})
+
+    schema = decision_schema(MANIFEST, (skill,))
+
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    action = properties["action"]
+    assert isinstance(action, dict)
+    assert action["enum"] == [*[tool.name for tool in MANIFEST.tools], skill.name]
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {  # type: ignore[arg-type]
+        "subgoal",
+        "expected_evidence",
+        "action",
+        "arguments",
+        "finding",
+    }
+    assert properties["finding"] == {"anyOf": [{"type": "object"}, {"type": "null"}]}
+
+
+def test_a_skill_named_like_a_primitive_is_offered_once() -> None:
+    skill = _accepted_skill({"properties": {}}).model_copy(update={"name": "observe"})
+
+    schema = decision_schema(MANIFEST, (skill,))
+
+    action = schema["properties"]["action"]  # type: ignore[index]
+    assert action["enum"].count("observe") == 1  # type: ignore[index]
 
 
 # --- The Action agent -----------------------------------------------------------
 
 
-class OneReplyClient:
+class ScriptedClient:
     provider = "scripted"
 
     def __init__(self, *responses: ModelResponse) -> None:
@@ -161,15 +184,24 @@ class OneReplyClient:
         return self._responses.pop(0)
 
 
-def _call_reply(name: str, arguments: dict[str, object] | str) -> ModelResponse:
-    raw = arguments if isinstance(arguments, str) else json.dumps(arguments)
+def _reply(
+    action: str,
+    arguments: dict[str, object] | None = None,
+    *,
+    finding: object = None,
+    finish_reason: str = "stop",
+) -> ModelResponse:
+    text = json.dumps(
+        {
+            "subgoal": "Find the post.",
+            "expected_evidence": "Lantern visible.",
+            "action": action,
+            "arguments": arguments or {},
+            "finding": finding,
+        }
+    )
     return ModelResponse(
-        text="",
-        input_tokens=10,
-        output_tokens=5,
-        model_id="fake",
-        finish_reason="tool_calls",
-        tool_call=ToolCall(name=name, arguments=raw),
+        text=text, input_tokens=10, output_tokens=5, model_id="f", finish_reason=finish_reason
     )
 
 
@@ -177,8 +209,8 @@ async def _observation() -> Any:
     return await ScriptedConnector().reset("mc_signal_post_a", 7)
 
 
-async def test_every_primitive_is_offered_as_a_tool_with_required_intent_fields() -> None:
-    client = OneReplyClient(_call_reply("observe", {"subgoal": "s", "expected_evidence": "e"}))
+async def test_the_agent_asks_for_the_decision_schema_with_its_thinking_setting() -> None:
+    client = ScriptedClient(_reply("observe"))
     agent = ActionAgent(client, manifest=MANIFEST, thinking=False)
 
     await agent.choose(await _observation())
@@ -186,28 +218,11 @@ async def test_every_primitive_is_offered_as_a_tool_with_required_intent_fields(
     request = client.requests[0]
     assert request.system == ACTION_SYSTEM
     assert request.thinking is False
-    assert [tool.name for tool in request.tools] == [tool.name for tool in MANIFEST.tools]
-    for spec, tool in zip(request.tools, MANIFEST.tools, strict=True):
-        parameters = spec.parameters
-        assert parameters["type"] == "object"
-        required = parameters["required"]
-        assert isinstance(required, list)
-        assert {"subgoal", "expected_evidence"} <= set(required)
-        properties = parameters["properties"]
-        assert isinstance(properties, dict)
-        assert "finding" in properties
-        for name in dict(tool.argument_schema.get("properties", {}) or {}):
-            assert name in properties
+    assert request.response_schema == decision_schema(MANIFEST, ())
 
 
-async def test_a_tool_call_becomes_a_request_without_the_intent_fields() -> None:
-    client = OneReplyClient(
-        _call_reply(
-            "observe",
-            {"subgoal": "Find the post.", "expected_evidence": "Lantern visible.", "radius": 8},
-        )
-    )
-    agent = ActionAgent(client, manifest=MANIFEST)
+async def test_a_structured_primitive_reply_becomes_a_tool_request() -> None:
+    agent = ActionAgent(ScriptedClient(_reply("observe", {"radius": 8})), manifest=MANIFEST)
 
     request = await agent.choose(await _observation())
 
@@ -221,7 +236,20 @@ async def test_a_tool_call_becomes_a_request_without_the_intent_fields() -> None
     )
 
 
-async def test_a_finding_in_a_tool_call_is_kept_on_the_decision() -> None:
+async def test_a_structured_skill_reply_becomes_a_skill_request() -> None:
+    skill = _accepted_skill({"properties": {"radius": {"type": "integer"}}})
+    agent = ActionAgent(
+        ScriptedClient(_reply(skill.name, {"radius": 4})), manifest=MANIFEST, skills=(skill,)
+    )
+
+    request = await agent.choose(await _observation())
+
+    assert isinstance(request, SkillRequest)
+    assert (request.skill_name, request.inputs) == (skill.name, {"radius": 4})
+    assert agent.decisions[0].kind == "skill"
+
+
+async def test_a_finding_in_a_structured_reply_is_kept_on_the_decision() -> None:
     finding = {
         "expected_behavior": "One output.",
         "expected_basis": "Earlier use produced one.",
@@ -230,47 +258,19 @@ async def test_a_finding_in_a_tool_call_is_kept_on_the_decision() -> None:
         "actual_count": 2,
         "evidence": [{"kind": "action_id", "value": "a_0001"}],
     }
-    client = OneReplyClient(
-        _call_reply("observe", {"subgoal": "s", "expected_evidence": "e", "finding": finding})
-    )
-    agent = ActionAgent(client, manifest=MANIFEST)
+    agent = ActionAgent(ScriptedClient(_reply("observe", finding=finding)), manifest=MANIFEST)
 
-    request = await agent.choose(await _observation())
+    await agent.choose(await _observation())
 
-    assert not isinstance(request, SkillRequest)
-    assert "finding" not in request.arguments
     assert agent.decisions[0].finding is not None
 
 
-@pytest.mark.parametrize("arguments", ["not json", "[1, 2]"])
-async def test_tool_call_arguments_that_are_not_an_object_are_unusable(arguments: str) -> None:
-    agent = ActionAgent(OneReplyClient(_call_reply("observe", arguments)), manifest=MANIFEST)
-
-    request = await agent.choose(await _observation())
-
-    assert not isinstance(request, SkillRequest)
-    assert request.tool_name == UNUSABLE_REPLY_TOOL
-    assert agent.decisions[0].kind == "unusable"
-
-
-async def test_an_undeclared_tool_call_is_sent_so_the_connector_refuses_it() -> None:
-    agent = ActionAgent(
-        OneReplyClient(_call_reply("teleport", {"subgoal": "s", "expected_evidence": "e"})),
-        manifest=MANIFEST,
-    )
-
-    request = await agent.choose(await _observation())
-
-    assert not isinstance(request, SkillRequest)
-    assert request.tool_name == "teleport"
-
-
-async def test_a_reply_without_a_tool_call_falls_back_to_the_json_reply() -> None:
+async def test_the_older_tool_and_skill_reply_shapes_still_work() -> None:
     text = json.dumps(
         {"subgoal": "s", "expected_evidence": "e", "tool": "observe", "arguments": {"radius": 3}}
     )
     agent = ActionAgent(
-        OneReplyClient(ModelResponse(text=text, input_tokens=1, output_tokens=1, model_id="f")),
+        ScriptedClient(ModelResponse(text=text, input_tokens=1, output_tokens=1, model_id="f")),
         manifest=MANIFEST,
     )
 
@@ -282,10 +282,14 @@ async def test_a_reply_without_a_tool_call_falls_back_to_the_json_reply() -> Non
 
 async def test_a_reply_cut_off_at_its_cap_is_unusable_and_marked_truncated() -> None:
     capped = ModelResponse(
-        text="", input_tokens=1, output_tokens=64, model_id="f", finish_reason="length"
+        text='{"subgoal": "s", "act',
+        input_tokens=1,
+        output_tokens=64,
+        model_id="f",
+        finish_reason="length",
     )
     finished = ModelResponse(text="no decision", input_tokens=1, output_tokens=2, model_id="f")
-    agent = ActionAgent(OneReplyClient(capped, finished), manifest=MANIFEST)
+    agent = ActionAgent(ScriptedClient(capped, finished), manifest=MANIFEST)
     observation = await _observation()
 
     first = await agent.choose(observation)
@@ -294,6 +298,34 @@ async def test_a_reply_cut_off_at_its_cap_is_unusable_and_marked_truncated() -> 
     assert not isinstance(first, SkillRequest) and not isinstance(second, SkillRequest)
     assert first.tool_name == second.tool_name == UNUSABLE_REPLY_TOOL
     assert [decision.truncated for decision in agent.decisions] == [True, False]
+
+
+# --- Keeping each decision within the protocol's token budget ---------------------
+
+
+async def test_the_prompt_lists_tools_with_compact_argument_hints() -> None:
+    client = ScriptedClient(_reply("observe"))
+    agent = ActionAgent(client, manifest=DOOM)
+
+    await agent.choose(await _observation())
+
+    prompt = client.requests[0].prompt
+    assert "- observe(): Read the visible HUD and objects." in prompt
+    assert "- turn_left(degrees: integer 1-90): Turn left by a degree amount." in prompt
+    assert "- attack(ticks?: integer 1-35): Fire or attack for a number of ticks." in prompt
+    assert '"additionalProperties"' not in prompt
+
+
+async def test_the_observation_omits_values_the_prompt_already_carries() -> None:
+    client = ScriptedClient(_reply("observe"))
+    agent = ActionAgent(client, manifest=MANIFEST)
+    observation = await _observation()
+
+    await agent.choose(observation)
+
+    prompt = client.requests[0].prompt
+    assert prompt.count(observation.public_goal) == 1
+    assert '"visible_objects"' in prompt and '"status"' in prompt
 
 
 # --- Settings ---------------------------------------------------------------------
@@ -323,16 +355,13 @@ def test_an_invalid_thinking_setting_is_refused() -> None:
 # --- Recording and storage --------------------------------------------------------
 
 
-async def test_request_options_and_the_tool_call_are_recorded(
+async def test_request_options_are_recorded_with_each_call(
     store: EpisodeStore, experiment: ExperimentRecord
 ) -> None:
     short = experiment.model_copy(update={"decision_budget": 1})
     store.create_experiment(short)
-    connector = ScriptedConnector(ScriptedStep())
     recorder = RecordingModelClient(
-        OneReplyClient(
-            _call_reply("observe", {"subgoal": "s", "expected_evidence": "e", "radius": 2})
-        ),
+        ScriptedClient(_reply("observe")),
         store=store,
         experiment_id=short.experiment_id,
         role="action",
@@ -340,7 +369,7 @@ async def test_request_options_and_the_tool_call_are_recorded(
         clock=FakeClock(wall=STARTED_AT),
     )
     runner = EpisodeRunner(
-        connector=connector,
+        connector=ScriptedConnector(ScriptedStep()),
         store=store,
         policy=ActionAgent(recorder, manifest=MANIFEST, thinking=False),
         clock=FakeClock(wall=STARTED_AT),
@@ -351,12 +380,7 @@ async def test_request_options_and_the_tool_call_are_recorded(
     (record,) = store.read_model_calls(episode_id=result.episode_id)
     assert record.request_options == {
         "thinking": False,
-        "tools": [tool.name for tool in MANIFEST.tools],
-        "tool_choice": "required",
-    }
-    assert record.tool_call == {
-        "name": "observe",
-        "arguments": json.dumps({"subgoal": "s", "expected_evidence": "e", "radius": 2}),
+        "response_schema": decision_schema(MANIFEST, ()),
     }
 
 
@@ -377,7 +401,7 @@ CREATE TABLE model_call (
 
 
 @pytest.mark.parametrize("old_version", [3, 4])
-def test_an_older_database_gains_the_new_columns_and_keeps_its_calls(
+def test_an_older_database_gains_the_new_column_and_keeps_its_calls(
     tmp_path: Path, experiment: ExperimentRecord, old_version: int
 ) -> None:
     path = tmp_path / "old.sqlite3"
@@ -405,11 +429,11 @@ def test_an_older_database_gains_the_new_columns_and_keeps_its_calls(
         (old,) = store.read_model_calls()
 
     assert old.response_text == "reply"
-    assert old.request_options is None and old.tool_call is None
+    assert old.request_options is None
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(model_call)")}
         (version,) = connection.execute("SELECT version FROM schema_version").fetchone()
-    assert {"request_options_json", "tool_call_json"} <= columns
+    assert "request_options_json" in columns
     assert version == 5
 
 
@@ -419,15 +443,6 @@ def test_an_older_database_gains_the_new_columns_and_keeps_its_calls(
 async def test_the_sequence_sends_the_action_thinking_setting_on_every_action_call(
     store: EpisodeStore,
 ) -> None:
-    import itertools
-
-    from test_loop_bench import CANDIDATE
-
-    from noob_agent.prompts.builder import BUILDER_SYSTEM
-    from noob_agent.runtime.sequence import HeldOutCell, LearningSequence
-    from noob_agent.skills.executor import LocalSubprocessSkillExecutor
-    from noob_agent.skills.registry import SkillRegistry
-
     class Routing:
         provider = "scripted"
 
@@ -438,7 +453,7 @@ async def test_the_sequence_sends_the_action_thinking_setting_on_every_action_ca
             self.requests.append(request)
             if request.system == BUILDER_SYSTEM:
                 return ModelResponse(text=CANDIDATE, input_tokens=1, output_tokens=1, model_id="f")
-            return _call_reply("observe", {"subgoal": "s", "expected_evidence": "e"})
+            return _reply("observe")
 
     ids = itertools.count(1)
     client = Routing()
@@ -469,38 +484,6 @@ async def test_the_sequence_sends_the_action_thinking_setting_on_every_action_ca
     actions = [request for request in client.requests if request.system == ACTION_SYSTEM]
     assert len(actions) >= 3
     assert all(request.thinking is False for request in actions)
-    assert all(request.tools for request in actions)
-
-
-async def test_an_accepted_skill_is_offered_as_a_tool_and_called_as_a_skill() -> None:
-    from test_loop_bench import METADATA, SKILL_SOURCE
-
-    from noob_agent.domain.skills import SkillPackage
-    from noob_agent.skills.registry import SkillRegistry
-
-    registry = SkillRegistry()
-    metadata = {**METADATA, "input_schema": {"properties": {"radius": {"type": "integer"}}}}
-    proposed = registry.propose(
-        SkillPackage(name=str(metadata["name"]), source=SKILL_SOURCE, metadata=metadata),
-        authoring_episode_id="ep",
-        authoring_model_id="f",
-        created_at=STARTED_AT,
-        reason="test",
-    )
-    registry.begin_validation(proposed.name, proposed.version, reason="test")
-    registry.accept(proposed.name, proposed.version, reason="test")
-    skill_name = proposed.name
-    client = OneReplyClient(
-        _call_reply(skill_name, {"subgoal": "s", "expected_evidence": "e", "radius": 4})
-    )
-    agent = ActionAgent(client, manifest=MANIFEST, skills=registry.available_skills())
-
-    request = await agent.choose(await _observation())
-
-    offered = {spec.name: spec for spec in client.requests[0].tools}
-    assert skill_name in offered
-    properties = offered[skill_name].parameters["properties"]
-    assert isinstance(properties, dict) and "radius" in properties
-    assert isinstance(request, SkillRequest)
-    assert (request.skill_name, request.inputs) == (skill_name, {"radius": 4})
-    assert agent.decisions[0].kind == "skill"
+    assert all(request.response_schema is not None for request in actions)
+    heldout_enum = actions[-1].response_schema["properties"]["action"]["enum"]  # type: ignore[index]
+    assert METADATA["name"] in heldout_enum
