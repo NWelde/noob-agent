@@ -45,6 +45,21 @@ FOOTER = 84
 HOLD_SECONDS = 2.5
 CARD_SECONDS = 5.0
 THINKING_GAP_SECONDS = 0.25
+# Demo-only raised limits, applied at runtime by `_apply_demo_limits` so both
+# conditions share them; `src/` and the benchmark budgets are unchanged.
+DEMO_LIMITS: dict[str, int] = {
+    "episode_decisions": 60,
+    "episode_primitives": 180,
+    "episode_wall_ms": 300_000,
+    "repeated_failures": 10,
+    "learning_tokens": 5_000_000,
+    "learning_calls": 2_000,
+    "learning_wall_seconds": 1_800,
+    "builder_output_tokens": 1_000_000,
+    "action_output_tokens": 16_000,
+    "repairs": 3,
+    "doom_timeout_tics": 10_500,
+}
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -102,12 +117,44 @@ class _CapturingGame:
         return getattr(self._inner, name)
 
 
+def _apply_demo_limits() -> None:
+    """Raise every episode, learning, and failure limit for this demo process only."""
+    from noob_agent.runtime import heldout, improvement, runner, sequence
+
+    heldout.HELD_OUT_DECISION_BUDGET = DEMO_LIMITS["episode_decisions"]  # type: ignore[misc]
+    heldout.HELD_OUT_PRIMITIVE_BUDGET = DEMO_LIMITS["episode_primitives"]  # type: ignore[misc]
+    heldout.HELD_OUT_WALL_TIME_MS = DEMO_LIMITS["episode_wall_ms"]  # type: ignore[misc]
+    improvement.HELD_OUT_DECISION_BUDGET = DEMO_LIMITS["episode_decisions"]  # type: ignore[misc]
+    sequence.TRAINING_DECISION_BUDGET = DEMO_LIMITS["episode_decisions"]  # type: ignore[misc]
+    sequence.TRAINING_PRIMITIVE_BUDGET = DEMO_LIMITS["episode_primitives"]  # type: ignore[misc]
+    sequence.TRAINING_WALL_TIME_MS = DEMO_LIMITS["episode_wall_ms"]  # type: ignore[misc]
+    sequence.LEARNING_TOKEN_BUDGET = DEMO_LIMITS["learning_tokens"]  # type: ignore[misc]
+    sequence.LEARNING_CALL_BUDGET = DEMO_LIMITS["learning_calls"]  # type: ignore[misc]
+    runner.REPEATED_FAILURE_LIMIT = DEMO_LIMITS["repeated_failures"]  # type: ignore[misc]
+
+
+def _demo_connector_class() -> Any:
+    from noob_agent.connectors.doom import DoomConnector
+
+    class DemoDoomConnector(DoomConnector):
+        """Lengthens the game's own episode timeout to fit the raised demo budgets."""
+
+        async def reset(self, scenario_id: str, seed: int) -> Any:
+            self._ensure_game().set_episode_timeout(DEMO_LIMITS["doom_timeout_tics"])
+            return await super().reset(scenario_id, seed)
+
+    return DemoDoomConnector
+
+
 def _capturing_connector(sink: dict[str, Any], visible: bool) -> Any:
+    import io
+
     import numpy as np
+    from PIL import Image
 
-    from noob_agent.connectors.doom import DoomConnector, DoomSettings
+    from noob_agent.connectors.doom import DoomSettings
 
-    class CapturingDoomConnector(DoomConnector):
+    class CapturingDoomConnector(_demo_connector_class()):  # type: ignore[misc]
         """Display only: copies every rendered frame; game behaviour is unchanged."""
 
         def _grab(self) -> None:
@@ -119,7 +166,11 @@ def _capturing_connector(sink: dict[str, Any], visible: bool) -> Any:
             if buffer.ndim == 3 and buffer.shape[0] == 3:
                 buffer = buffer.transpose(1, 2, 0)
             sink["times"].append(time.monotonic() - sink["t0"])
-            sink["frames"].append(np.ascontiguousarray(buffer, dtype=np.uint8))
+            encoded = io.BytesIO()
+            Image.fromarray(np.ascontiguousarray(buffer, dtype=np.uint8)).save(
+                encoded, format="JPEG", quality=90
+            )
+            sink["frames"].append(encoded.getvalue())
             sink["labels"].append(sink["label"])
 
         async def reset(self, scenario_id: str, seed: int) -> Any:
@@ -190,7 +241,7 @@ async def _play(
         ),
         executor=executor,
         trace=trace,
-        action_max_output_tokens=settings.model.action_max_output_tokens,
+        action_max_output_tokens=DEMO_LIMITS["action_output_tokens"],
         action_thinking=settings.model.action_thinking,
         on_episode_started=opened.append,
         offered=offered,
@@ -216,7 +267,8 @@ async def _play(
     )
     np.savez_compressed(
         capture_dir / f"{scenario_id}-{seed}-{side}.npz",
-        frames=np.stack(sink["frames"]),
+        frames=np.frombuffer(b"".join(sink["frames"]), dtype=np.uint8),
+        offsets=np.cumsum([0, *(len(frame) for frame in sink["frames"])]),
         times=np.asarray(sink["times"]),
         labels=np.asarray(sink["labels"]),
     )
@@ -274,6 +326,8 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
         )
         return grade_doom_episode(stored, outcome)
 
+    _apply_demo_limits()
+    demo_connector = _demo_connector_class()
     client = build_model_client(settings.model, settings.wandb)
     executor = build_skill_executor(settings.sandbox)
     trace = build_trace_sink(settings.trace, wandb=settings.wandb)
@@ -295,7 +349,11 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
                 loop = ImprovementLoop(
                     max_rounds=args.rounds,
                     grade_success=lambda g: bool(getattr(g, "goal_completed", False)),
-                    connector_factory=lambda: DoomConnector(DoomSettings()),
+                    connector_factory=lambda: demo_connector(DoomSettings()),
+                    learning_token_budget=DEMO_LIMITS["learning_tokens"],
+                    learning_call_budget=DEMO_LIMITS["learning_calls"],
+                    learning_wall_seconds=DEMO_LIMITS["learning_wall_seconds"],
+                    max_repairs=DEMO_LIMITS["repairs"],
                     client=client,
                     model_id=model_id,
                     store=store,
@@ -303,8 +361,8 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
                     executor=executor,
                     grade=grade,
                     trace=trace,
-                    action_max_output_tokens=settings.model.action_max_output_tokens,
-                    builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                    action_max_output_tokens=DEMO_LIMITS["action_output_tokens"],
+                    builder_max_output_tokens=DEMO_LIMITS["builder_output_tokens"],
                     action_thinking=settings.model.action_thinking,
                     builder_thinking=settings.model.builder_thinking,
                     condition=DEMO_CONDITION,
@@ -382,8 +440,57 @@ def _learn_and_play(args: argparse.Namespace, environ: Mapping[str, str]) -> Pat
     finally:
         with suppress(Exception):
             close_trace(trace)
+    meta["weave"] = _weave_trace(run_id, settings.wandb.project)
     (capture_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return capture_dir
+
+
+def _weave_trace(run_id: str, project: str | None) -> dict[str, Any]:
+    """Read this run's calls back from Weave with the live reasoning view's feed."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "live_reasoning_view", Path(__file__).with_name("live_reasoning_view.py")
+    )
+    if spec is None or spec.loader is None or project is None:
+        return {"error": "Weave project or live view unavailable."}
+    view = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = view
+    spec.loader.exec_module(view)
+    import weave
+
+    feed = view.WeaveFeed(weave.init(project), run_id=run_id)
+    count, stable = -1, 0
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline and stable < 3:
+        feed.poll()
+        stable = stable + 1 if len(feed.events) == count else 0
+        count = len(feed.events)
+        time.sleep(3)
+    print(f"weave: {len(feed.events)} events for {run_id}", file=sys.stderr, flush=True)
+    keep = (
+        "kind",
+        "url",
+        "episode_id",
+        "action_id",
+        "action",
+        "arguments",
+        "subgoal",
+        "expected_evidence",
+        "purpose",
+        "skill_name",
+        "code",
+        "status",
+        "tool_name",
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "experiment_id",
+        "scenario_id",
+        "seed",
+    )
+    events = [{k: e.get(k) for k in keep} for e in feed.events]
+    return {"project": project, "events": events, "error": feed.last_error}
 
 
 # ---------------------------------------------------------------- rendering
@@ -403,6 +510,19 @@ class _Canvas:
         from PIL import Image
 
         return Image.new("RGB", (self.width, self.height), (14, 16, 22))
+
+
+def _decode(capture: Any, index: int) -> Any:
+    import io
+
+    from PIL import Image
+
+    cache = capture.setdefault("_cache", {})
+    if index not in cache:
+        cache.clear()
+        start, end = int(capture["offsets"][index]), int(capture["offsets"][index + 1])
+        cache[index] = Image.open(io.BytesIO(capture["frames"][start:end].tobytes())).convert("RGB")
+    return cache[index]
 
 
 def _side_state(capture: Any, summary: dict[str, Any], t: float) -> tuple[int, str, str, Any]:
@@ -443,7 +563,7 @@ def _render_pair(
             x = column * 320 * SCALE
             capture = captures[side]
             index, clock, status, color = _side_state(capture, pair[side], t)
-            frame = Image.fromarray(capture["frames"][index]).resize(
+            frame = _decode(capture, index).resize(
                 (320 * SCALE, 240 * SCALE), Image.Resampling.NEAREST
             )
             image.paste(frame, (x, HEADER))
@@ -473,6 +593,68 @@ def _render_card(canvas: _Canvas, lines: Sequence[tuple[str, Any]], write: Any) 
         y += font.size + 18
     for _ in range(int(CARD_SECONDS * FPS)):
         write(image)
+
+
+def _clip(text: object, width: int) -> str:
+    value = " ".join(str(text or "").split())
+    return value if len(value) <= width else value[: width - 3] + "..."
+
+
+def _render_weave(canvas: _Canvas, meta: dict[str, Any], write: Any) -> None:
+    from PIL import ImageDraw, ImageFont
+
+    weave_meta = meta.get("weave") or {}
+    events = weave_meta.get("events") or []
+    if not events:
+        return
+    mono = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14)
+    builders = [e for e in events if e["kind"] == "builder" and e.get("code")]
+    skill_episodes = {
+        e["episode_id"]
+        for e in events
+        if e["kind"] == "episode" and "-skill-" in str(e.get("experiment_id"))
+    }
+    decisions = [e for e in events if e["kind"] == "decision" and e["episode_id"] in skill_episodes]
+    header = f"W&B Weave trace  |  project {weave_meta.get('project')}  |  run {meta['run_id']}"
+
+    def card(title: str, body: list[tuple[str, Any, tuple[int, int, int]]], url: object) -> None:
+        image = canvas.blank()
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([(0, 0), (canvas.width, 56)], fill=(255, 190, 40))
+        draw.text((24, 14), header, font=canvas.mid, fill=(20, 20, 20))
+        draw.text((24, 70), title, font=canvas.big, fill=(255, 255, 255))
+        y = 118
+        for text, font, color in body:
+            if y > canvas.height - 40:
+                break
+            draw.text((24, y), text, font=font, fill=color)
+            y += font.size + 6
+        draw.text((24, canvas.height - 30), _clip(url, 150), font=canvas.small, fill=(89, 194, 255))
+        for _ in range(int(CARD_SECONDS * 1.6 * FPS)):
+            write(image)
+
+    if builders:
+        final = builders[-1]
+        code = [(line[:120], mono, (210, 220, 230)) for line in str(final["code"]).splitlines()]
+        card(
+            f"Builder ({final.get('purpose')}) wrote skill {final.get('skill_name')}: "
+            f"{final.get('output_tokens')} output tokens, {final.get('latency_ms')} ms",
+            code,
+            final.get("url"),
+        )
+    if decisions:
+        body = []
+        for e in decisions[-24:]:
+            body.append(
+                (
+                    f"{e.get('action_id')}  {e.get('action')} {_clip(e.get('arguments'), 30)}"
+                    f"  ({e.get('latency_ms')} ms)",
+                    canvas.small,
+                    (255, 210, 80),
+                )
+            )
+            body.append((f"    subgoal: {_clip(e.get('subgoal'), 120)}", mono, (210, 220, 230)))
+        card("Action agent decisions with the learned skill", body, decisions[-1].get("url"))
 
 
 def render(capture_dir: Path, output: Path | None = None) -> Path:
@@ -518,7 +700,17 @@ def render(capture_dir: Path, output: Path | None = None) -> Path:
         [
             ("noob-agent: can a model learn a game it has never seen?", canvas.big),
             (f"Model: {meta['model_id']}   Game: Doom (ViZDoom)", canvas.mid),
-            ("Same model, same primitive controls, same held-out budget.", canvas.mid),
+            (
+                "Same model, same primitive controls, same raised demo budget on both sides.",
+                canvas.mid,
+            ),
+            (
+                f"Demo limits: {DEMO_LIMITS['episode_decisions']} decisions, "
+                f"{DEMO_LIMITS['episode_primitives']} actions, "
+                f"{DEMO_LIMITS['episode_wall_ms'] // 1000} s per episode; Builder "
+                f"{DEMO_LIMITS['builder_output_tokens']:,} output tokens.",
+                canvas.small,
+            ),
             (
                 "Left: cold, primitives only.   Right: plus the skill it wrote and validated.",
                 canvas.mid,
@@ -567,6 +759,7 @@ def render(capture_dir: Path, output: Path | None = None) -> Path:
         ("Non-benchmark demo run; see docs/loop-optimization.md for scorecards.", canvas.small)
     )
     _render_card(canvas, lines, write)
+    _render_weave(canvas, meta, write)
     ffmpeg.stdin.close()
     if ffmpeg.wait() != 0:
         raise RuntimeError("ffmpeg failed to encode the video.")
