@@ -2343,7 +2343,7 @@ Inference and the labeled local sandbox:
 - Landing the isolated skill-validation pipeline already written on
   `feature/doom-token-budget-summary` (step 22.0).
 - A loop scorecard and headless benchmark command (step 22.F).
-- Per-role reasoning controls and native tool-call decisions for the shared
+- Per-role reasoning controls and schema-constrained decisions for the shared
   model, used identically by every compared model that supports them
   (step 22.A).
 - Changes to the Action and Builder prompts, Builder evidence selection, and
@@ -2455,31 +2455,45 @@ never worked around by changing budgets, seeds, or grading.
   `src/noob_agent/settings.py`, `src/noob_agent/agents/action.py`,
   `src/noob_agent/prompts/action.py`, `src/noob_agent/domain/records.py`,
   `src/noob_agent/storage/schema.py`, `src/noob_agent/storage/repository.py`,
-  tests, `.env.example`, `CHANGELOG.md`.
-- `ModelRequest` gains optional `thinking: bool | None` and `tools`, and
-  `ModelResponse` gains an optional `tool_call`. The W&B Inference adapter sends
-  `chat_template_kwargs.thinking` only when `thinking` is not `None`, and sends
-  tools with `tool_choice="required"` when tools are given.
+  `src/noob_agent/runtime/sequence.py` and `src/noob_agent/runtime/heldout.py`
+  (to pass the thinking setting), `scripts/run_doom_learning_sequence.py` and
+  `scripts/loop_bench.py` (to read it), new `tests/test_action_decisions.py`,
+  the schema-version and prompt assertions in `tests/test_grader.py` and
+  `tests/test_model_calls.py`, `.env.example`, `CHANGELOG.md`.
+- `ModelRequest` gains optional `thinking: bool | None` and `response_schema`.
+  The W&B Inference adapter sends `chat_template_kwargs.thinking` only when
+  `thinking` is not `None`, and a strict `json_schema` response format when a
+  schema is given. It closes its HTTP client after every call.
 - `ModelSettings` gains `action_thinking` and `builder_thinking`, read from
   `NOOB_AGENT_ACTION_THINKING` and `NOOB_AGENT_BUILDER_THINKING`, both defaulting
   to off.
-- The Action agent offers each primitive and accepted skill as a tool. Every
-  tool also takes required `subgoal` and `expected_evidence` strings and an
-  optional `finding` object, which the agent removes before building the
-  request. A reply without a tool call falls back to the existing JSON parser,
-  so scripted providers keep working. A reply cut off at its cap without a
-  decision is still rejected as `unusable_reply` and is counted separately as
-  truncated.
-- The static instructions move to the system prompt; the user prompt carries
-  the goal, history, and observation.
-- Schema version 4 adds a nullable `request_options_json` column to
-  `model_call` holding thinking, tool names, and tool-choice mode. The change is
-  additive, and a version-3 database opens unchanged.
+- The Action agent asks for the decision schema and parses the reply. A reply
+  that is not a usable decision is still rejected as `unusable_reply`, and one
+  cut off at its cap is also marked truncated.
+- The fixed instructions, including the reply and finding formats, move to the
+  system prompt, which is identical on every turn. The user prompt keeps the
+  goal, the primitive and skill lists, the history, and the observation.
+- Schema version 5 adds a nullable `request_options_json` column (thinking and
+  the reply schema) to `model_call`. Version 4 is skipped because unmerged section 21 work already
+  wrote version-4 local databases. The change is additive: a version-3 or
+  version-4 database gains the columns and keeps every row.
 - Tests first: adapter request shape with thinking on, off, and unset, and with
-  tools; tool-call parsing including removal of intent fields, an unknown tool,
-  invalid arguments, and several calls, where the first is used; fallback to
-  text; truncation classification; settings parsing and defaults; request
-  options recorded and a version-3 database upgraded.
+  a response schema; the decision schema's name enum; parsing of the structured,
+  earlier `tool`, and earlier `skill` reply shapes; truncation classification;
+  compact argument hints; settings parsing and defaults; request options
+  recorded and a version-3 or version-4 database upgraded.
+- **Amendment after the first bench runs (2026-09-13).** Native tool calls met
+  the reliability and latency targets (0 of 100 unusable, p50 634 ms) but the
+  provider's chat template added about 1,250 input tokens for ten tool
+  definitions. Median Action input was 3,156, then 2,273 after trimming, which
+  exceeds the protocol's 40,000-token training ceiling over 20 decisions. On the
+  same recorded prompt a strict JSON-schema reply used 1,209 input tokens with
+  valid output on 3 of 3 attempts. Step 22.A therefore uses a strict JSON-schema
+  reply, `{subgoal, expected_evidence, action, arguments, finding}`, whose
+  `action` is an enum of the offered primitive and skill names, instead of
+  native tool calls. The prompt lists each action with a compact argument hint,
+  such as `turn_left(degrees: integer 1-90)`, and `request_options_json` records
+  the thinking setting and the schema. No `tool_call_json` column is added.
 - Validation: focused tests, the full suites, then `loop_bench.py run` on 5
   sequences. Acceptance: unusable replies below 5% and decision p50 at most
   3 seconds.
@@ -2621,6 +2635,102 @@ Each step reverts alone in reverse order. Reverting 22.A leaves the version-4
 column unused and readable. Reverting 22.D removes the multi-round condition
 and its protocol amendment while leaving `basic-v1` and every single-pass result
 intact. Bench databases are Git-ignored.
+
+## 23. Approved non-benchmark milestone: persistent game and live Weave reasoning view
+
+The requester approved this milestone on 2026-09-13 to strengthen the Best Use
+of Weave demonstration: "Lets use the weave trace to show model reasoning in
+real time alongside the game" and "Make the game not quit everytime it needs to
+do something new. It should be able to persist."
+
+### Evidence
+
+- In `--live-demo`, every episode builds a new `DoomConnector` from the factory,
+  so a fresh ViZDoom window opens for training and for each held-out cell. The
+  section 20 continuity change keeps only the training window open during
+  Builder work.
+- `DoomConnector.reset` already reuses its ViZDoom instance with `set_seed` and
+  `new_episode`, gives each episode a unique ID, and resets its private outcome.
+  Only the sequence's connector ownership forces a new window.
+- Every Action model call, step, and episode is already mirrored to Weave as
+  nested `noob_agent.*` calls. Since step 22.A each Action reply is a JSON object
+  carrying `subgoal`, `expected_evidence`, `action`, and `arguments`. Weave 0.53.9
+  serves incremental queries on call inputs and start time.
+
+### What this approves
+
+- A `persistent_connector` option on `LearningSequence` and the held-out runner.
+  One connector is created for the whole sequence and reset for every episode:
+  training, the Builder pause, and every held-out cell. It closes once at the end,
+  including on error or cancellation. `--live-demo` always uses it, replacing the
+  section 20 training-window continuity flag.
+- A stdlib-only local web view, `scripts/live_reasoning_view.py`, that reads the
+  run's calls from Weave, never from SQLite. It shows each Action decision's
+  subgoal, expected evidence, action, arguments, result, latency, and tokens as
+  they arrive; any provider reasoning; each Builder call's finish reason and
+  code; episode outcomes; and a link to each call in the Weave UI.
+- `--live-view` on `--live-demo`, which starts the view as a child process for
+  the run's sequence ID, prints its local URL, and stops it after the final
+  trace flush.
+
+It does not approve changing what any model, connector, grader, or budget sees
+or computes. The view is display only, and persistence changes no observation,
+reset, or step result. Concurrent held-out cells (step 22.E) are not allowed
+with a persistent connector.
+
+### Step 23a - Persistent game across a sequence
+
+- Files: `src/noob_agent/runtime/sequence.py`, `src/noob_agent/runtime/heldout.py`,
+  `scripts/run_doom_learning_sequence.py`, `tests/test_learning_sequence.py`,
+  `tests/test_doom_live_demo.py`, `tests/test_connectors_doom.py`,
+  `docs/doom-env.md`, `CHANGELOG.md`.
+- Tests first:
+  - With `persistent_connector`, the factory is called once, every episode
+    resets that one connector, every episode gets its own ID and grade, and the
+    connector closes exactly once after the last held-out episode.
+  - It also closes once when the Builder raises and when the sequence is
+    cancelled.
+  - The default still creates and closes one connector per episode.
+  - With real ViZDoom, headless, a reset after a finished episode yields the same
+    observation (apart from the episode ID) and the same step results as a reset
+    on a fresh connector with the same scenario and seed.
+  - `--live-demo` constructs the sequence with `persistent_connector=True`.
+- Acceptance: a live demo keeps one Doom window open from training through the
+  last held-out cell.
+
+### Step 23b - Live Weave reasoning view
+
+- Files: new `scripts/live_reasoning_view.py`, new
+  `tests/test_live_reasoning_view.py`, `scripts/run_doom_learning_sequence.py`,
+  `tests/test_doom_live_demo.py`, `docs/doom-env.md`, `CHANGELOG.md`.
+- Behavior:
+  - `uv run --env-file .env python scripts/live_reasoning_view.py --run-id
+    <sequence-id> [--port 8765]` polls Weave about once a second for new calls
+    whose `experiment_id` or `episode_id` belongs to the run, and serves a page
+    and a JSON event feed on `127.0.0.1`.
+  - The page updates without reloading. It shows the current episode and its
+    latest decision prominently, then a timeline, a Builder panel, and episode
+    outcomes.
+  - A Weave read error keeps the last good events and retries. No prompt text or
+    credential is served.
+- Tests first, with a stand-in Weave client:
+  - events are built from episode, step, Action, Build, and Repair calls;
+  - other runs are excluded;
+  - repeated polls add no duplicates;
+  - structured decision fields and Builder code are extracted;
+  - a read error keeps the last events;
+  - the HTTP server serves the page and the feed;
+  - the served feed carries no prompt or system text;
+  - `--live-view` starts and stops the child process and is refused without
+    `--live-demo` or with tracing disabled.
+- Acceptance: during a live demo, the view beside the Doom window shows each
+  decision from Weave while the game plays.
+
+### Rollback
+
+Each step reverts alone. Reverting 23a restores a new window per episode;
+reverting 23b removes the view. Neither changes the schema or any recorded
+value.
 
 ## References
 

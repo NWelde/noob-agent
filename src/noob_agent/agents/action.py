@@ -37,6 +37,8 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 
 DecisionKind = Literal["primitive", "skill", "unusable"]
 
+CAPPED_FINISH_REASON = "length"
+
 
 class ParsedDecision(BaseModel):
     """What one reply asked for, before anything judged whether it exists."""
@@ -64,6 +66,8 @@ class Decision(BaseModel):
     subgoal: str
     expected_evidence: str
     finding: FindingReport | None = None
+    # The reply ended at its output cap without a usable decision.
+    truncated: bool = False
 
 
 def _first_json_object(reply: str) -> dict[str, JsonValue] | None:
@@ -84,8 +88,12 @@ def _first_json_object(reply: str) -> dict[str, JsonValue] | None:
     return None
 
 
-def parse_decision(reply: str) -> ParsedDecision:
-    """Read one decision out of a reply, fenced or bare; unusable when absent."""
+def parse_decision(reply: str, *, skill_names: frozenset[str] = frozenset()) -> ParsedDecision:
+    """Read one decision out of a reply, fenced or bare; unusable when absent.
+
+    The structured reply names its choice under `action`, which is a skill when
+    it names an offered skill. The earlier `tool` and `skill` shapes still parse.
+    """
     parsed = _first_json_object(reply)
     if parsed is None:
         return ParsedDecision(kind="unusable")
@@ -96,6 +104,17 @@ def parse_decision(reply: str) -> ParsedDecision:
     stated_evidence = expected if isinstance(expected, str) else ""
     finding = parse_finding_report(parsed.get("finding"))
 
+    action = parsed.get("action")
+    if isinstance(action, str) and action:
+        arguments = parsed.get("arguments")
+        return ParsedDecision(
+            kind="skill" if action in skill_names else "primitive",
+            name=action,
+            arguments=arguments if isinstance(arguments, dict) else {},
+            subgoal=stated_subgoal,
+            expected_evidence=stated_evidence,
+            finding=finding,
+        )
     skill = parsed.get("skill")
     if isinstance(skill, str) and skill:
         inputs = parsed.get("inputs")
@@ -126,6 +145,30 @@ def parse_decision(reply: str) -> ParsedDecision:
     )
 
 
+def decision_schema(
+    manifest: ConnectorManifest, skills: Sequence[SkillVersion]
+) -> dict[str, JsonValue]:
+    """The strict JSON Schema of one decision: only offered names, and every field present.
+
+    Argument shapes differ per action, so `arguments` is any object here; the
+    prompt lists each action's arguments, and the connector or skill checks them.
+    """
+    names: list[JsonValue] = [tool.name for tool in manifest.tools]
+    names.extend(skill.name for skill in skills if skill.name not in names)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["subgoal", "expected_evidence", "action", "arguments", "finding"],
+        "properties": {
+            "subgoal": {"type": "string"},
+            "expected_evidence": {"type": "string"},
+            "action": {"type": "string", "enum": names},
+            "arguments": {"type": "object"},
+            "finding": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+        },
+    }
+
+
 class ActionAgent:
     """Chooses one primitive or skill per turn through a model client."""
 
@@ -137,6 +180,7 @@ class ActionAgent:
         skills: Sequence[SkillVersion] = (),
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        thinking: bool | None = None,
     ) -> None:
         for skill in skills:
             if skill.status != "accepted":
@@ -151,6 +195,9 @@ class ActionAgent:
         self._skills = tuple(skills)
         self._history_limit = history_limit
         self._max_output_tokens = max_output_tokens
+        self._thinking = thinking
+        self._schema = decision_schema(manifest, self._skills)
+        self._skill_names = frozenset(skill.name for skill in self._skills)
         self._history: list[HistoryEntry] = []
         self._decisions: list[Decision] = []
         self._pending: dict[str, Decision] = {}
@@ -190,13 +237,17 @@ class ActionAgent:
         )
         response = await self._client.complete(
             ModelRequest(
-                system=ACTION_SYSTEM, prompt=prompt, max_output_tokens=self._max_output_tokens
+                system=ACTION_SYSTEM,
+                prompt=prompt,
+                max_output_tokens=self._max_output_tokens,
+                thinking=self._thinking,
+                response_schema=self._schema,
             )
         )
         self._input_tokens += response.input_tokens
         self._output_tokens += response.output_tokens
 
-        parsed = parse_decision(response.text)
+        parsed = parse_decision(response.text, skill_names=self._skill_names)
         self._issued += 1
         action_id = f"a_{self._issued:04d}"
 
@@ -220,6 +271,7 @@ class ActionAgent:
             subgoal=parsed.subgoal,
             expected_evidence=parsed.expected_evidence,
             finding=parsed.finding,
+            truncated=parsed.kind == "unusable" and response.finish_reason == CAPPED_FINISH_REASON,
         )
         self._decisions.append(decision)
         self._pending[action_id] = decision

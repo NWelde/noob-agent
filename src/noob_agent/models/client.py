@@ -15,7 +15,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from noob_agent.settings import ModelSettings, WandbSettings
 
@@ -25,7 +25,12 @@ class ModelUnavailableError(RuntimeError):
 
 
 class ModelRequest(BaseModel):
-    """One bounded completion request."""
+    """One bounded completion request.
+
+    `thinking` is `None` to leave the provider's reasoning default untouched.
+    A `response_schema` asks the provider for a reply constrained to that JSON
+    Schema.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -33,6 +38,12 @@ class ModelRequest(BaseModel):
     prompt: str = Field(min_length=1)
     max_output_tokens: int = Field(gt=0)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    thinking: bool | None = None
+    response_schema: dict[str, JsonValue] | None = None
+
+    def options(self) -> dict[str, JsonValue]:
+        """The request settings a Model call record keeps beside the prompt."""
+        return {"thinking": self.thinking, "response_schema": self.response_schema}
 
 
 class ModelResponse(BaseModel):
@@ -114,15 +125,37 @@ class WandbInferenceClient:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         """Run one completion against W&B Inference."""
         client = self._client()
-        completion = await client.chat.completions.create(
-            model=self._model.inference_model,
-            messages=[
-                {"role": "system", "content": request.system},
-                {"role": "user", "content": request.prompt},
-            ],
-            max_tokens=request.max_output_tokens,
-            temperature=request.temperature,
-        )
+        options: dict[str, Any] = {}
+        if request.thinking is not None:
+            # W&B Inference passes this to the model's chat template; verified for
+            # DeepSeek-V4-Flash on 2026-09-13 (hackathon_plan.md section 22).
+            options["extra_body"] = {"chat_template_kwargs": {"thinking": request.thinking}}
+        if request.response_schema is not None:
+            options["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "decision",
+                    "strict": True,
+                    "schema": request.response_schema,
+                },
+            }
+        try:
+            completion = await client.chat.completions.create(
+                model=self._model.inference_model,
+                messages=[
+                    {"role": "system", "content": request.system},
+                    {"role": "user", "content": request.prompt},
+                ],
+                max_tokens=request.max_output_tokens,
+                temperature=request.temperature,
+                **options,
+            )
+        finally:
+            # Each call may run under a different event loop, so its HTTP client
+            # is closed here rather than left for garbage collection.
+            close = getattr(client, "close", None)
+            if close is not None:
+                await close()
         choice = completion.choices[0]
         usage = completion.usage
         input_tokens = getattr(usage, "prompt_tokens", None)

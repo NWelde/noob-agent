@@ -68,6 +68,9 @@ class ModelSettings(BaseModel):
         gt=0,
         le=BUILDER_MAX_OUTPUT_TOKENS_CEILING,
     )
+    # Provider reasoning per role; off by default (hackathon_plan.md section 22).
+    action_thinking: bool = False
+    builder_thinking: bool = False
 
 
 class SandboxSettings(BaseModel):
@@ -132,6 +135,8 @@ class IntegrationSettings(BaseModel):
                         str(DEFAULT_BUILDER_MAX_OUTPUT_TOKENS),
                     )
                 ),
+                action_thinking=_read_bool(values, "NOOB_AGENT_ACTION_THINKING", False),
+                builder_thinking=_read_bool(values, "NOOB_AGENT_BUILDER_THINKING", False),
             ),
             sandbox=SandboxSettings(
                 api_key=values.get("CWSANDBOX_API_KEY") or None,

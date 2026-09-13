@@ -168,6 +168,7 @@ class RecordingModelClient:
             latency_ms=latency_ms,
             error=error,
             started_at=started_at,
+            request_options=request.options(),
         )
 
     def _write(self, record: ModelCallRecord) -> None:

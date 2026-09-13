@@ -175,6 +175,14 @@ step 8a:
 - **Rejected requests.** A rejected request advances the public sequence, like
   any other durable result, and charges no primitive.
 
+- **One game per sequence.** `LearningSequence(persistent_connector=True)`
+  creates one connector and resets it for training and every held-out cell,
+  grading each episode before the next reset and closing the game once at the
+  end, including on error or cancellation (`hackathon_plan.md` §23, step 23a).
+  `--live-demo` always uses it, so one Doom window stays open from training
+  through the Builder pause to the last held-out cell. A reset after a finished
+  episode matches a reset on a fresh connector.
+
 Verify with `uv run pytest tests/test_connectors_doom.py -v`.
 
 ## Watching a recorded episode
