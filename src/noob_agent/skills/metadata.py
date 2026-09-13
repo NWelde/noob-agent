@@ -28,8 +28,8 @@ class SkillMetadata(BaseModel):
     purpose: str = Field(min_length=1)
     input_schema: dict[str, Any] = Field(default_factory=dict)
     required_tools: tuple[str, ...] = Field(min_length=1)
-    max_primitive_actions: int = Field(gt=0)
-    max_wall_time_seconds: float = Field(gt=0)
+    max_primitive_actions: int = Field(gt=0, le=8)
+    max_wall_time_seconds: float = Field(gt=0, le=30)
     success_claim: str = Field(min_length=1)
     api_version: str
 
