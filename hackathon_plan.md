@@ -1307,6 +1307,170 @@ comparison logic, or dependencies.
   produce a fresh public observation; and the complete repository test, lint,
   and type-check suites pass without a dependency change.
 
+## 16. Approved core-loop milestone: live Minecraft clean/faulty grading
+
+This section is the explicit approval required by `CLAUDE.md` and `AGENTS.md`
+to finish build-order step 6 against the live Minecraft server. Section 14
+approved the grader and reproduction logic, which is on `main`, but it did not
+approve the evaluation scenario builds or any way for the grader to read
+private scenario state from a running world. Without those, BDP criteria 9-10
+are satisfied only against fakes.
+
+It authorizes: a new evaluation data pack containing the validation variation
+and the matched clean/faulty held-out layouts from `minecraft_scenario.md`; a
+grader-only control channel to the local server; a Minecraft
+`PrivateStateSource`; a matched clean-twin replay; the local server's RCON
+settings and one local RCON credential; and the documentation for them.
+
+It does not authorize changes to the public connector, its Mineflayer sidecar,
+`connector_contract.md`, the primitive manifest, tool semantics, the Action or
+Builder prompts, budgets, stop rules, the existing grader verdict rules in
+`src/noob_agent/grading/grader.py`, the storage schema, the comparison runner,
+the report-generation path, or project dependencies. The ViZDoom sequence
+(step 8) and the comparison runner (step 9) remain out of scope.
+
+### Design constraints
+
+- **Separate private channel.** The grader reaches the world only through
+  vanilla RCON, bound to `127.0.0.1` on the local server, using a stdlib Python
+  client. It never goes through `MinecraftConnector`, the sidecar, or the
+  `noobagentbot` session. The RCON password is read from the local `.env` as
+  `NOOB_AGENT_MINECRAFT_RCON_PASSWORD`; `.env.example` gets only a blank key.
+  The password is never logged, stored in SQLite, traced, or committed.
+- **Private build selection before an unchanged reset.** Before each reset the
+  grader-side controller writes the layout, build, and seed into a private
+  scoreboard objective, `noob_agent.private`, over RCON. The connector's existing
+  `function noob_agent:reset` then builds whatever that objective selects. The
+  reset clears `noob_agent.state` but never `noob_agent.private`. The public
+  `scenario_id` names only the layout, such as `resonator-layout-a`, and the
+  existing `ScenarioBuild` validator already refuses IDs that name either build.
+- **No leakage.** The pack never gives `noob_agent.private` or
+  `noob_agent.state` a display slot, and never writes build identity, seed, or
+  predicate values into titles, chat, item names, block names, or entity names.
+  Clean and faulty builds share every public message, label, layout, starting
+  inventory, and timing. The only public difference is the planted output
+  count.
+- **Predicates.** `supplied_first_input`, `started_process`, `created_key`, and
+  `goal_completed` are latched scoreboard values set by the pack's own device
+  and gateway functions. `inputs_consumed` and `outputs_created` are the
+  existing counters. `unrelated_state_unchanged` is decided inside each
+  processing event: the distractor container contents and the gateway state are
+  the same before and after the event. `found_device` is taken from the
+  episode's own public record: one succeeded `inspect_object` step whose target
+  was publicly labeled `Resonator`. The pack does not try to detect an
+  inspection itself.
+- **Seeds and fingerprints.** Each held-out layout gets three precommitted
+  seeds. A seed selects one documented arrangement of irrelevant details inside
+  a layout, such as supply-slot order and distractor-slot order. It never
+  changes the rule, counts, timing, or messages. Each build's fingerprint is the
+  SHA-256 of its function sources in a stable order. The seeds, fingerprints,
+  and build labels live in a grader-side manifest. Action, Builder, prompt, and
+  skill code never imports that manifest, and a test enforces it. The
+  controller aborts before observation zero when the deployed fingerprint does
+  not match the manifest.
+- **Clean twin.** A new matched-pair helper replays a finding's existing
+  `evidence_sequence` on the clean build of the same layout with the same seed
+  as the reported episode. Like reproduction, it uses ordinary primitives and a
+  fresh connector, and it returns the clean build's `PrivateScenarioState` for
+  `verify_finding`. No model is called and no skill runs.
+
+### Step 6a - Resonator evaluation data pack
+
+- Files: new `scenarios/minecraft/resonator-eval-v1/`, a vanilla 1.21.1 data
+  pack in the `noob_agent` namespace with `pack.mcmeta`, load/tick tags,
+  `load`, `reset`, `tick`, a private-selection dispatcher, one build function
+  each for `training`, `validation`, `layout_a`, and `layout_b`, the device and
+  gateway functions branching on the private build, and oracle functions for
+  every held-out build; `manifest.json` for seeds and fingerprints; and
+  `README.md`. The `training` layout reproduces
+  `scenarios/minecraft/resonator-training-v1` exactly, and that directory stays
+  unchanged as the frozen reference. The deployed world enables either this
+  pack or the training pack, never both. The data pack uses one file per
+  function, so this step is explicitly approved to exceed the 10-file
+  pull-request limit. The approval covers only files under this directory,
+  `tests/test_resonator_eval_scenario.py`, and `CHANGELOG.md`.
+- Tests first: `tests/test_resonator_eval_scenario.py`. The training layout
+  matches the training-v1 room. Clean and faulty `device/complete` differ only
+  in the output count, one against two, for both the counter and the item.
+  Reset clears `noob_agent.state` but never `noob_agent.private`. No function
+  gives a private objective a display slot or puts a build word, seed, or
+  predicate value into a title, `tellraw`, or name. Every held-out build has an
+  oracle. The manifest has three distinct seeds per held-out layout. The
+  manifest's fingerprints match the source.
+- Validation: `uv run pytest tests/test_resonator_eval_scenario.py -v`.
+  Manually, deploy the pack to the local world and run every oracle from the
+  server console. Record that the clean oracles report one output and open the
+  gateway, the faulty oracles report two outputs, every clean oracle leaves the
+  fault predicate false, and fixed-seed resets give identical grader-relevant
+  state.
+- Acceptance: the scenario acceptance checklist in `minecraft_scenario.md` for
+  the validation variation and both held-out layouts.
+
+### Step 6b - Grader-only private channel and state source
+
+- Files: new `src/noob_agent/grading/minecraft_rcon.py`, a stdlib asyncio RCON
+  client with its own frozen settings read from `NOOB_AGENT_MINECRAFT_RCON_*`.
+  New `src/noob_agent/grading/minecraft_private.py`, containing
+  `MinecraftScenarioController` for private selection and the fingerprint check,
+  and `MinecraftPrivateStateSource` implementing the existing
+  `PrivateStateSource` protocol. New `tests/test_minecraft_rcon.py` and
+  `tests/test_minecraft_private_state.py`. Blank keys in `.env.example`. RCON
+  setup in `docs/minecraft-server.md`. `CHANGELOG.md`. The server's
+  `server.properties` lives outside Git and is changed by hand only to set
+  `enable-rcon=true`, `rcon.port`, and the local password. The RCON port is
+  never exposed beyond the WSL host.
+- Tests first: against a local in-process fake RCON server, with no Minecraft
+  server and no credentials. Authentication failure and a lost connection
+  raise typed errors and never return a partial state. Scoreboard replies
+  parse into a `PrivateScenarioState`, and a missing or malformed score is an
+  error, not zero. A fingerprint mismatch aborts before any reset. The password
+  never appears in an exception message, repr, or log record. No module under
+  `agents/`, `prompts/`, `skills/`, `runtime/`, or `connectors/` imports the RCON
+  client, the controller, or the grader-side manifest.
+- Validation: `uv run pytest tests/test_minecraft_rcon.py
+  tests/test_minecraft_private_state.py -v`. Manually, with RCON enabled
+  locally, select each build, reset through the unchanged connector, and read
+  back the expected initial private state.
+- Acceptance: the grader can select a build and read every private predicate
+  from the live world. The public connector, sidecar, and manifest are
+  byte-identical to `main`.
+
+### Step 6c - Live matched pair and reproduction
+
+- Files: new `src/noob_agent/grading/matched_pair.py` for the clean-twin
+  replay; new `tests/test_matched_pair.py`; new
+  `tests/test_minecraft_live_grading.py`; an update to
+  `docs/current-status.md`; and `CHANGELOG.md`.
+- Tests first: `tests/test_matched_pair.py` runs against the fake connector
+  and a fake private source. The clean twin replays exactly
+  `evidence_sequence` on the clean build with the reported episode's seed. A
+  replay that diverges or is lost returns no state rather than a guessed one.
+  The helper never reads or writes the build label through the public
+  connector. `tests/test_minecraft_live_grading.py` skips cleanly, not
+  silently, when the server, sidecar, or RCON is unavailable. With them, it
+  records a scripted oracle episode on `layout_a` faulty through the existing
+  `EpisodeRunner`. It builds a finding whose counts and public evidence come
+  from that record. It runs the clean twin, and `verify_finding` returns
+  `confirmed`. A fresh reproduction on a different precommitted seed returns
+  `reproduced`. The same scripted report against the clean build is `rejected`
+  with `no_predicate_hit`. Every stored observation, step, and finding
+  contains no build word, private objective name, seed-arrangement label, or
+  predicate value.
+- Validation: `uv run pytest tests/test_matched_pair.py
+  tests/test_minecraft_live_grading.py -v` against the live server, then the
+  full test, Ruff, and strict mypy suites.
+- Acceptance: BDP criteria 9-10 on the live server. A matched faulty variation
+  produces a candidate defect. A fresh reset independently reproduces it. The
+  matched clean build rejects it as a false alarm.
+
+### Rollback
+
+Each step is its own pull request and can be reverted alone. Rolling back 6a
+means re-enabling `resonator-training-v1` in the local world. Rolling back 6b
+also means setting `enable-rcon=false` and deleting the local password. None of
+these steps changes the SQLite schema, so no database migration or downgrade is
+involved.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
