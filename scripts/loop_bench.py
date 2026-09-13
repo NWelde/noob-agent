@@ -179,6 +179,7 @@ def _run(
                     trace=trace,
                     action_max_output_tokens=settings.model.action_max_output_tokens,
                     builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                    action_thinking=settings.model.action_thinking,
                     condition=BENCH_CONDITION,
                 )
                 try:
