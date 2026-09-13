@@ -141,6 +141,7 @@ def _patch_run_script(
     monkeypatch.setattr(module, "build_skill_executor", lambda settings: object())
     monkeypatch.setattr(module, "build_model_client", lambda model, wandb: object())
     monkeypatch.setattr(module, "LearningSequence", FakeSequence)
+    monkeypatch.setattr(module, "_missing_packages", lambda settings: [])
     monkeypatch.setattr(
         module,
         "_cells",
@@ -152,6 +153,7 @@ def _patch_run_script(
 
 def _run_environment() -> dict[str, str]:
     return {
+        "WANDB_API_KEY": "test-key",
         "NOOB_AGENT_MODEL_PROVIDER": "wandb-inference",
         "NOOB_AGENT_INFERENCE_MODEL": "fake-model",
         "NOOB_AGENT_SANDBOX_MODE": "local",
