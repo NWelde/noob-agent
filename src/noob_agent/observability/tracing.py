@@ -62,6 +62,18 @@ class NullTraceSink:
     def flush(self) -> None:
         return None
 
+    def close(self) -> None:
+        return None
+
+
+def close_trace(trace: TraceSink) -> None:
+    """End a run's tracing: close open episodes where the sink supports it, then deliver."""
+    close = getattr(trace, "close", None)
+    if callable(close):
+        close()
+    else:
+        trace.flush()
+
 
 def episode_started_event(record: EpisodeRecord) -> TraceEvent:
     """Describe an episode that is already durable in the local store."""
@@ -161,40 +173,45 @@ class WeaveTraceSink:
 
     def __init__(self, client: WeaveClient) -> None:
         self._client = client
-        self._episode_call: object | None = None
+        # Open episode calls by episode ID, so concurrent episodes nest their own calls.
+        self._episode_calls: dict[str, object] = {}
 
     def record(self, event: TraceEvent) -> None:
         with suppress(Exception):
-            if event.name == EPISODE_STARTED:
-                self._episode_call = self._client.create_call(
+            episode_id = event.attributes.get("episode_id")
+            parent = self._episode_calls.get(episode_id) if isinstance(episode_id, str) else None
+            if event.name == EPISODE_STARTED and isinstance(episode_id, str):
+                self._episode_calls[episode_id] = self._client.create_call(
                     EPISODE_OP_NAME, event.attributes, None
                 )
             elif event.name == EPISODE_STEP:
                 # A recorded step is already complete, so its call opens and
-                # closes together, nested under the episode.
-                call = self._client.create_call(STEP_OP_NAME, event.attributes, self._episode_call)
+                # closes together, nested under its episode.
+                call = self._client.create_call(STEP_OP_NAME, event.attributes, parent)
                 self._client.finish_call(call, event.attributes)
             elif event.name == MODEL_CALL:
-                call = self._client.create_call(
-                    MODEL_CALL_OP_NAME, event.attributes, self._episode_call
-                )
+                # A Builder call names a finished episode, so it stays top level.
+                call = self._client.create_call(MODEL_CALL_OP_NAME, event.attributes, parent)
                 self._client.finish_call(call, event.attributes)
-            elif event.name == EPISODE_FINISHED:
-                self._finish_episode(event.attributes)
+            elif event.name == EPISODE_FINISHED and isinstance(episode_id, str):
+                call = self._episode_calls.pop(episode_id, None)
+                if call is not None:
+                    self._client.finish_call(call, event.attributes)
 
     def flush(self) -> None:
-        """Close an open episode and ask the client to deliver buffered calls."""
-        with suppress(Exception):
-            self._finish_episode(None)
+        """Ask the client to deliver buffered calls; running episodes stay open."""
         with suppress(Exception):
             client_flush = getattr(self._client, "flush", None)
             if callable(client_flush):
                 client_flush()
 
-    def _finish_episode(self, output: dict[str, JsonValue] | None) -> None:
-        call, self._episode_call = self._episode_call, None
-        if call is not None:
-            self._client.finish_call(call, output)
+    def close(self) -> None:
+        """At run exit: close any episode call still open, then deliver everything."""
+        with suppress(Exception):
+            while self._episode_calls:
+                _, call = self._episode_calls.popitem()
+                self._client.finish_call(call, None)
+        self.flush()
 
 
 def _weave_client(project: str) -> WeaveClient:
