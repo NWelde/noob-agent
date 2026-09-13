@@ -135,6 +135,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         max_repairs: int = 1,
         action_max_output_tokens: int = DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
         builder_max_output_tokens: int = DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
+        condition: str = "self-improving",
     ) -> None:
         self._connector_factory = connector_factory
         self._client = client
@@ -148,6 +149,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._max_repairs = max_repairs
         self._action_max_output_tokens = action_max_output_tokens
         self._builder_max_output_tokens = builder_max_output_tokens
+        self._condition = condition
 
     def _recording(
         self, experiment: ExperimentRecord, *, role: ModelRole, episode_id: str | None = None
@@ -185,12 +187,14 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             model_id=self._model_id,
             connector_version=manifest.connector_version,
             created_at=created_at,
+            condition=self._condition,
         )
         heldout_record = heldout_experiment(
             experiment_id=f"{sequence_id}-heldout",
             model_id=self._model_id,
             connector_version=manifest.connector_version,
             created_at=created_at,
+            condition=self._condition,
         )
         self._store.create_experiment(training_record)
         self._store.create_experiment(heldout_record)

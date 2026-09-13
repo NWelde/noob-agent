@@ -17,6 +17,7 @@ durable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from contextlib import suppress
@@ -220,112 +221,123 @@ class EpisodeRunner:
         skill_uses: list[SkillUseRecord] = []
         stop_reason: StopReason | None = "terminal_state" if terminal else None
 
-        while stop_reason is None:
-            if decisions_used >= experiment.decision_budget:
-                stop_reason = "decision_limit"
-                break
-            if self._clock.monotonic_ms() - started_ms >= experiment.wall_time_budget_ms:
-                stop_reason = "wall_time_limit"
-                break
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            while stop_reason is None:
+                if decisions_used >= experiment.decision_budget:
+                    stop_reason = "decision_limit"
+                    break
+                if self._clock.monotonic_ms() - started_ms >= experiment.wall_time_budget_ms:
+                    stop_reason = "wall_time_limit"
+                    break
 
-            request = await self._policy.choose(observation)
-            decisions_used += 1
+                request = await self._policy.choose(observation)
+                decisions_used += 1
 
-            if isinstance(request, SkillRequest):
-                version = None if self._skills is None else self._skills.lookup(request.skill_name)
-                if version is not None and self._skills is not None:
-                    invocation = await self._skills.invoke(
-                        request,
-                        version,
-                        connector=self._connector,
-                        manifest=manifest,
-                        observation=observation,
-                        sequence=sequence,
-                        record_step=self._store.append_step,
-                        remaining_primitives=experiment.primitive_budget - primitives_used,
-                        remaining_wall_ms=experiment.wall_time_budget_ms
-                        - (self._clock.monotonic_ms() - started_ms),
+                if isinstance(request, SkillRequest):
+                    version = (
+                        None if self._skills is None else self._skills.lookup(request.skill_name)
                     )
-                    # Every nested primitive was recorded before the skill saw
-                    # its result; mirror and charge them here in order.
-                    streak_count = 0
-                    for step in invocation.steps:
-                        self._mirror(step_event(step))
-                        primitives_used += step.result.primitive_actions_charged
-                        streak_count = streak.record(step.request, step.result)
-                        sequence = step.sequence
-                    observation = invocation.observation
-                    terminal = observation.terminal
-                    skill_uses.append(invocation.use)
-                    self._notice(request, invocation)
+                    if version is not None and self._skills is not None:
+                        invocation = await self._skills.invoke(
+                            request,
+                            version,
+                            connector=self._connector,
+                            manifest=manifest,
+                            observation=observation,
+                            sequence=sequence,
+                            record_step=self._store.append_step,
+                            remaining_primitives=experiment.primitive_budget - primitives_used,
+                            remaining_wall_ms=experiment.wall_time_budget_ms
+                            - (self._clock.monotonic_ms() - started_ms),
+                        )
+                        # Every nested primitive was recorded before the skill saw
+                        # its result; mirror and charge them here in order.
+                        streak_count = 0
+                        for step in invocation.steps:
+                            self._mirror(step_event(step))
+                            primitives_used += step.result.primitive_actions_charged
+                            streak_count = streak.record(step.request, step.result)
+                            sequence = step.sequence
+                        observation = invocation.observation
+                        terminal = observation.terminal
+                        skill_uses.append(invocation.use)
+                        self._notice(request, invocation)
 
-                    if invocation.connector_lost:
-                        stop_reason = "connector_lost"
-                    elif invocation.unknown_result or invocation.record_failed:
-                        stop_reason = "unknown_result"
-                    elif terminal:
-                        stop_reason = "terminal_state"
-                    elif streak_count >= REPEATED_FAILURE_LIMIT:
-                        stop_reason = "repeated_failure"
-                    elif primitives_used >= experiment.primitive_budget:
-                        stop_reason = "primitive_limit"
-                    continue
+                        if invocation.connector_lost:
+                            stop_reason = "connector_lost"
+                        elif invocation.unknown_result or invocation.record_failed:
+                            stop_reason = "unknown_result"
+                        elif terminal:
+                            stop_reason = "terminal_state"
+                        elif streak_count >= REPEATED_FAILURE_LIMIT:
+                            stop_reason = "repeated_failure"
+                        elif primitives_used >= experiment.primitive_budget:
+                            stop_reason = "primitive_limit"
+                        continue
 
-                # A skill that was not offered is an undeclared tool: the
-                # connector refuses it, costing a decision and no primitive.
-                request = ToolRequest(
-                    action_id=request.action_id,
-                    tool_name=request.skill_name,
-                    arguments=request.inputs,
-                )
-
-            sequence += 1
-            try:
-                result = await self._connector.step(request)
-            except ConnectorLostError:
-                # No durable result arrives, so nothing is recorded for this action.
-                stop_reason = "connector_lost"
-                break
-
-            # A result the harness cannot durably record is a result whose effect
-            # on the game cannot be confirmed, so the episode ends the same way an
-            # unknown action ends it: recorded, and never retried. Crashing here
-            # would leave an episode row with no outcome in the source of truth.
-            try:
-                if result.sequence != sequence:
-                    raise ValueError(
-                        f"The connector returned sequence {result.sequence}, expected {sequence}."
+                    # A skill that was not offered is an undeclared tool: the
+                    # connector refuses it, costing a decision and no primitive.
+                    request = ToolRequest(
+                        action_id=request.action_id,
+                        tool_name=request.skill_name,
+                        arguments=request.inputs,
                     )
-                step = StepRecord(
-                    episode_id=episode_id,
-                    sequence=result.sequence,
-                    request=request,
-                    result=result,
-                )
-                self._store.append_step(step)
-            except (ValidationError, ValueError, StorageError):
-                stop_reason = "unknown_result"
-                break
 
-            self._mirror(step_event(step))
+                sequence += 1
+                try:
+                    result = await self._connector.step(request)
+                except ConnectorLostError:
+                    # No durable result arrives, so nothing is recorded for this action.
+                    stop_reason = "connector_lost"
+                    break
 
-            primitives_used += result.primitive_actions_charged
-            observation = result.observation
-            terminal = result.observation.terminal
-            self._notice(request, result)
+                # A result the harness cannot durably record is a result whose effect
+                # on the game cannot be confirmed, so the episode ends the same way an
+                # unknown action ends it: recorded, and never retried. Crashing here
+                # would leave an episode row with no outcome in the source of truth.
+                try:
+                    if result.sequence != sequence:
+                        raise ValueError(
+                            f"The connector returned sequence {result.sequence}, "
+                            f"expected {sequence}."
+                        )
+                    step = StepRecord(
+                        episode_id=episode_id,
+                        sequence=result.sequence,
+                        request=request,
+                        result=result,
+                    )
+                    self._store.append_step(step)
+                except (ValidationError, ValueError, StorageError):
+                    stop_reason = "unknown_result"
+                    break
 
-            if result.code == "CONNECTOR_LOST":
-                stop_reason = "connector_lost"
-            elif result.status == "unknown":
-                # An unknown action may have changed the game, so it is never
-                # retried and the episode ends as an infrastructure ambiguity.
-                stop_reason = "unknown_result"
-            elif terminal:
-                stop_reason = "terminal_state"
-            elif streak.record(request, result) >= REPEATED_FAILURE_LIMIT:
-                stop_reason = "repeated_failure"
-            elif primitives_used >= experiment.primitive_budget:
-                stop_reason = "primitive_limit"
+                self._mirror(step_event(step))
+
+                primitives_used += result.primitive_actions_charged
+                observation = result.observation
+                terminal = result.observation.terminal
+                self._notice(request, result)
+
+                if result.code == "CONNECTOR_LOST":
+                    stop_reason = "connector_lost"
+                elif result.status == "unknown":
+                    # An unknown action may have changed the game, so it is never
+                    # retried and the episode ends as an infrastructure ambiguity.
+                    stop_reason = "unknown_result"
+                elif terminal:
+                    stop_reason = "terminal_state"
+                elif streak.record(request, result) >= REPEATED_FAILURE_LIMIT:
+                    stop_reason = "repeated_failure"
+                elif primitives_used >= experiment.primitive_budget:
+                    stop_reason = "primitive_limit"
+        except asyncio.CancelledError as error:
+            # A deadline can interrupt a provider, skill, or connector while no
+            # durable result exists. Preserve the episode as an unknown result
+            # before allowing cancellation to close the connector and propagate.
+            cancellation = error
+            stop_reason = "unknown_result"
 
         outcome = EpisodeOutcome(
             episode_id=episode_id,
@@ -339,6 +351,8 @@ class EpisodeRunner:
         self._mirror(episode_finished_event(outcome))
         with suppress(Exception):
             self._trace.flush()
+        if cancellation is not None:
+            raise cancellation
         return EpisodeResult(
             episode_id=episode_id,
             stop_reason=stop_reason,

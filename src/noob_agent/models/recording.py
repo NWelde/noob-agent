@@ -19,6 +19,7 @@ handed back to an agent.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -91,7 +92,7 @@ class RecordingModelClient:
         started_ms = self._clock.monotonic_ms()
         try:
             response = await self._inner.complete(request)
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
             latency_ms = max(0, self._clock.monotonic_ms() - started_ms)
             # The provider's error is the one that matters; a record that cannot
             # be written must not replace it.

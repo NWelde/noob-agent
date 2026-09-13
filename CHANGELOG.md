@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-12 23:41 PDT | [ADDED] | Added an explicit `--live-demo` mode to the Doom learning-sequence runner: every game episode opens visibly and runs at native speed, the whole sequence has a configurable deadline capped at 600 seconds, storage and experiment records are labeled `non-benchmark-live-demo`, and timeout cleanup durably records cancelled model calls and finalizes an interrupted episode before closing Doom and flushing Weave. Normal evaluation defaults are unchanged.
+
 2026-09-12 23:35 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 20 for a visibly rendered, real-time, Weave-traced Doom learning sequence with a 600-second whole-run deadline, separate storage, cancellation-safe durable records, and explicit `non-benchmark-live-demo` labeling while leaving ordinary evaluation defaults unchanged.
 
 2026-09-12 23:14 PDT | [ADDED] | Added `scripts/replay_doom_episode.py` for step 19b, which lists the Doom episodes in a database or replays one in a visible, real-time ViZDoom window from a temporary copy of the store, checks every step against the record, stops with exit 1 at the first mismatch, refuses non-Doom episodes and other connector versions, and never calls a model, the Builder, a grader, or a skill executor. A headless replay of the first live Doom run matched all 20 steps.

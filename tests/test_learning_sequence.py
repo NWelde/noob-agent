@@ -264,6 +264,30 @@ async def test_training_and_heldout_experiments_carry_the_frozen_budgets(
     assert "weaker isolation" in result.skill_isolation_note
 
 
+async def test_a_non_benchmark_condition_labels_both_experiments(store: EpisodeStore) -> None:
+    sequence = LearningSequence(
+        connector_factory=ConnectorFactory(),
+        client=RoutingModelClient(ACCEPTABLE_CANDIDATE),
+        model_id="fake-model",
+        store=store,
+        registry=SkillRegistry(),
+        executor=LocalSubprocessSkillExecutor(),
+        grade=recording_grader([]),
+        clock=FakeClock(wall=STARTED_AT),
+        condition="non-benchmark-live-demo",
+    )
+
+    result = await sequence.run(
+        sequence_id="live-demo-seq",
+        training_scenario_id=TRAINING,
+        training_seed=7,
+        heldout=HELDOUT_CELLS,
+    )
+
+    assert result.training_experiment.condition == "non-benchmark-live-demo"
+    assert result.heldout_experiment.condition == "non-benchmark-live-demo"
+
+
 @pytest.mark.parametrize(
     "heldout",
     [
