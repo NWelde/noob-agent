@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import importlib.util
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
@@ -62,6 +63,7 @@ RESET_COMMANDS = ("function noob_agent_easy:reset",)
 SEED = 20260913
 SUCCESS_MESSAGE = "The iron-bar gateway opens."
 SUCCESS_REASON = "gateway_open"
+_TRANSCRIPT_ECHO = re.compile(r"^(?:<[^>]+> )?\[noob:")
 EASY_PUBLIC_GOAL = (
     "Open the iron-bar gateway in front of you. Press the stone button labelled "
     "Gate Button beside the iron bars with use_object. Success is visible: the "
@@ -134,8 +136,13 @@ class EasyGoalConnector:
         self.episode_id: str | None = None
 
     def _public(self, observation: Observation) -> Observation:
-        update: dict[str, object] = {"public_goal": EASY_PUBLIC_GOAL}
-        if any(message.text == SUCCESS_MESSAGE for message in observation.messages):
+        # The server echoes the bot's own narration back as `<name> [noob:...]`.
+        # The sidecar drops it too; this keeps the diagnostic safe on its own.
+        messages = tuple(
+            message for message in observation.messages if not _TRANSCRIPT_ECHO.match(message.text)
+        )
+        update: dict[str, object] = {"public_goal": EASY_PUBLIC_GOAL, "messages": messages}
+        if any(message.text == SUCCESS_MESSAGE for message in messages):
             update.update(terminal=True, terminal_reason=SUCCESS_REASON)
         return observation.model_copy(update=update)
 
