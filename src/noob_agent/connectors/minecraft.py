@@ -567,8 +567,15 @@ class MinecraftConnector:
     def _rejected(
         self, request: ToolRequest, code: str, message: str, started_ms: float
     ) -> StepResult:
-        """Refuse a request that was never sent, charging no primitive call."""
+        """Refuse a request that was never sent, charging no primitive call.
+
+        A rejection is still one durable result, and the harness records every
+        result as a step with its own sequence, so the public sequence advances
+        here exactly as it does for a delivered primitive.
+        """
+        self._sequence += 1
         observation = self._carried_observation(last_action_id=request.action_id, stale=False)
+        self._latest = observation
         return StepResult(
             action_id=request.action_id,
             sequence=self._sequence,
