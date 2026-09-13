@@ -41,6 +41,8 @@ from noob_agent.skills.contract import EvidenceRef, SkillContext, SkillResult
 
 async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
     """Center the visible target by its screen offset and fire until the episode ends."""
+    if inputs:
+        return SkillResult(status="failed", summary="Unexpected input.", primitive_actions_used=0)
     observation = await context.observe()
     used = 0
     for _ in range(8):
@@ -59,6 +61,9 @@ async def run(context: SkillContext, inputs: dict[str, object]) -> SkillResult:
                 tool = "turn_right" if offset > 0 else "turn_left"
                 result = await context.call(tool, degrees=degrees)
         used += result.primitive_actions_charged
+        if result.status == "unknown":
+            return SkillResult(status="inconclusive", summary=f"{result.code}",
+                               primitive_actions_used=used)
         if result.status != "succeeded":
             return SkillResult(status="failed", summary=f"{result.code}",
                                primitive_actions_used=used)
@@ -99,6 +104,13 @@ class ScriptedDoomProvider:
 
     def __init__(self) -> None:
         self.requests: list[ModelRequest] = []
+        self._training_actions = iter(
+            (
+                ("turn_left", {"degrees": 1}),
+                ("turn_right", {"degrees": 1}),
+                ("attack", {"ticks": 1}),
+            )
+        )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
@@ -114,12 +126,13 @@ class ScriptedDoomProvider:
                 }
             )
         else:
+            tool, arguments = next(self._training_actions, ("observe", {}))
             text = json.dumps(
                 {
-                    "subgoal": "Look around.",
-                    "expected_evidence": "A fresh observation.",
-                    "tool": "observe",
-                    "arguments": {},
+                    "subgoal": "Collect public primitive behavior.",
+                    "expected_evidence": "A public primitive result.",
+                    "tool": tool,
+                    "arguments": arguments,
                 }
             )
         return ModelResponse(
