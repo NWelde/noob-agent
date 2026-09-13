@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-13 15:16 PDT | [DOCUMENTED] | Added a "What it looks like" section to the README with the Doom cold-versus-learned-skill held-out comparison image and a frame from the Minecraft redstone lamp recording (`assets/redstone-lamp-lit.png`), and a section on how runs use W&B Weave (nested episode, step, and model-call traces, the live reasoning view and demo log that read from Weave), trace-driven debugging, and skill isolation (static policy, validator, local subprocess worker, and the not-yet-implemented CoreWeave Sandbox backend).
+
 2026-09-13 12:53 PDT | [DOCUMENTED] | Rewrote the README in plain language, defined project terminology, clarified verified prototype status and limitations, and replaced the compressed repository table with a readable source-tree map.
 
 2026-09-13 11:46 PDT | [DOCUMENTED] | Rewrote the README to explain what noob-agent is for: the two learning loops, compared conditions, scorecard, games, repository map, and getting-started commands.
