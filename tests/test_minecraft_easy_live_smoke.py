@@ -189,6 +189,22 @@ def test_easy_runner_is_generous_and_has_no_wall_clock_deadline() -> None:
     assert experiment.wall_time_budget_ms >= 10**12
 
 
+def test_repair_max_output_tokens_defaults_to_none_and_keeps_todays_behavior() -> None:
+    """`None` means the BuilderAgent's own `DEFAULT_REPAIR_MAX_OUTPUT_TOKENS`
+    (3,000) applies unchanged, matching every caller that never sets this."""
+    module = _load_run_script()
+
+    assert module.REPAIR_MAX_OUTPUT_TOKENS is None
+    assert module._builder_kwargs() == {}
+
+
+def test_repair_max_output_tokens_when_set_is_threaded_to_the_builder() -> None:
+    module = _load_run_script()
+
+    module.REPAIR_MAX_OUTPUT_TOKENS = 9_000
+    assert module._builder_kwargs() == {"repair_max_output_tokens": 9_000}
+
+
 def test_easy_runner_does_not_change_the_frozen_manifest_or_normal_goal() -> None:
     module = _load_run_script()
 
