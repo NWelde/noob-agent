@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-18 05:00 PDT | [DOCUMENTED] | Section 26.6, judge-facing README and submission package: added the README's first screen (one-line pitch, CI badge, video placeholder, 3 headline-results bullets with run IDs from `docs/loop-optimization.md` and `docs/demo-trials.md`, placeholder public Weave/Report links, a "What changed since Part 1" PR list, and a 3-command quickstart), replaced the stale "3 known failing tests" fresh-clone note with the current `1 failed, 597 passed, 5 skipped` state (confirmed by running `uv run pytest -q` on this branch) and named PR #76 as owning the one remaining failure; added `docs/submission/submission-text.md`, `docs/submission/video-script.md`, and `docs/submission/go-no-go.md`. Minecraft claims are qualified as not yet proven for the full learning loop, with `<!-- MINECRAFT TRIAL 2 RESULT -->` placeholders left in the README and submission text for the coordinator's pending second trial result.
+
 
 
 2026-09-18 01:00 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 26, the production-ready and demo-ready submission: audit evidence (3 failing tests on main, no CI or license), invariants that keep benchmark budgets frozen, and steps 26.1–26.6 covering green main, CI, a labeled non-benchmark demo-trial mode with budgets of 1,000,000+ tokens and automatic escalation, monitored Doom and Minecraft demo trials, a fresh-clone reproducibility check, and a judge-facing README and submission package.
