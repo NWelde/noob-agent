@@ -2,7 +2,6 @@
 
 ## Unreleased
 
-
 2026-09-18 01:00 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 26, the production-ready and demo-ready submission: audit evidence (3 failing tests on main, no CI or license), invariants that keep benchmark budgets frozen, and steps 26.1–26.6 covering green main, CI, a labeled non-benchmark demo-trial mode with budgets of 1,000,000+ tokens and automatic escalation, monitored Doom and Minecraft demo trials, a fresh-clone reproducibility check, and a judge-facing README and submission package.
 
 2026-09-18 00:42 PDT | [DOCUMENTED] | Added the `production-ready-submission` Claude Code skill under `.claude/skills/`: a phased workflow (audit, plan approval, hardening, demo video, submission) for the CoreWeave Hacks Part 2 Most Production-Ready award, with a judge-facing rubric, a recorded-video shot list, and a submission and ceremony checklist that keep the event's eligibility rules and the repository's honesty and workflow rules.
