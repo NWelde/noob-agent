@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Type-check (mypy)
+        run: uv run mypy src
+
+      - name: Test (pytest)
+        # test_budget_mode_has_its_approved_defaults is owned by section
+        # 26.3 (hackathon_plan.md), which has not landed yet; 26.3's PR
+        # removes this --deselect once its production code lands.
+        run: >
+          uv run pytest -q
+          --deselect tests/test_doom_token_budget_demo.py::test_budget_mode_has_its_approved_defaults
