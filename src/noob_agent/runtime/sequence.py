@@ -186,6 +186,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         max_repairs: int = 1,
         action_max_output_tokens: int = DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
         builder_max_output_tokens: int = DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
+        repair_max_output_tokens: int | None = None,
         condition: str = "self-improving",
         persistent_connector: bool = False,
         action_thinking: bool | None = None,
@@ -228,6 +229,11 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._max_repairs = max_repairs
         self._action_max_output_tokens = action_max_output_tokens
         self._builder_max_output_tokens = builder_max_output_tokens
+        self._repair_max_output_tokens = (
+            repair_max_output_tokens
+            if repair_max_output_tokens is not None
+            else min(builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS)
+        )
         self._condition = condition
         self._action_thinking = action_thinking
         self._builder_thinking = builder_thinking
@@ -367,9 +373,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             max_repairs=self._max_repairs,
             max_output_tokens=self._builder_max_output_tokens,
             thinking=self._builder_thinking,
-            repair_max_output_tokens=min(
-                self._builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
-            ),
+            repair_max_output_tokens=self._repair_max_output_tokens,
             learning_token_budget=self._learning_token_budget,
             learning_call_budget=self._learning_call_budget,
             validation_concurrency=self._validation_concurrency,
