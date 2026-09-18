@@ -47,30 +47,48 @@ def heldout_experiment(
     connector_version: str,
     created_at: datetime,
     condition: str = "self-improving",
+    decision_budget: int = HELD_OUT_DECISION_BUDGET,
+    primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
 ) -> ExperimentRecord:
-    """An experiment record carrying exactly the frozen held-out budgets."""
+    """An experiment record carrying the held-out budgets.
+
+    Defaults are exactly the frozen `connector_contract.md` limits. A caller
+    that raises `decision_budget` or `primitive_budget` above them (for
+    example, an explicitly labeled non-benchmark demo trial) must also raise
+    the matching `check_heldout_budgets` maximum, or the run is refused.
+    """
     return ExperimentRecord(
         experiment_id=experiment_id,
         model_id=model_id,
         condition=condition,
         connector_version=connector_version,
-        decision_budget=HELD_OUT_DECISION_BUDGET,
-        primitive_budget=HELD_OUT_PRIMITIVE_BUDGET,
+        decision_budget=decision_budget,
+        primitive_budget=primitive_budget,
         wall_time_budget_ms=HELD_OUT_WALL_TIME_MS,
         created_at=created_at,
     )
 
 
-def check_heldout_budgets(experiment: ExperimentRecord) -> None:
-    """Refuse an experiment whose budgets exceed the frozen held-out limits."""
-    if experiment.decision_budget > HELD_OUT_DECISION_BUDGET:
+def check_heldout_budgets(
+    experiment: ExperimentRecord,
+    *,
+    max_decision_budget: int = HELD_OUT_DECISION_BUDGET,
+    max_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
+) -> None:
+    """Refuse an experiment whose budgets exceed the allowed held-out limits.
+
+    The defaults are the frozen benchmark limits. Only an explicitly higher
+    `max_decision_budget`/`max_primitive_budget`, threaded in by a labeled
+    non-benchmark caller, ever admits an experiment above them.
+    """
+    if experiment.decision_budget > max_decision_budget:
         raise ValueError(
-            f"Held-out decision budget is {HELD_OUT_DECISION_BUDGET}; "
+            f"Held-out decision budget is {max_decision_budget}; "
             f"experiment asks for {experiment.decision_budget}."
         )
-    if experiment.primitive_budget > HELD_OUT_PRIMITIVE_BUDGET:
+    if experiment.primitive_budget > max_primitive_budget:
         raise ValueError(
-            f"Held-out primitive budget is {HELD_OUT_PRIMITIVE_BUDGET}; "
+            f"Held-out primitive budget is {max_primitive_budget}; "
             f"experiment asks for {experiment.primitive_budget}."
         )
     if experiment.wall_time_budget_ms > HELD_OUT_WALL_TIME_MS:
@@ -112,6 +130,8 @@ class HeldOutRunner:
         on_episode_started: Callable[[str], None] | None = None,
         flush_trace: bool = True,
         offered: Sequence[SkillVersion] | None = None,
+        max_decision_budget: int = HELD_OUT_DECISION_BUDGET,
+        max_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -129,6 +149,10 @@ class HeldOutRunner:
         # An explicit offering replaces the registry's accepted skills, for a
         # practice episode that plays a validated candidate before acceptance.
         self._offered = tuple(offered) if offered is not None else None
+        # Defaults are the frozen held-out limits; only a labeled non-benchmark
+        # caller ever raises them.
+        self._max_decision_budget = max_decision_budget
+        self._max_primitive_budget = max_primitive_budget
 
     async def run(
         self,
@@ -139,7 +163,11 @@ class HeldOutRunner:
         split: EpisodeSplit = "held-out",
     ) -> HeldOutResult:
         """Reset the world and the conversation, then attempt the held-out scenario."""
-        check_heldout_budgets(experiment)
+        check_heldout_budgets(
+            experiment,
+            max_decision_budget=self._max_decision_budget,
+            max_primitive_budget=self._max_primitive_budget,
+        )
 
         manifest = await self._connector.manifest()
         # Only accepted versions are offered; the registry exposes nothing else.
