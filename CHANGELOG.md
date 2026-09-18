@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-18 10:42 PDT | [DOCUMENTED] | Proposed `hackathon_plan.md` section 27 (awaiting approval): Part A closes the evaluation gaps found in the section 26 audit with a paired cold baseline and lift metric, provenance hashes and dollar cost, a Weave evaluation comparison and public W&B Report, a larger precommitted sample, and a second model; Part B adds a long-horizon Minecraft task where the model builds redstone logic from a lever-and-lamp circuit up to a 4-bit adder-accumulator over multiple persistent sessions, with the connector tools it needs (facing, breaking, a plot-wide view), a private truth-table grader, checkpointed multi-session runs, and layered recording through traces, world snapshots, and OBS capture of the TLauncher client.
+
 
 
 2026-09-18 01:00 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 26, the production-ready and demo-ready submission: audit evidence (3 failing tests on main, no CI or license), invariants that keep benchmark budgets frozen, and steps 26.1–26.6 covering green main, CI, a labeled non-benchmark demo-trial mode with budgets of 1,000,000+ tokens and automatic escalation, monitored Doom and Minecraft demo trials, a fresh-clone reproducibility check, and a judge-facing README and submission package.
