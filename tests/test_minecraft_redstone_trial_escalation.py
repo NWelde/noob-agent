@@ -29,6 +29,7 @@ def _record(demo, **overrides):
         budget_exhausted=None,
         builder_accepted=True,
         reuse_lit=True,
+        skill_uses=1,
     )
     fields.update(overrides)
     return demo.AttemptRecord(**fields)
@@ -136,6 +137,28 @@ def test_completed_attempt_classifies_to_no_exhausted_limit():
 def test_cold_lamp_lit_but_no_skill_is_not_completion():
     demo = load_demo()
     record = _record(demo, builder_accepted=False, reuse_lit=False, run_status="completed")
+    assert demo.attempt_completed(record) is False
+
+
+def test_accepted_and_reuse_lit_but_zero_skill_uses_is_not_completion():
+    """Live evidence minecraft-redstone-20260918T121759Z, a01: Builder accepted
+    `light_redstone_lamp@2` and the reuse attempt lit the lamp, but
+    `skill_uses: 0` -- the skill was offered and never invoked, so this does
+    not demonstrate learned-skill reuse and must not count as completion."""
+    demo = load_demo()
+    record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=0)
+    assert demo.attempt_completed(record) is False
+
+
+def test_accepted_reuse_lit_and_at_least_one_skill_use_is_completion():
+    demo = load_demo()
+    record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=1)
+    assert demo.attempt_completed(record) is True
+
+
+def test_accepted_but_reuse_not_lit_and_zero_skill_uses_is_not_completion():
+    demo = load_demo()
+    record = _record(demo, builder_accepted=True, reuse_lit=False, skill_uses=0)
     assert demo.attempt_completed(record) is False
 
 
@@ -525,6 +548,79 @@ def test_a_completed_attempt_after_an_unusable_retry_still_stops():
     assert demo.attempt_completed(attempts[-1].record) is True
 
 
+# --- a skill accepted but never invoked during reuse is retried -----------
+
+
+def test_is_skill_not_used_retry_true_only_when_accepted_with_zero_uses():
+    demo = load_demo()
+    assert demo.is_skill_not_used_retry(
+        _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=0)
+    )
+    assert demo.is_skill_not_used_retry(
+        _record(demo, builder_accepted=True, reuse_lit=False, skill_uses=0)
+    )
+    assert not demo.is_skill_not_used_retry(
+        _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=1)
+    )
+    assert not demo.is_skill_not_used_retry(
+        _record(demo, builder_accepted=False, reuse_lit=False, skill_uses=0)
+    )
+
+
+def test_skill_not_used_reruns_a_fresh_attempt_with_the_same_limits():
+    """Reproduces minecraft-redstone-20260918T121759Z-a01: Builder accepted and
+    reuse lit the lamp, but `skill_uses: 0`. A fresh attempt at the same
+    limits must run next, not a doubled limit."""
+    demo = load_demo()
+    calls = []
+
+    def run_one(attempt_id, limits):
+        calls.append((attempt_id, limits))
+        record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=0)
+        return demo.AttemptOutcome(attempt_id, limits, record, {"status": "ok"})
+
+    attempts = demo.run_escalating_attempts(
+        run_one, base_run_id="base", limits=demo.TRIAL_LIMITS, escalate=True, max_escalations=1
+    )
+    assert [a.attempt_id for a in attempts] == ["base-a01", "base-a02"]
+    assert attempts[1].limits == demo.TRIAL_LIMITS
+
+
+def test_skill_not_used_retries_count_toward_the_escalation_cap():
+    demo = load_demo()
+
+    def run_one(attempt_id, limits):
+        record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=0)
+        return demo.AttemptOutcome(attempt_id, limits, record, {"status": "ok"})
+
+    attempts = demo.run_escalating_attempts(
+        run_one, base_run_id="base", limits=demo.TRIAL_LIMITS, escalate=True
+    )
+    assert len(attempts) == 5
+
+
+def test_a_skill_use_after_a_skill_not_used_retry_still_completes():
+    demo = load_demo()
+    calls = []
+
+    def run_one(attempt_id, limits):
+        calls.append(attempt_id)
+        used = len(calls) == 2
+        record = _record(
+            demo,
+            builder_accepted=True,
+            reuse_lit=True,
+            skill_uses=1 if used else 0,
+        )
+        return demo.AttemptOutcome(attempt_id, limits, record, {"status": "ok"})
+
+    attempts = demo.run_escalating_attempts(
+        run_one, base_run_id="base", limits=demo.TRIAL_LIMITS, escalate=True
+    )
+    assert [a.attempt_id for a in attempts] == ["base-a01", "base-a02"]
+    assert demo.attempt_completed(attempts[-1].record) is True
+
+
 # --- validation rejection extraction (pure function over stored prompt text) -
 
 
@@ -612,3 +708,43 @@ def test_index_payload_includes_builder_diagnostics_and_no_private_fields():
     assert entry["validation_rejections"] == ["[contract/SKILL_RAISED] boom"]
     forbidden = {"clean", "faulty", "grader", "hidden", "answer"}
     assert not (forbidden & set(entry.keys()))
+
+
+def test_index_payload_reports_skill_offered_from_the_attempt_payload():
+    demo = load_demo()
+    record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=1)
+    outcome = demo.AttemptOutcome(
+        "base-a01",
+        demo.TRIAL_LIMITS,
+        record,
+        {"status": "completed", "skill_offered": True},
+    )
+    entry = demo._index_payload("base", [outcome])["attempts"][0]
+    assert entry["skill_offered"] is True
+
+
+def test_index_payload_reports_skill_not_used_retry_reason():
+    demo = load_demo()
+    record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=0)
+    outcome = demo.AttemptOutcome(
+        "base-a01",
+        demo.TRIAL_LIMITS,
+        record,
+        {"status": "completed", "skill_offered": True},
+    )
+    entry = demo._index_payload("base", [outcome])["attempts"][0]
+    assert entry["retry_reason"] == "skill_not_used"
+    assert entry["builder_retry_reason"] is None
+
+
+def test_index_payload_retry_reason_is_none_when_skill_was_used():
+    demo = load_demo()
+    record = _record(demo, builder_accepted=True, reuse_lit=True, skill_uses=1)
+    outcome = demo.AttemptOutcome(
+        "base-a01",
+        demo.TRIAL_LIMITS,
+        record,
+        {"status": "completed", "skill_offered": True},
+    )
+    entry = demo._index_payload("base", [outcome])["attempts"][0]
+    assert entry["retry_reason"] is None
