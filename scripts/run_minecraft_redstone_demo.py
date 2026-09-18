@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,11 +42,24 @@ def harness():
     return module
 
 
-async def run():
+async def run(environ: Mapping[str, str] | None = None) -> int:
     m = harness()
-    settings = m.IntegrationSettings.from_environ(m.os.environ)
+    environment = os.environ if environ is None else environ
+    settings = m.IntegrationSettings.from_environ(environment)
     if not settings.trace.enabled or not settings.model.inference_model:
-        raise RuntimeError("Configured model and Weave tracing are required")
+        print(
+            "Refusing to run: configure a model provider, model ID, and Weave tracing "
+            "first (see .env.demo.example).",
+            file=sys.stderr,
+        )
+        return 2
+    if not settings.wandb.api_key:
+        print(
+            "Refusing to run: WANDB_API_KEY is not set. Copy .env.demo.example to .env "
+            "and add your key from https://wandb.ai/authorize.",
+            file=sys.stderr,
+        )
+        return 2
     run_id = datetime.now(UTC).strftime("minecraft-redstone-%Y%m%dT%H%M%SZ")
     database = Path(f".noob-agent/{run_id}.sqlite3")
     database.parent.mkdir(exist_ok=True)
@@ -110,7 +125,8 @@ async def run():
             print(json.dumps(payload, indent=2), flush=True)
     finally:
         trace.flush()
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    sys.exit(asyncio.run(run()))
