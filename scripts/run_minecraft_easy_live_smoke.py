@@ -78,6 +78,15 @@ UNBOUNDED_WALL_TIME_MS = 10**12
 ACTION_MAX_OUTPUT_TOKENS = 32_000
 BUILDER_MAX_OUTPUT_TOKENS = 100_000
 MAX_REPAIRS = 5
+# Provider reasoning per role; off by default, matching ModelSettings and the
+# Doom paths. `main()` overrides these from settings before `_run_easy` runs;
+# a caller that drives `_run_easy` directly (the redstone demo) sets them the
+# same way `ACTION_MAX_OUTPUT_TOKENS` etc. are already overridden.
+ACTION_THINKING = False
+BUILDER_THINKING = False
+# `None` keeps BuilderAgent's own DEFAULT_REPAIR_MAX_OUTPUT_TOKENS (3,000)
+# unchanged. A caller (the redstone demo trial) may set an int to raise it.
+REPAIR_MAX_OUTPUT_TOKENS: int | None = None
 # Finite counts remain only so a broken model or connector cannot loop forever.
 EPISODE_DECISION_BUDGET = 500
 EPISODE_PRIMITIVE_BUDGET = 1_000
@@ -168,6 +177,13 @@ class EasyGoalConnector:
 
     async def announce(self, text: str) -> None:
         await self._inner.announce(text)
+
+
+def _builder_kwargs() -> dict[str, int]:
+    """Extra BuilderAgent constructor kwargs; empty keeps today's default."""
+    if REPAIR_MAX_OUTPUT_TOKENS is None:
+        return {}
+    return {"repair_max_output_tokens": REPAIR_MAX_OUTPUT_TOKENS}
 
 
 def _easy_settings() -> MinecraftSettings:
@@ -279,6 +295,7 @@ async def _run_easy(
                     ),
                     manifest=manifest,
                     max_output_tokens=ACTION_MAX_OUTPUT_TOKENS,
+                    thinking=ACTION_THINKING,
                 ),
                 trace=trace,
                 # Keep the bot connected so Builder calls still narrate in chat.
@@ -303,6 +320,8 @@ async def _run_easy(
             executor=executor,
             max_repairs=MAX_REPAIRS,
             max_output_tokens=BUILDER_MAX_OUTPUT_TOKENS,
+            thinking=BUILDER_THINKING,
+            **_builder_kwargs(),
         ).build(
             select_evidence(stored),
             training_trace=stored,
@@ -349,6 +368,7 @@ async def _run_easy(
             manifest=reuse_manifest,
             skills=registry.available_skills(),
             max_output_tokens=ACTION_MAX_OUTPUT_TOKENS,
+            thinking=ACTION_THINKING,
         ),
         trace=trace,
         skills=SkillRuntime(executor, available=registry.available_skills()),
@@ -411,6 +431,7 @@ def _summary_lines(payload: dict[str, Any]) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None, *, environ: dict[str, str] | None = None) -> int:
+    global ACTION_THINKING, BUILDER_THINKING
     args = _parse_args(argv)
     settings = IntegrationSettings.from_environ(os.environ if environ is None else environ)
     if not settings.trace.enabled:
@@ -420,6 +441,12 @@ def main(argv: Sequence[str] | None = None, *, environ: dict[str, str] | None = 
     if model_id is None:
         print("Refusing easy diagnostic: configure a model provider and model ID.", file=sys.stderr)
         return 2
+    # Thread the settings' reasoning toggles into the globals `_run_easy` (and
+    # every ActionAgent/BuilderAgent it constructs) reads. Left unset, the
+    # provider default is thinking on, which exhausted every output-token cap
+    # in the 2026-09-18 live redstone trial.
+    ACTION_THINKING = settings.model.action_thinking
+    BUILDER_THINKING = settings.model.builder_thinking
     run_id = args.sequence_id or _default_run_id(datetime.now(UTC))
     database = _database_for(args, run_id)
     database.parent.mkdir(parents=True, exist_ok=True)

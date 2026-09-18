@@ -47,6 +47,16 @@ LIVE_VIEW_PORT = 8765
 # Keeps the view up briefly after the final flush so the last calls reach it.
 LIVE_VIEW_LINGER_SECONDS = 10.0
 
+# Section 21b: the token-budget Doom demo loop. Budget mode is available only
+# with --live-demo and never changes a normal run's defaults.
+TOKEN_BUDGET_MAX = 1_000_000
+BUDGET_BUILDER_MAX_OUTPUT_TOKENS_DEFAULT = 100_000
+BUDGET_BUILDER_MAX_OUTPUT_TOKENS_MAX = 100_000
+BUDGET_MAX_REPAIRS_DEFAULT = 3
+BUDGET_MAX_REPAIRS_MAX = 3
+BUDGET_DEADLINE_SECONDS_DEFAULT = 3_600.0
+BUDGET_DEADLINE_SECONDS_MAX = 7_200.0
+
 
 class RunOptions(NamedTuple):
     database: Path | None
@@ -56,6 +66,9 @@ class RunOptions(NamedTuple):
     deadline_seconds: float | None
     live_view: bool = False
     live_view_port: int = LIVE_VIEW_PORT
+    token_budget: int | None = None
+    builder_max_output_tokens: int | None = None
+    max_repairs: int | None = None
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
@@ -75,19 +88,63 @@ def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
         help="Serve the live Weave reasoning view beside the game (requires --live-demo).",
     )
     parser.add_argument("--live-view-port", type=int, default=LIVE_VIEW_PORT)
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=None,
+        help=(
+            "Run fresh sequences back to back until this many tokens are spent "
+            "(requires --live-demo; 1 to 1,000,000)."
+        ),
+    )
+    parser.add_argument("--builder-max-output-tokens", type=int, default=None)
+    parser.add_argument("--max-repairs", type=int, default=None)
     parsed = parser.parse_args(argv)
     live_demo = bool(parsed.live_demo)
     if parsed.live_view and not live_demo:
         parser.error("--live-view requires --live-demo")
+
+    token_budget = parsed.token_budget
+    if token_budget is not None and not live_demo:
+        parser.error("--token-budget requires --live-demo")
+    if token_budget is not None and not (0 < token_budget <= TOKEN_BUDGET_MAX):
+        parser.error(f"--token-budget must be between 1 and {TOKEN_BUDGET_MAX}")
+    budget_mode = token_budget is not None
+
+    builder_max_output_tokens = parsed.builder_max_output_tokens
+    if builder_max_output_tokens is not None and not live_demo:
+        parser.error("--builder-max-output-tokens requires --live-demo")
+    if builder_max_output_tokens is not None and not (
+        0 < builder_max_output_tokens <= BUDGET_BUILDER_MAX_OUTPUT_TOKENS_MAX
+    ):
+        parser.error(
+            "--builder-max-output-tokens must be between 1 and "
+            f"{BUDGET_BUILDER_MAX_OUTPUT_TOKENS_MAX}"
+        )
+    if builder_max_output_tokens is None and budget_mode:
+        builder_max_output_tokens = BUDGET_BUILDER_MAX_OUTPUT_TOKENS_DEFAULT
+
+    max_repairs = parsed.max_repairs
+    if max_repairs is not None and not live_demo:
+        parser.error("--max-repairs requires --live-demo")
+    if max_repairs is not None and not (0 <= max_repairs <= BUDGET_MAX_REPAIRS_MAX):
+        parser.error(f"--max-repairs must be between 0 and {BUDGET_MAX_REPAIRS_MAX}")
+    if max_repairs is None and budget_mode:
+        max_repairs = BUDGET_MAX_REPAIRS_DEFAULT
+
     deadline = parsed.deadline_seconds
     if deadline is not None and not live_demo:
         parser.error("--deadline-seconds requires --live-demo")
     if live_demo:
-        deadline = LIVE_DEMO_DEADLINE_SECONDS if deadline is None else float(deadline)
-        if deadline <= 0 or deadline > LIVE_DEMO_DEADLINE_SECONDS:
+        deadline_cap = BUDGET_DEADLINE_SECONDS_MAX if budget_mode else LIVE_DEMO_DEADLINE_SECONDS
+        deadline_default = (
+            BUDGET_DEADLINE_SECONDS_DEFAULT if budget_mode else LIVE_DEMO_DEADLINE_SECONDS
+        )
+        deadline = deadline_default if deadline is None else float(deadline)
+        if deadline <= 0 or deadline > deadline_cap:
             parser.error(
                 f"the live-demo deadline must be greater than 0 and no more than "
-                f"{LIVE_DEMO_DEADLINE_SECONDS:g} seconds"
+                f"{deadline_cap:g} seconds"
             )
     return RunOptions(
         database=parsed.database,
@@ -97,6 +154,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> RunOptions:
         deadline_seconds=deadline,
         live_view=bool(parsed.live_view),
         live_view_port=int(parsed.live_view_port),
+        token_budget=token_budget,
+        builder_max_output_tokens=builder_max_output_tokens,
+        max_repairs=max_repairs,
     )
 
 
@@ -299,6 +359,13 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
             f"whole-run deadline {args.deadline_seconds:g} seconds.",
             flush=True,
         )
+    if args.token_budget is not None:
+        print(
+            f"Token-budget mode: {args.token_budget} tokens, "
+            f"builder cap {args.builder_max_output_tokens}, "
+            f"max repairs {args.max_repairs}. This run is not benchmark evidence.",
+            flush=True,
+        )
 
     trace = build_trace_sink(settings.trace, wandb=settings.wandb)
     view = _start_live_view(args, sequence_id, environment) if args.live_view else None
@@ -315,7 +382,12 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                 grade=_grade,
                 trace=trace,
                 action_max_output_tokens=settings.model.action_max_output_tokens,
-                builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                builder_max_output_tokens=(
+                    args.builder_max_output_tokens
+                    if args.builder_max_output_tokens is not None
+                    else settings.model.builder_max_output_tokens
+                ),
+                max_repairs=args.max_repairs if args.max_repairs is not None else 1,
                 action_thinking=settings.model.action_thinking,
                 builder_thinking=settings.model.builder_thinking,
                 condition=_condition_for(args),
@@ -357,7 +429,11 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     summary = _summary(
         result,
         action_max_output_tokens=settings.model.action_max_output_tokens,
-        builder_max_output_tokens=settings.model.builder_max_output_tokens,
+        builder_max_output_tokens=(
+            args.builder_max_output_tokens
+            if args.builder_max_output_tokens is not None
+            else settings.model.builder_max_output_tokens
+        ),
     )
     if args.live_demo:
         summary = {
@@ -365,6 +441,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
             "status": "completed",
             "deadline_seconds": args.deadline_seconds,
             "database": str(database),
+            **({"token_budget": args.token_budget} if args.token_budget is not None else {}),
             **summary,
         }
     print(json.dumps(summary, indent=2))

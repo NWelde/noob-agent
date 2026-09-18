@@ -1,0 +1,524 @@
+# Demo trials (non-benchmark)
+
+**Status: complete for both games as of this document.** Doom accepted and
+*used* a skill in held-out. Minecraft required a fifth round before an
+attempt both accepted a skill and actually invoked it during reuse — and
+even then, only 1 of that round's 2 attempts did (see the disclosure in
+"Minecraft redstone trial — round 4" below; this is a small, retry-selected
+sample, not a reliability claim). This document covers `hackathon_plan.md`
+step 26.4 non-benchmark demo trials across five rounds: the pre-fix attempt
+of each game (Doom `…a`, Minecraft `…081617Z`), a post-escalation-fix Doom
+re-run and a 4-attempt escalating Minecraft run (Doom `…b`, Minecraft
+`…084449Z`), a further Doom re-run after the escalation logic was corrected
+again plus a second escalating Minecraft run after a repair-cap fix (Doom
+`…c`, PR #76; Minecraft `…113854Z`, PR #82), a third Minecraft round after a
+`thinking=False` fix on the Action and Builder calls (Minecraft `…121759Z`,
+PR #82), and a fourth Minecraft round after a `skill_not_used` retry rule
+was added (Minecraft `…122657Z`, PR #82). Doom `…c` completed successfully,
+with the accepted skill confirmed invoked in all 6 held-out episodes.
+Minecraft `…113854Z` was manually stopped by the coordinator partway
+through its 4th attempt after finding that Builder truncations were caused
+by unbounded chain-of-thought reasoning consuming the entire output-token
+budget (`"thinking": null` never disabled), not by the build/repair caps
+themselves. Minecraft `…121759Z`, run after that fix, was the first round
+where the Builder was accepted, but its reuse episode never invoked the
+skill (`skill_uses=0`). Minecraft `…122657Z`, run after a rule requiring
+Builder-accepted AND reuse-lit AND skill-used, reproduced round 3's
+unused-skill outcome on its first attempt (correctly triggering a
+`skill_not_used` retry) and then had the skill actually invoked on its
+second attempt — the first and only attempt across all rounds in this
+document where a Minecraft skill was demonstrably used. Each round is
+documented as it completed; the "Anomalies flagged" and "Known
+limitations" sections below span all rounds.
+
+Every run here is explicitly **non-benchmark**: it uses the demo-trial
+profile's raised limits (`RUN_KIND = "non-benchmark-demo-trial"` /
+`CONDITION = "non-benchmark-minecraft-redstone-comparison"`), a separate
+Git-ignored SQLite database, and never enters a scorecard or comparison. It
+also reflects a single run of each game, on a local subprocess sandbox
+(`NOOB_AGENT_SANDBOX_MODE=local`), not a hardened isolation boundary.
+
+## Doom trial
+
+- Run id: `doom-demo-trial-20260918a`
+- Command: `cd /home/nathan/noob-agent-trial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/demo_trial.py --run-id doom-demo-trial-20260918a`
+- Records: `.noob-agent/demo-trial.sqlite3` (SQLite), `.noob-agent/demo-trials/doom-demo-trial-20260918a.json` (JSON summary)
+- Weave: https://wandb.ai/nathanweldegiorgis731-minerva-university/Noob-agent/weave/calls?filter=%7B%22traceRootsOnly%22%3Atrue%7D&peekPath=&query=doom-demo-trial-20260918a-a01
+
+### Attempt 1 (pre-fix)
+
+Source: `doom-demo-trial-20260918a.json`, cross-checked against
+`demo-trial.sqlite3` (`experiment`, `episode`, `episode_outcome`, `model_call`
+tables; query used: `select experiment_id, purpose, action_id, finish_reason,
+input_tokens, output_tokens, max_output_tokens, error, started_at from
+model_call order by started_at`).
+
+| Field | Value |
+|---|---|
+| Sequence id | `doom-demo-trial-20260918a-a01` |
+| Limits offered | learning_token_budget=1,000,000; learning_call_budget=66; training_decision_budget=60; training_primitive_budget=120; heldout_decision_budget=36; heldout_primitive_budget=72; deadline_seconds=3,600 |
+| Training episode stop reason | `wall_time_limit` (per-episode wall clock, 180,000 ms, from the `experiment.wall_time_budget_ms` row — **not** the 3,600 s whole-run deadline) |
+| Training decisions / primitives used | 14 / 6 (well under the 60 / 120 budget — the clock ran out first) |
+| Action calls | 14, each `max_output_tokens=1024`; **7 of 14 (50%) hit `finish_reason=length`** (truncated): `a_0002, a_0005, a_0006, a_0008, a_0009, a_0011, a_0012, a_0013` |
+| Builder call | 1 `build` call, `max_output_tokens=6000`, `finish_reason=length` (the Builder's own reply was truncated) |
+| Overall reported stop reason | `truncated_reply` (from `heldout_skipped_reason`, since the Builder reply was truncated) |
+| Skill accepted | No — Builder never returned an unclipped, validated skill |
+| Held-out | Skipped entirely (`heldout_grades: []`) |
+| Tokens spent | 37,978 (per summary) |
+| Model calls | 15 |
+| Errors | None recorded (`error: null`) |
+| Escalation | **Did not trigger.** `classify_stop()` in `scripts/demo_trial.py` only escalates `decision_limit`, `primitive_limit`, learning-token/-call exhaustion, held-out decision/primitive limits, or the whole-run deadline. Neither the per-episode `wall_time_limit` nor a truncated Builder reply is an escalatable `LimitKey`, so `run_demo_trial()` returned after this single attempt with `completed: false` and no limit raised. |
+
+**Training outcome:** did not complete (`goal_completed`/`terminal_state` not
+reached; episode ended on its per-episode wall clock).
+**Accepted skill:** none.
+**Held-out:** not run (0 cells graded).
+
+### Attempt 2 (post-escalation-fix — `doom-demo-trial-20260918b`)
+
+- Command: `cd /home/nathan/noob-agent-trial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/demo_trial.py --run-id doom-demo-trial-20260918b`
+- Records: `.noob-agent/demo-trial.sqlite3` (SQLite, shared file — filtered by `experiment_id like 'doom-demo-trial-20260918b%'`), `.noob-agent/demo-trials/doom-demo-trial-20260918b.json`
+- Source: read-only via `sqlite3.connect("file:...?mode=ro", uri=True)`. Queries used: `select experiment_id, count(*) from model_call where experiment_id like 'doom-demo-trial-20260918b%' group by experiment_id`; `select purpose, count(*), sum(finish_reason='length') from model_call where experiment_id like 'doom-demo-trial-20260918b%' group by purpose`; `select purpose, action_id, finish_reason from model_call where experiment_id='doom-demo-trial-20260918b-a01' and purpose in ('build','repair')`.
+
+This run escalated across 5 attempts as `training_decision_budget` /
+`training_primitive_budget` / `learning_call_budget` were raised (per the
+26.3 escalation fix; each attempt's `limits` block in the JSON summary
+confirms the raised values).
+
+| Attempt | Limits raised vs. prior | `stop_reason` | `calls_spent` | `tokens_spent` | Held-out |
+|---|---|---|---|---|---|
+| a01 | training_decision_budget=60 (baseline) | `decision_limit` | 62 | 82,717 | **Ran: 6 cells graded, 1 `goal_completed=true`** (`doom-basic-heldout-a`, seed 102, `terminal_state`) |
+| a02 | training_decision_budget 60→120 | `learning_budget_exhausted` | 120 | 150,801 | none (`heldout_grades: []`) |
+| a03 | training_decision_budget 120→240 | `learning_budget_exhausted` | 120 | 156,337 | none |
+| a04 | training_primitive_budget 120→240 | `learning_budget_exhausted` | 173 | 214,413 | none |
+| a05 | learning_call_budget 66→132 | `learning_budget_exhausted` | 229 | 293,795 | none |
+
+Key finding: **attempt a01 already accepted a skill and ran held-out
+grading**, even though its own `stop_reason` is `decision_limit` (the
+training episode hit its decision cap after the skill had already been built
+and accepted — `stop_reason` reflects the training episode's own stop, not
+whether a skill was produced). Verified directly against the DB: a01's
+`build` call has `finish_reason='stop'` (not truncated) and is followed by
+one `repair` call, also `finish_reason='stop'` — i.e. the Builder's first
+draft needed one clean repair pass, not a truncation-forced retry. a02
+onward never got a skill to build (`stop_reason=learning_budget_exhausted`
+before the training episode reached a terminal state to hand off to the
+Builder).
+
+Across all 5 attempts: 704 training-purpose `model_call` rows
+(`action`: 883 total training decisions across attempts, `build`: 1, `repair`:
+1, summed per-attempt as 62+120+120+173+229=704) plus 181 held-out calls in
+a01 (885 rows total for the run). **0 of the 704 training calls, and 0 of the
+885 total calls, have `finish_reason='length'`** — no truncation this round,
+confirming the `action_max_output_tokens=4000` / `builder_max_output_tokens=
+32000` caps (raised from attempt-a's 1,024 / 6,000) were sufficient. The
+run never reached `completed: true` overall — a02–a05 kept re-attempting
+training under progressively raised budgets but never got another skill
+built (the JSON's top-level `completed` is `false`), stopping only because
+this coordinator ended the round at 5 attempts, not because a limit
+resolved it.
+
+**Training outcome (a01):** skill built, accepted (1 repair pass, no
+truncation).
+**Held-out (a01):** 1/6 goals completed (`doom-basic-heldout-a` seed 102);
+the other 5 cells stopped on `decision_limit` (4) or hit no completion.
+**a02–a05:** stopped on `learning_budget_exhausted` before another skill was
+built; each round's calls were consumed entirely by more training Action
+calls under the raised decision/primitive budgets, not by Builder/repair
+activity.
+
+### Attempt 3 (post-fix, PR #76 — `doom-demo-trial-20260918c`)
+
+- Checkout: PR #76 head (`fix/26-4-...` escalation fixes: call budget
+  coupled to decisions, completion defined as skill accepted + ≥1 held-out
+  goal, repairs get the build cap, up to 6 escalations).
+- Command: `cd /home/nathan/noob-agent-trial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/demo_trial.py --run-id doom-demo-trial-20260918c`
+- Records: `.noob-agent/demo-trial.sqlite3` (filtered `experiment_id like 'doom-demo-trial-20260918c%'`), `.noob-agent/demo-trials/doom-demo-trial-20260918c.json`
+- Weave: https://wandb.ai/nathanweldegiorgis731-minerva-university/Noob-agent/weave/calls?filter=%7B%22traceRootsOnly%22%3Atrue%7D&peekPath=&query=doom-demo-trial-20260918c-a01
+
+| Field | Value |
+|---|---|
+| Sequence id | `doom-demo-trial-20260918c-a01` |
+| Overall `completed` | **`true`** — the run finished in a single attempt |
+| Limits | training_decision_budget=60; training_primitive_budget=120; learning_call_budget=66; learning_token_budget=1,000,000; action_max_output_tokens=4,000; builder_max_output_tokens=32,000; `max_repairs=1` (new field vs. attempt b) |
+| Training stop reason | `decision_limit` (training episode hit its decision cap after the skill was built and accepted) |
+| Overall `stop_reason` | `completed` |
+| Skill accepted | **Yes** — 1 `build` call, `finish_reason='stop'`, no repair needed this time (only 1 `build` row in `model_call` for a01-training, no `repair` row) |
+| Held-out | 6 cells graded, **1 `goal_completed=true`** (`doom-basic-heldout-a`, seed 102, `terminal_state`); the other 5 stopped on `decision_limit` (1) or `primitive_limit` (4) without completing |
+| Calls spent | 61 (matches `model_call` count for `doom-demo-trial-20260918c-a01-training`: 60 `action` + 1 `build`) |
+| Tokens spent | 79,288 (matches `sum(input_tokens+output_tokens)` for `experiment_id='doom-demo-trial-20260918c-a01-training'` exactly) |
+| Truncated calls | **0** — `action_truncated_calls=0`, `builder_truncated_calls=0` in the summary; confirmed via SQL: 0 of 61 training calls and 0 of 122 held-out calls have `finish_reason='length'` (183 total calls for the run) |
+| Total tokens (training + held-out) | 242,688 (79,288 training + 163,400 held-out, summed from `model_call`) |
+| Escalation | Did not need to trigger — attempt a01 satisfied the new completion definition (skill accepted + ≥1 held-out goal) on the first try |
+| Errors | None (`error: null`) |
+
+**Training outcome:** skill built and accepted on the first attempt, no
+repair pass needed, no truncation.
+**Held-out:** 1/6 goals completed.
+**Result:** `completed: true` in a single attempt — the escalation-fix run
+did what attempt a01 of round b already showed was possible (skill
+acceptance without truncation), and this time the run's own `completed`
+flag reflects it correctly.
+
+**The accepted skill was actually invoked in every held-out episode** (not
+just offered) — verified with:
+`select e.episode_id, s.action_id from step s join episode e using(episode_id)
+where e.experiment_id like 'doom-demo-trial-20260918c%heldout%' order by
+e.episode_id, s.sequence` against `.noob-agent/demo-trial.sqlite3`
+(read-only). Nested primitives charged to a skill call carry a `.`-suffixed
+`action_id` (e.g. `a_0002.1`, `a_0002.2`); counting the distinct parent
+decision ids with at least one such nested step gives the number of
+skill-invoking decisions per episode:
+
+| Held-out episode (seed) | Skill-invoking decisions | Goal completed |
+|---|---|---|
+| `doom-basic-heldout-a` (101) | 14 | No |
+| `doom-basic-heldout-a` (102) | 1 | **Yes** |
+| `doom-basic-heldout-a` (103) | 17 | No |
+| `doom-basic-heldout-b` (201) | 17 | No |
+| `doom-basic-heldout-b` (202) | 17 | No |
+| `doom-basic-heldout-b` (203) | 12 | No |
+
+Every nested primitive under these skill-invoking decisions issues an
+`attack` tool call (`{"tool_name":"attack","arguments":{"ticks":10}}`),
+confirming the skill's actual mechanic. This distinguishes doom-c from the
+Minecraft round below: here the accepted skill was exercised by the Action
+agent in held-out, not merely built and left unused.
+
+## Minecraft redstone trial
+
+- Run id: `minecraft-redstone-20260918T081617Z`
+- Command: `cd /home/nathan/noob-agent && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py`
+- Records: `.noob-agent/minecraft-redstone-20260918T081617Z.sqlite3` (SQLite), `.noob-agent/minecraft-redstone-20260918T081617Z.json` (JSON summary)
+
+### Attempt 1 (pre-escalation)
+
+Source: `minecraft-redstone-20260918T081617Z.json`, cross-checked against
+`minecraft-redstone-20260918T081617Z.sqlite3` (`experiment`, `episode_outcome`,
+`model_call` tables; query used: `select experiment_id, purpose, action_id,
+finish_reason, input_tokens, output_tokens, max_output_tokens, latency_ms,
+error, started_at from model_call order by started_at`).
+
+| Field | Value |
+|---|---|
+| Sequence id | `minecraft-redstone-20260918T081617Z-s01` |
+| Limits (`docs/redstone-demo.md`) | 12 decisions, 24 primitives, 120 s per attempt, 4,000 max output tokens per Action call; Builder 1,000,000 output tokens, 1 repair; whole run 600 s deadline, 1,100,000-token call-start ceiling |
+| Overall run status | `TimeoutError` (whole-run 600 s deadline) |
+| Cold-attempt stop reason | `wall_time_limit` (the attempt's own 120 s clock, not the whole-run deadline) |
+| Cold-attempt decisions / primitives used | 6 / 12 decisions, 4 / 24 primitives |
+| Cold-attempt lamp lit | **No.** The cold episode never reached a terminal/success state (`episode_outcome.terminal = 0`); the run stopped on the 120 s clock before any success message. |
+| Cold-attempt Action calls | 6, `max_output_tokens=4000`; 2 of 6 hit `finish_reason=length` (`a_0005` at 38,456 ms latency, `a_0006` at 59,360 ms latency) |
+| Builder call | 1 `build` call, `max_output_tokens=1,000,000`, `latency_ms=463,746` (~7.7 min), `error="CancelledError: "`, `finish_reason=None`, `output_tokens=None` — the call was still in flight when the whole-run 600 s `asyncio.timeout` fired and cancelled it |
+| Builder accepted | **No** (`builder: null` in the JSON summary — the Builder call never returned) |
+| Reuse/skill attempt | **Did not run** (`reuse: null` — the script only starts a reuse episode after Builder acceptance) |
+| Skill actually used | N/A — no skill was ever accepted |
+| Lamp lit with skill | N/A — no reuse attempt ran |
+| Tokens by phase | cold: 20,422; builder: 1,003,230 (per `tokens_by_phase` in the JSON summary). This is a **charged upper bound, not actual output**: `_call_tokens()` in `scripts/run_minecraft_live_smoke.py` (reused via `run_minecraft_easy_live_smoke.py`'s `_call_tokens = _live_smoke._call_tokens`, and by `run_minecraft_redstone_demo.py`'s `m._call_tokens`) falls back to `record.max_output_tokens + (len(system) + len(prompt)) // 4` whenever `input_tokens`/`output_tokens` are `None` — exactly the case here, since the Builder call was cancelled before it reported usage. 1,000,000 (max_output_tokens) + 3,230 ≈ the reported 1,003,230, i.e. ≈12,920 prompt+system characters charged at the conservative 4-chars-per-token estimate, not tokens the model actually produced. |
+| Errors | 1: the Builder call's `CancelledError` |
+| Which limit stopped it | The whole-run 600 s deadline cancelled the in-flight Builder call, which had been given no cap other than the requested 1,000,000-token budget; the cold attempt itself was separately stopped by its own 120 s per-attempt clock, well before its 12-decision/24-primitive budget |
+
+**Cold attempt:** lamp not lit, stopped on the 120 s per-attempt wall clock.
+**Builder/skill:** no skill accepted — the Builder call was cancelled by the
+600 s whole-run deadline after running ~7.7 minutes on a 1,000,000-token
+output budget.
+**Skill (learned) attempt:** did not run.
+
+### Attempt 2 — 4-attempt escalating run (`minecraft-redstone-20260918T084449Z`)
+
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: `.noob-agent/minecraft-redstone-20260918T084449Z-index.json` (round summary) plus per-attempt `-a01.json`..`-a04.json` / `-a01.sqlite3`..`-a04.sqlite3`
+- Source: read-only, per-attempt JSON plus `select purpose, max_output_tokens, finish_reason, output_tokens from model_call where purpose in ('build','repair') order by started_at` against each attempt's own SQLite file.
+
+The Builder cap was escalated per attempt (32k → 64k → 128k → 128k, with
+`wall_time_ms` also doubled for a04); the repair cap stayed **fixed at
+3,000 tokens** in this checkout regardless of the Builder cap escalation —
+this is the bug PR #82 (see the next round) later fixes.
+
+| Attempt | builder_cap | Cold lamp lit | Cold decisions/primitives | Build call | Repair call | Builder accepted |
+|---|---|---|---|---|---|---|
+| a01 | 32,000 | **Yes** | 11 / 8 | `finish_reason=length`, `output_tokens=32000` (**truncated at the build cap**) | none attempted | No — `truncated_reply` |
+| a02 | 64,000 | **Yes** | 7 / 5 | `finish_reason=stop`, `output_tokens=22729` (clean) | `max_output_tokens=3000`, `finish_reason=length`, `output_tokens=3000` (**truncated at the fixed repair cap**) | No — `truncated_reply` |
+| a03 | 128,000 | **No** (`wall_time_limit`) | 14 / 12 | `finish_reason=stop`, `output_tokens=28848` (clean) | `max_output_tokens=3000`, `finish_reason=length`, `output_tokens=3000` (**truncated at the fixed repair cap**) | No — `truncated_reply` |
+| a04 | 128,000 (wall_time_ms doubled to 720,000) | **Yes** | 12 / 8 | `finish_reason=stop`, `output_tokens=39375` (clean) | none attempted | No — `unusable_reply` (rejected on validation, not truncation; no repair invoked) |
+
+Tokens by phase (from each attempt's JSON `tokens_by_phase`): a01 cold
+60,124 / builder 36,203; a02 cold 25,681 / builder 33,748; a03 cold 74,262 /
+builder 40,106; a04 cold 72,245 / builder 43,587. `reuse_lamp_lit=false` and
+`skill=null` in all 4 attempts — **the Builder was never accepted across
+the whole round**, so no skill-reuse episode ever ran.
+
+**What actually blocked acceptance, once the Builder cap itself was raised
+high enough:** a02 and a03 both produced a clean (`finish_reason=stop`)
+first Builder draft, well under their raised build caps, but the repair
+pass — needed because the first draft failed validation — was capped at a
+**fixed 3,000 tokens regardless of the escalated build cap**, and repairing
+a skill this size needs more than 3,000 tokens, so the repair reply itself
+was truncated and the Builder was never accepted. a01's first draft was
+truncated outright (build cap too low at 32k). a04's first draft was clean
+and within cap but rejected as `unusable_reply` — a validation failure, not
+a truncation — and no repair was attempted for it in this checkout.
+
+**Cold lamp lit:** 3 of 4 attempts (a01, a02, a04); a03 ran out of its
+per-attempt wall clock before lighting it.
+**Builder/skill accepted:** 0 of 4 attempts.
+**Skill-reuse attempt:** did not run in any attempt (no accepted skill to
+reuse).
+
+## Tokens and calls per phase
+
+| Run | Phase | Tokens | Calls |
+|---|---|---|---|
+| Doom `doom-demo-trial-20260918a-a01` | training (action) | sum of 14 calls' input+output, ≈ within the 37,978 total | 14 |
+| Doom `doom-demo-trial-20260918a-a01` | builder | included in the 37,978 total | 1 |
+| Minecraft `…-s01-training` | cold | 20,422 | 6 |
+| Minecraft `…-s01-training` | builder | 1,003,230 (cancelled before completion) | 1 |
+| Minecraft `…-s01-reuse` | — | did not run | 0 |
+
+## Wall time
+
+- Doom attempt 1: training episode ran 08:15:36–08:18:46 UTC (~190 s to its
+  outcome record), the whole script exited shortly after (summary present by
+  08:20:59 UTC per the monitor). Well under the 3,600 s whole-run deadline.
+- Minecraft redstone attempt 1: cold episode ran 08:16:19–08:18:33 UTC (~134 s
+  including its 120 s clock), the Builder call ran ~08:18:35–08:26:19 UTC
+  before cancellation (~464 s), and the whole script exited at the 600 s
+  deadline (~08:26:19 UTC).
+
+## Cost estimate
+
+Not derived. No per-token pricing for `deepseek-ai/DeepSeek-V4-Flash-0731` via
+`wandb-inference` was available to me in either checkout's configuration or
+committed docs, so a dollar figure would be a guess. If pricing is added to
+the repo or provided, this section should be filled in from the token totals
+above.
+
+## Weave cross-check
+
+A read-only query against the configured W&B project
+(`nathanweldegiorgis731-minerva-university/Noob-agent`) via
+`weave.init(project).get_calls(limit=5)` returned nested
+`noob_agent.episode` and `noob_agent.step` ops, confirming episodes and steps
+are traced in Weave as expected. I did not exhaustively match every DB row to
+a Weave call id in this pass; the spot check confirms the trace pipeline is
+live and nesting is present.
+
+## Anomalies flagged
+
+1. **Escalation gap (Doom):** the demo-trial escalation logic
+   (`scripts/demo_trial.py::classify_stop`) does not recognize a per-episode
+   `wall_time_limit` or a truncated Builder reply (`truncated_reply`) as
+   escalatable limits, so attempt 1 ended after a single try with no limit
+   raised, even though the underlying cause (majority of Action calls
+   truncated at `finish_reason=length`, `max_output_tokens=1024`) is squarely
+   a capacity problem an escalation should address.
+2. **Escalation gap (Minecraft):** the redstone runner (outside the 26.3
+   escalation machinery entirely — it is a single-shot comparison script, not
+   a `LearningSequence`) has no cap on the Builder call itself beyond the
+   whole-run 600 s deadline; requesting 1,000,000 output tokens produced a
+   ~7.7-minute in-flight call that was cancelled by the deadline rather than
+   completing or failing cleanly.
+3. **Truncation is the dominant failure mode, not budget exhaustion.** In
+   both trials, decision/primitive/token budgets were nowhere near exhausted
+   (Doom: 14/60 decisions; Minecraft cold: 6/12 decisions) — the real
+   constraint was per-call output-token caps (Doom Action calls at 1,024)
+   and per-episode/whole-run wall clocks, which is why the coordinator is
+   having the 26.3 author add wall-time and per-call-cap escalation.
+4. **Minecraft Builder token total is a charged upper bound, not actual
+   output.** `tokens_by_phase.builder = 1,003,230` comes from `_call_tokens()`
+   (`scripts/run_minecraft_live_smoke.py`, shared with the easy-smoke and
+   redstone runners), which falls back to `max_output_tokens + (len(system) +
+   len(prompt)) // 4` whenever a call reports no `input_tokens`/`output_tokens`
+   — the case here, since the Builder call was cancelled before reporting
+   usage. This is the section 21 "Budget accounting" conservative-charge rule
+   working as designed, not a data-integrity bug; it should not be read as
+   1,003,230 tokens the model actually produced.
+
+## Known limitations
+
+- Non-benchmark: neither run enters a scorecard or comparison; both are
+  labeled (`RUN_KIND` / `CONDITION`) and stored in separate, Git-ignored
+  databases.
+- Local subprocess sandbox only (`NOOB_AGENT_SANDBOX_MODE=local`); this is
+  not a hardened isolation claim.
+- Doom: 1 successful full round (`…c`, 1 attempt) after two escalation-logic
+  fixes, where the accepted skill was confirmed invoked (not merely built)
+  in all 6 held-out episodes (14/1/17/17/17/12 skill-invoking decisions,
+  each issuing `attack` primitives); 1 escalating round (`…b`, 5 attempts)
+  that produced a skill and held-out grading in its first attempt but never
+  re-triggered Builder activity in later attempts; 1 pre-fix failed round
+  (`…a`). No statistical conclusions should be drawn from this handful of
+  runs.
+- Minecraft: 1 pre-escalation failed attempt (`…081617Z`); 1 4-attempt
+  escalating round (`…084449Z`) that never got a Builder skill accepted,
+  root-caused (PR #82) to a fixed 3,000-token repair cap that didn't scale
+  with the escalated build cap, plus separate validation failures (a02:
+  `TypeError: 'PublicPosition' object is not subscriptable`; a03: forbidden
+  `getattr` call; a04: a zero-width space U+200B embedded in the metadata
+  JSON plus mismatched brackets in the generated source); 1 escalating
+  round under the PR #82 cap fix (`…113854Z`, 3 completed attempts + a04
+  killed pre-Builder) that still never got a Builder skill accepted —
+  root-caused this time to unbounded reasoning (`"thinking": null`)
+  consuming the entire output-token budget before any response text was
+  emitted, which raising caps cannot fix; 1 round after a `thinking=False`
+  fix (`…121759Z`) where the Builder was **finally accepted** (after one
+  repair pass fixing the same `PublicPosition` subscript bug seen
+  elsewhere) and the cold and reuse episodes both lit the lamp — but the
+  reuse episode never actually invoked the accepted skill (`skill_uses=0`;
+  it solved the task again with raw primitives identical to the cold
+  episode); and 1 round after adding a `skill_not_used` retry rule
+  (`…122657Z`) that reproduced the unused-skill outcome on attempt a01
+  (correctly retried) and then had the skill actually invoked once on
+  attempt a02 (`skill_uses=1`, verified via the single `.`-suffixed nested
+  step in a02's reuse episode). **This is the only attempt across every
+  Minecraft round in this document where a skill was demonstrably used**,
+  and it came from a retry rule that *selects for* skill use by discarding
+  attempts where it wasn't — 1 of 2 attempts in that round, not a
+  reliability rate. No larger-sample measurement of how often the Action
+  agent chooses to use an offered skill exists in this document.
+
+## Minecraft redstone trial — escalating round 2 (PR #82 fix)
+
+- Checkout: PR #82 head (`fix/26-4-redstone-repair`) — repair cap now
+  escalates 32,000→128,000 separately from the builder cap, unusable
+  Builder replies are retried at the same limits, and the index records
+  build/repair finish reasons, validation rejections, and retry reasons.
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: per-attempt `.noob-agent/minecraft-redstone-20260918T113854Z-a01.json`
+  through `-a03.json` (and matching `.sqlite3` files); **no `-index.json`
+  and no `-a04.json`** — the coordinator stopped the process (killed
+  PID 125432) partway through a04 after diagnosing the root cause below, so
+  this round never reached a completed/escalation-classified end state.
+- Source: read-only, per-attempt JSON plus
+  `select purpose, max_output_tokens, finish_reason, output_tokens,
+  length(response_text), length(reasoning), request_options_json from
+  model_call where purpose in ('build','repair') order by started_at`
+  against each attempt's own SQLite file (`mode=ro` URI).
+
+| Attempt | builder_cap / repair_cap | Cold lamp lit | Build `finish_reason` / `output_tokens` | `len(response_text)` / `len(reasoning)` | Repair attempted? | Builder accepted |
+|---|---|---|---|---|---|---|
+| a01 | 32,000 / 32,000 | Yes (7 dec) | `stop` / 20,826 | 7,590 / 78,164 | Yes — rejected `TypeError: 'PublicPosition' object is not subscriptable`, repair `finish_reason=length`, `output_tokens=32000`, `len(response_text)=0` / `len(reasoning)=138,245` | No — `truncated_reply` |
+| a02 | 32,000 / 64,000 | Yes (15 dec) | `length` / 32,000 | **0** / 127,404 | No (`validation_rejections=[]`, `attempts=1` — first draft itself truncated) | No — `truncated_reply` |
+| a03 | 64,000 / 64,000 | Yes (6 dec) | `length` / 64,000 | **0** / 252,011 | No (same pattern as a02, at the raised cap) | No — `truncated_reply` |
+| a04 | 128,000 / 128,000 (index limits, unused) | Cold episode reached `terminal_state`/`lamp_lit` after 4 decisions / 4 primitives, but the round was killed before the Builder was ever called (`model_call` for a04 has only 4 `action` rows, no `build`/`repair` row) | — | — | — | Round terminated by coordinator, not by the connector |
+
+**Root cause (found by the coordinator, verified directly against the
+SQLite rows above):** every Builder call in this round has
+`request_options_json = {"response_schema": null, "thinking": null}` —
+`thinking` is never explicitly disabled. In every truncated case
+(a02's build, a03's build, a01's repair), `length(response_text)` is
+**0** while `length(reasoning)` is tens to hundreds of thousands of
+characters (up to 252,011 for a03) — i.e. the model spent its entire
+`max_output_tokens` budget on chain-of-thought reasoning and never
+reached the point of emitting the actual skill JSON in `response_text`.
+Raising `builder_cap`/`repair_cap` (32k→64k→128k across this round) did
+not fix this because reasoning consumed whatever budget was given; a03
+in fact used **more** reasoning tokens (252,011 chars) than a02 (127,404
+chars) despite having a larger cap. This matches the "easy" Minecraft
+harness path never passing the `thinking=False` request option that the
+Doom paths do (Doom's `build_finish_reason` was never `length` with an
+empty `response_text` across any of the Doom runs above). Escalating
+output-token caps cannot fix a reasoning-token-starvation bug; the fix is
+to pass `thinking: false` (or an explicit reasoning-token cap) on Builder
+and repair calls in the Minecraft easy-harness path — tracked as a
+follow-up (Minecraft trial 3, with the thinking fix, to be run and
+documented separately).
+
+**Cold lamp lit:** 3 of the 3 completed attempts (a01, a02, a03); a04's
+cold episode also reached `lamp_lit` before the round was stopped.
+**Builder/skill accepted:** 0 of 4 attempts — none reached acceptance,
+and a04 never got a Builder call at all before termination.
+**Skill-reuse attempt:** did not run in any attempt.
+**Anomaly:** this round did not end via the connector's own stop/escalation
+logic — it was manually terminated by the coordinator (`kill` on PID
+125432) once the reasoning-token root cause was confirmed, to avoid
+burning further budget on a bug that cap escalation could not fix. No
+`-index.json` or `-a04.json` was produced as a result; a03's own JSON
+summary is the last complete per-attempt record.
+
+## Minecraft redstone trial — round 3 (thinking=False fix)
+
+- Checkout: PR #82 head (`fix/26-4-redstone-repair`), with the Action and
+  Builder calls now given `thinking=False` explicitly; the limits block
+  records `action_thinking`/`builder_thinking` so this is directly
+  verifiable per attempt.
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: `.noob-agent/minecraft-redstone-20260918T121759Z-index.json`,
+  `-a01.json`, `-a01.sqlite3` (single attempt — the round completed on a01).
+- Source: read-only. Fix confirmed with `select purpose, finish_reason,
+  output_tokens, length(response_text), length(reasoning),
+  request_options_json from model_call where purpose in ('build','repair')
+  order by started_at` and, for skill-use verification, `select episode_id,
+  sequence, action_id, request_json from step order by episode_id,
+  sequence` against the a01 SQLite file.
+
+| Field | Value |
+|---|---|
+| Sequence id | `minecraft-redstone-20260918T121759Z-a01` |
+| `completed` | **`true`** — single attempt, no escalation needed |
+| Limits | `action_thinking=false`, `builder_thinking=false` (both explicitly set, confirming the fix), builder_cap=32,000, repair_cap=32,000 |
+| Cold lamp lit | **Yes** — `terminal_state`/`lamp_lit`, 3 decisions / 3 primitives |
+| Builder | **Accepted** — `skill="light_redstone_lamp@2"`, `builder_stop_reason=accepted`. First candidate (`build`) was rejected in validation (`validation_rejections: ["[contract/SKILL_RAISED] training_replay violated the runtime contract: TypeError: 'PublicPosition' object is not subscriptable"]` — the same bug class seen in round 1/2's a01/a02), but the `repair` call fixed it and was accepted (`repair_finish_reason=stop`) |
+| Build/repair calls verified in DB | `build`: `finish_reason=stop`, `output_tokens=1,217`, `response_text` length 5,242 chars, `reasoning` **absent** (no reasoning-token consumption this time), `request_options_json={"thinking": false}`. `repair`: `finish_reason=stop`, `output_tokens=1,207`, `response_text` length 5,218 chars, same `"thinking": false`. **Fix confirmed directly in the DB** — no truncation, no empty response, no unbounded reasoning. |
+| Reuse (skill-reuse episode) | `reuse_lamp_lit=true` — the lamp was lit in the reuse episode too, 3 decisions / 3 primitives |
+| **Skill actually used in reuse?** | **No — `skill_uses=0`.** Verified directly: the reuse episode's `step` rows (`episode_id` ending `...s20260914-r001`) issue the exact same 3 raw primitives as the cold episode (`inspect_object` → `collect_object` → `place_object`), with no `.`-suffixed nested action_id anywhere — i.e. the Action agent solved the task again from scratch with primitives, never invoking `light_redstone_lamp@2`. The skill was offered but not exercised. |
+| Tokens by phase | cold: 4,622; builder: 10,068; reuse: 4,885 (from the index/attempt JSON `tokens_by_phase`) |
+| Escalation | Did not trigger — a01 completed on the first attempt |
+
+**Cold lamp lit:** yes (3 decisions).
+**Reuse lamp lit:** yes (3 decisions) — **but not via the skill.**
+**Builder/skill accepted:** yes, after one repair pass, with the same
+validation-rejection bug (`PublicPosition` not subscriptable) seen
+elsewhere in this document, successfully repaired this time.
+**Skill uses:** 0. **This round is not evidence that skill reuse works** —
+it only shows the Builder can now be reached and accepted once the
+thinking-budget bug is fixed. Whether the accepted skill is ever invoked,
+and whether invoking it helps, remains untested; a follow-up round that
+requires or measures skill use is expected (tracked as Minecraft trial 4).
+
+## Minecraft redstone trial — round 4 (`skill_not_used` retry rule)
+
+- Checkout: PR #82 head (`fix/26-4-redstone-repair`), with completion now
+  requiring Builder accepted **AND** reuse lamp lit **AND** `skill_uses≥1`;
+  an accepted-but-unused skill (round 3's outcome) now triggers a
+  `retry_reason=skill_not_used` retry at the same limits instead of
+  counting as done.
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: `.noob-agent/minecraft-redstone-20260918T122657Z-index.json`,
+  `-a01.json`/`-a01.sqlite3`, `-a02.json`/`-a02.sqlite3`.
+- Source: read-only. Verified `skill_uses` for both attempts directly
+  against `step` rows (`select episode_id, sequence, action_id,
+  request_json from step order by episode_id, sequence` on each attempt's
+  SQLite file), counting reuse-episode steps whose `action_id` has a `.`
+  suffix (a nested primitive charged to a skill call, as established in
+  the doom-c and round-3 write-ups above).
+
+| Attempt | Cold lamp lit | Skill id | Builder stop / build+repair finish | Validation rejections | Reuse lamp lit | Skill uses (verified) | Retry reason | Tokens (cold/builder/reuse) |
+|---|---|---|---|---|---|---|---|---|
+| a01 | Yes (4 dec) | `light_redstone_lamp@2` | `accepted` / `stop`+`stop` (2 build attempts — 1st rejected, repair fixed it) | `TypeError: 'PublicPosition' object is not subscriptable` | Yes (3 dec) | **0** — reuse `step` rows are `a_0001`, `a_0002`, `a_0003`, all plain (no `.`-suffixed id); the Action agent solved it again with raw primitives, same pattern as round 3 | `skill_not_used` | 6,318 / 9,910 / 4,863 |
+| a02 | Yes | `light_redstone_lamp@2` (same skill, rebuilt fresh for this attempt) | `accepted` / `stop`+`stop` (same validation rejection, repaired again) | `TypeError: 'PublicPosition' object is not subscriptable` | Yes | **1** — reuse `step` rows are `a_0001`, `a_0002`, **`a_0003.1`** (nested under decision `a_0003`), `a_0004`; the one `.`-suffixed step confirms the skill was invoked once, nested inside decision `a_0003` | none — round completed | 4,668 / 9,800 / 6,586 |
+
+**Round result:** `completed=true` after 2 attempts. a01 reproduced round
+3's outcome exactly (Builder accepted, skill offered, never used) and the
+new rule correctly retried it instead of stopping; a02 then had the Action
+agent invoke the skill once during reuse (`a_0003.1`, nested under `a_0003`)
+and the round completed.
+
+**Disclosure — read this before treating "skill used" as a solved
+problem:** the retry rule is a **selection filter**, not a change to the
+Action agent's own tendency to use the skill. It ran the identical
+cold→build→reuse pipeline twice and kept whichever attempt happened to
+invoke the skill, discarding the one that didn't. Out of the 2 attempts
+actually run in this round, the skill was used in **1 of 2**. This is not
+evidence that the Action agent reliably chooses to use an offered skill —
+it is evidence that *when* it does, the mechanism (nested `.`-suffixed
+primitive under a skill-invoking decision) works and lights the lamp. A
+larger sample (more attempts, or an explicit measurement of the Action
+agent's skill-use rate across many reuse episodes) would be needed to say
+anything about how often the skill gets used unretried.
+
+**Cold lamp lit:** 2 of 2 attempts.
+**Builder/skill accepted:** 2 of 2 attempts (same skill id, `light_redstone_lamp@2`,
+rebuilt independently for each attempt; same validation-rejection-then-repair
+pattern both times).
+**Reuse lamp lit:** 2 of 2 attempts.
+**Skill actually used:** 1 of 2 attempts (a02 only) — retried past on a01.
