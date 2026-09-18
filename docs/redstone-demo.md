@@ -41,7 +41,10 @@ Builder cap, one repair, a 600s whole-run deadline, a 1,100,000-token
 ceiling, a 30-call budget). Every one of those is now also a CLI flag:
 `--decisions`, `--primitives`, `--wall-time-ms`, `--action-cap`,
 `--builder-cap`, `--repairs`, `--deadline-s`, `--token-ceiling`, and
-`--call-budget`.
+`--call-budget`. A repair (as opposed to the first build call) has its own
+separate output cap, `--repair-cap`; a plain invocation leaves it unset, which
+keeps today's fixed `DEFAULT_REPAIR_MAX_OUTPUT_TOKENS` (3,000, in
+`src/noob_agent/prompts/builder.py`, unchanged by this script).
 
 `hackathon_plan.md` section 26 (26.3/26.4, approved 2026-09-18) authorizes a
 labeled non-benchmark demo-trial mode with a token budget of 1,000,000 or
@@ -54,8 +57,9 @@ NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
 ```
 
 `--trial` raises the limits to 36 decisions, 72 primitives, a 360s per-attempt
-wall clock, an 8,000-token Action cap, a 32,000-token Builder cap, 3 repairs,
-a 1,800s whole-run deadline, the same 1,100,000-token ceiling, and a 90-call
+wall clock, an 8,000-token Action cap, a 32,000-token Builder cap, a
+32,000-token repair cap (equal to the trial Builder cap), 3 repairs, a
+1,800s whole-run deadline, the same 1,100,000-token ceiling, and a 90-call
 budget. Any explicit flag still overrides the trial default for that one
 limit.
 
@@ -68,19 +72,37 @@ NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
 AND the reuse attempt lighting the lamp (a lit cold lamp is not required). If
 an attempt does not complete, a fresh attempt reruns with only the limit the
 records show was exhausted doubled — wall time, decision/primitive limit,
-Action cap (max 32,000), Builder cap (max 128,000), whole-run deadline (max
-7,200s), or the token/call ceiling (tokens max 8,000,000) — up to 4
-escalations. Each attempt writes its own database and JSON at
-`.noob-agent/<base-run-id>-a01.{sqlite3,json}`, `-a02`, and so on, all
-labeled `non-benchmark-minecraft-redstone-demo-trial`, plus one index JSON at
-`.noob-agent/<base-run-id>-index.json` listing every attempt's limits, stop
-reason, tokens by phase, cold/reuse lamp-lit state, skill ID, and skill uses.
+Action cap (max 32,000), Builder cap (max 128,000), repair cap (max
+128,000, doubled separately from the Builder cap: a build that finishes
+cleanly but whose repair reply is truncated needs a bigger repair cap, not a
+bigger build cap, which never helps it), whole-run deadline (max 7,200s), or
+the token/call ceiling (tokens max 8,000,000) — up to 4 escalations. A
+Builder reply that finished normally but could not be parsed into a skill
+package (`unusable_reply` — invalid JSON metadata or a missing fenced block)
+is not a limit exhaustion; it reruns a fresh attempt at the *same* limits,
+still counted toward the 4-escalation cap and recorded in the index as
+`"builder_retry_reason": "unusable_reply"`. Each attempt writes its own
+database and JSON at `.noob-agent/<base-run-id>-a01.{sqlite3,json}`, `-a02`,
+and so on, all labeled `non-benchmark-minecraft-redstone-demo-trial`, plus
+one index JSON at `.noob-agent/<base-run-id>-index.json` listing every
+attempt's limits, stop reason, tokens by phase, cold/reuse lamp-lit state,
+skill ID, skill uses, the Builder's own stop reason, the build and repair
+calls' finish reasons, and any public validation-rejection summaries (never a
+private grader predicate, clean/faulty label, or held-out answer).
 
 This mode's classification and doubling are pure functions
-(`classify_exhausted_limit`, `double_limit` in
-`scripts/run_minecraft_redstone_demo.py`), unit-tested in
-`tests/test_minecraft_redstone_trial_escalation.py` against fixtures built
-from live evidence, without a live model, connector, or database.
+(`classify_exhausted_limit`, `double_limit`, `is_retryable_builder_failure`,
+`extract_validation_rejections` in `scripts/run_minecraft_redstone_demo.py`),
+unit-tested in `tests/test_minecraft_redstone_trial_escalation.py` against
+fixtures built from live evidence, without a live model, connector, or
+database.
+
+Live evidence from `minecraft-redstone-20260918T084449Z` showed the escalation
+loop itself (base attempt plus up to 4 escalations) is not off-by-one — a
+fixture-driven regression test confirms it already runs 5 attempts when every
+attempt is classifiable. That run stopped at 4 attempts only because its
+4th Builder reply was `unusable_reply`, which nothing classified as an
+exhausted limit before this fix; it is now retried instead.
 
 Validation includes deterministic harness/pack checks and the existing easy-runner,
 Builder, and skill-validation tests. A separate scripted control check verified
