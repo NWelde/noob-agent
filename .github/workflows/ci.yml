@@ -28,9 +28,4 @@ jobs:
         run: uv run mypy src
 
       - name: Test (pytest)
-        # test_budget_mode_has_its_approved_defaults is owned by section
-        # 26.3 (hackathon_plan.md), which has not landed yet; 26.3's PR
-        # removes this --deselect once its production code lands.
-        run: >
-          uv run pytest -q
-          --deselect tests/test_doom_token_budget_demo.py::test_budget_mode_has_its_approved_defaults
+        run: uv run pytest -q
