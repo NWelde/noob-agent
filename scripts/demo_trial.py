@@ -42,6 +42,7 @@ from noob_agent.runtime.heldout import (
 )
 from noob_agent.runtime.sequence import (
     LEARNING_CALL_BUDGET,
+    LEARNING_TOKEN_BUDGET,
     TRAINING_DECISION_BUDGET,
     TRAINING_PRIMITIVE_BUDGET,
     TRAINING_WALL_TIME_MS,
@@ -66,7 +67,42 @@ TOKEN_BUDGET_CAP = 8_000_000
 DEADLINE_CAP_SECONDS = 7_200.0
 ACTION_OUTPUT_TOKENS_CAP = 16_000
 BUILDER_OUTPUT_TOKENS_CAP = 128_000
-MAX_ESCALATIONS = 4
+MAX_ESCALATIONS = 6
+
+# The call/token budget must be coupled to the training decision budget, or an
+# escalated training_decision_budget can silently starve the Builder: training
+# Action calls alone can spend the whole learning call (or token) budget
+# before the Builder ever gets to build. See the live doom-demo-trial-
+# 20260918b evidence (a02-a05): training decisions doubled to 120/240 while
+# the call budget stayed at 66, so `learning_budget_exhausted` fired before
+# any build call.
+CALL_BUDGET_MARGIN = 4
+# Derived from the frozen benchmark ratio (LEARNING_TOKEN_BUDGET /
+# TRAINING_DECISION_BUDGET = 60,000 / 20 = 3,000 tokens per training
+# decision), used only to size the demo-trial token floor.
+TOKENS_PER_TRAINING_DECISION = LEARNING_TOKEN_BUDGET // TRAINING_DECISION_BUDGET
+TOKEN_BUDGET_MARGIN = 50_000
+
+
+def min_learning_call_budget(training_decision_budget: int, max_repairs: int) -> int:
+    """The smallest learning call budget that cannot starve the Builder.
+
+    Training alone may spend up to `training_decision_budget` Action calls;
+    after that the Builder needs at least one build call and up to
+    `max_repairs` repair calls, plus a fixed margin for good measure.
+    """
+    return training_decision_budget + 1 + max_repairs + CALL_BUDGET_MARGIN
+
+
+def min_learning_token_budget(
+    training_decision_budget: int, builder_max_output_tokens: int, max_repairs: int
+) -> int:
+    """The smallest learning token budget that cannot starve the Builder."""
+    return (
+        training_decision_budget * TOKENS_PER_TRAINING_DECISION
+        + builder_max_output_tokens * (max_repairs + 1)
+        + TOKEN_BUDGET_MARGIN
+    )
 
 LimitKey = Literal[
     "learning_token",
@@ -128,6 +164,28 @@ class DemoTrialLimits:
     action_max_output_tokens: int = 4_000
     builder_max_output_tokens: int = 32_000
     deadline_seconds: float = 3_600.0
+    # Matches `LearningSequence`'s own `max_repairs` default; kept explicit
+    # here so the call/token coupling formulas agree with what is actually
+    # passed to the sequence.
+    max_repairs: int = 1
+
+    def __post_init__(self) -> None:
+        """Couple the call and token budgets to the training decision budget.
+
+        Whenever the configured (or escalated) call/token budget would be
+        below the floor that `training_decision_budget` and
+        `builder_max_output_tokens` require, raise it. This runs on every
+        construction, including every `dataclasses.replace()` `escalate()`
+        performs, so the invariant holds no matter which field changed.
+        """
+        min_calls = min_learning_call_budget(self.training_decision_budget, self.max_repairs)
+        if self.learning_call_budget < min_calls:
+            object.__setattr__(self, "learning_call_budget", min_calls)
+        min_tokens = min_learning_token_budget(
+            self.training_decision_budget, self.builder_max_output_tokens, self.max_repairs
+        )
+        if self.learning_token_budget < min_tokens:
+            object.__setattr__(self, "learning_token_budget", min_tokens)
 
 
 def escalate(limits: DemoTrialLimits, exhausted: LimitKey) -> DemoTrialLimits:
@@ -156,7 +214,8 @@ def classify_stop(
     training_stop_reason: str,
     builder_accepted: bool,
     builder_stop_reason: str,
-    heldout_stop_reasons: Sequence[str],
+    heldout_attempted: bool,
+    heldout_goals_completed: int,
     learning_tokens_spent: int,
     learning_token_budget: int,
     learning_calls_spent: int,
@@ -166,20 +225,26 @@ def classify_stop(
 ) -> LimitKey | None:
     """Which limit key, if any, stopped this attempt short of the sample task.
 
-    Returns `None` when nothing here matches a token, call, decision,
-    primitive, wall-time, output-cap, or deadline limit (for example a
-    repair-budget exhaustion or a connector loss): those stops are reported
-    but never escalated.
+    Training decision/primitive/wall-time limits are only escalated before a
+    skill is accepted: once the Builder has accepted a skill, a training stop
+    reason like `decision_limit` no longer matters (the a01 shape), so
+    escalating it further would be wasted budget. Once a skill is accepted,
+    the only thing that can still be escalated is the held-out decision
+    budget, and only when held-out ran but completed no goal at all.
+
+    Returns `None` when nothing here matches an escalatable limit (for
+    example a repair-budget exhaustion or a connector loss): those stops are
+    reported but never escalated.
     """
     if timed_out:
         return "deadline"
-    if training_stop_reason == "decision_limit":
-        return "training_decision"
-    if training_stop_reason == "primitive_limit":
-        return "training_primitive"
-    if training_stop_reason == "wall_time_limit":
-        return "training_wall_time"
     if not builder_accepted:
+        if training_stop_reason == "decision_limit":
+            return "training_decision"
+        if training_stop_reason == "primitive_limit":
+            return "training_primitive"
+        if training_stop_reason == "wall_time_limit":
+            return "training_wall_time"
         if builder_stop_reason == "learning_budget_exhausted":
             if learning_tokens_spent >= learning_token_budget:
                 return "learning_token"
@@ -198,30 +263,30 @@ def classify_stop(
                 return "action_output_tokens"
             return "builder_output_tokens"
         return None
-    for reason in heldout_stop_reasons:
-        if reason == "decision_limit":
-            return "heldout_decision"
-        if reason == "primitive_limit":
-            return "heldout_primitive"
-        if reason == "wall_time_limit":
-            return "heldout_wall_time"
+    if heldout_attempted and heldout_goals_completed == 0:
+        return "heldout_decision"
     return None
 
 
 def task_completed(
     *,
-    training_stop_reason: str,
     builder_accepted: bool,
     heldout_skipped_reason: str | None,
     heldout_count: int,
+    heldout_goals_completed: int,
 ) -> bool:
-    """The sample task is complete: training succeeded, a skill was accepted, and
-    every held-out cell was graded."""
+    """The sample task is complete: a skill was accepted, every held-out cell
+    was graded, and at least one held-out goal was completed.
+
+    Training reaching its own goal is explicitly **not** required: the a01
+    live-trial evidence accepted a skill and completed a held-out goal after
+    training itself stopped on `decision_limit`, not `goal_completed`.
+    """
     return (
-        training_stop_reason in ("goal_completed", "terminal_state")
-        and builder_accepted
+        builder_accepted
         and heldout_skipped_reason is None
         and heldout_count > 0
+        and heldout_goals_completed > 0
     )
 
 
@@ -314,6 +379,10 @@ class AttemptRecord:
     training_stop_reason: str | None = None
     heldout_stop_reasons: list[str] = field(default_factory=list)
     error: str | None = None
+    # Section 26.3's per-attempt summary fields.
+    skill_accepted: bool = False
+    heldout_goals_completed: int = 0
+    heldout_cells: int = 0
 
 
 async def _run_attempt(
@@ -342,6 +411,11 @@ async def _run_attempt(
                 trace=trace,
                 action_max_output_tokens=limits.action_max_output_tokens,
                 builder_max_output_tokens=limits.builder_max_output_tokens,
+                # Repairs get the same output cap as builds in demo-trial
+                # mode: a capped repair reply escalates builder_output_tokens
+                # the same way a capped build reply does.
+                repair_max_output_tokens=limits.builder_max_output_tokens,
+                max_repairs=limits.max_repairs,
                 action_thinking=settings.model.action_thinking,
                 builder_thinking=settings.model.builder_thinking,
                 condition=RUN_KIND,
@@ -381,7 +455,8 @@ async def _run_attempt(
             training_stop_reason="unknown_result",
             builder_accepted=False,
             builder_stop_reason="",
-            heldout_stop_reasons=(),
+            heldout_attempted=False,
+            heldout_goals_completed=0,
             learning_tokens_spent=tokens_spent,
             learning_token_budget=limits.learning_token_budget,
             learning_calls_spent=calls_spent,
@@ -408,12 +483,15 @@ async def _run_attempt(
         )
 
     heldout_reasons = [episode.stop_reason for episode in result.heldout]
+    heldout_goals_completed = sum(1 for episode in result.heldout if episode.grade.goal_completed)
+    heldout_attempted = result.builder.accepted and result.heldout_skipped_reason is None
     stop_key = classify_stop(
         timed_out=False,
         training_stop_reason=result.training.stop_reason,
         builder_accepted=result.builder.accepted,
         builder_stop_reason=result.builder.stop_reason,
-        heldout_stop_reasons=heldout_reasons,
+        heldout_attempted=heldout_attempted,
+        heldout_goals_completed=heldout_goals_completed,
         learning_tokens_spent=tokens_spent,
         learning_token_budget=limits.learning_token_budget,
         learning_calls_spent=calls_spent,
@@ -422,10 +500,10 @@ async def _run_attempt(
         builder_truncated_count=builder_truncated,
     )
     completed = task_completed(
-        training_stop_reason=result.training.stop_reason,
         builder_accepted=result.builder.accepted,
         heldout_skipped_reason=result.heldout_skipped_reason,
         heldout_count=len(result.heldout),
+        heldout_goals_completed=heldout_goals_completed,
     )
     overall_stop_reason = (
         "completed"
@@ -454,6 +532,9 @@ async def _run_attempt(
         builder_truncated_calls=builder_truncated,
         training_stop_reason=result.training.stop_reason,
         heldout_stop_reasons=heldout_reasons,
+        skill_accepted=result.builder.accepted,
+        heldout_goals_completed=heldout_goals_completed,
+        heldout_cells=len(result.heldout),
     )
     return record, (None if completed else stop_key)
 
