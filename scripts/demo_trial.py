@@ -25,21 +25,26 @@ import asyncio
 import json
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from noob_agent.connectors.doom import DoomConnector, DoomSettings
-from noob_agent.domain.records import StoredEpisode
+from noob_agent.domain.records import ModelCallRecord, StoredEpisode
 from noob_agent.grading.doom import DoomEpisodeGrade, DoomPrivateOutcome, grade_doom_episode
 from noob_agent.models.client import build_model_client
 from noob_agent.observability.tracing import build_trace_sink, close_trace
-from noob_agent.runtime.heldout import HELD_OUT_DECISION_BUDGET, HELD_OUT_PRIMITIVE_BUDGET
+from noob_agent.runtime.heldout import (
+    HELD_OUT_DECISION_BUDGET,
+    HELD_OUT_PRIMITIVE_BUDGET,
+    HELD_OUT_WALL_TIME_MS,
+)
 from noob_agent.runtime.sequence import (
     LEARNING_CALL_BUDGET,
     TRAINING_DECISION_BUDGET,
     TRAINING_PRIMITIVE_BUDGET,
+    TRAINING_WALL_TIME_MS,
     HeldOutCell,
     LearningSequence,
     LearningSequenceResult,
@@ -54,11 +59,13 @@ DEFAULT_MANIFEST = Path("scenarios/doom/basic-v1/manifest.json")
 DEFAULT_DATABASE = Path(".noob-agent/demo-trial.sqlite3")
 SUMMARY_DIR = Path(".noob-agent/demo-trials")
 
-# The section 26.3 escalation caps. Only the token budget and the whole-run
-# deadline have an explicit numeric cap; every other limit is bounded solely
-# by MAX_ESCALATIONS.
+# The section 26.3 escalation caps. Only the token budget, the per-call
+# output caps, and the whole-run deadline have an explicit numeric cap; every
+# other limit is bounded solely by MAX_ESCALATIONS.
 TOKEN_BUDGET_CAP = 8_000_000
 DEADLINE_CAP_SECONDS = 7_200.0
+ACTION_OUTPUT_TOKENS_CAP = 16_000
+BUILDER_OUTPUT_TOKENS_CAP = 128_000
 MAX_ESCALATIONS = 4
 
 LimitKey = Literal[
@@ -68,6 +75,10 @@ LimitKey = Literal[
     "training_primitive",
     "heldout_decision",
     "heldout_primitive",
+    "training_wall_time",
+    "heldout_wall_time",
+    "action_output_tokens",
+    "builder_output_tokens",
     "deadline",
 ]
 
@@ -78,12 +89,18 @@ _FIELD_FOR_KEY: dict[LimitKey, str] = {
     "training_primitive": "training_primitive_budget",
     "heldout_decision": "heldout_decision_budget",
     "heldout_primitive": "heldout_primitive_budget",
+    "training_wall_time": "training_wall_time_ms",
+    "heldout_wall_time": "heldout_wall_time_ms",
+    "action_output_tokens": "action_max_output_tokens",
+    "builder_output_tokens": "builder_max_output_tokens",
     "deadline": "deadline_seconds",
 }
 
 _CAP_FOR_KEY: dict[LimitKey, float] = {
     "learning_token": TOKEN_BUDGET_CAP,
     "deadline": DEADLINE_CAP_SECONDS,
+    "action_output_tokens": ACTION_OUTPUT_TOKENS_CAP,
+    "builder_output_tokens": BUILDER_OUTPUT_TOKENS_CAP,
 }
 
 
@@ -103,6 +120,13 @@ class DemoTrialLimits:
     training_primitive_budget: int = TRAINING_PRIMITIVE_BUDGET * 3
     heldout_decision_budget: int = HELD_OUT_DECISION_BUDGET * 3
     heldout_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET * 3
+    training_wall_time_ms: int = TRAINING_WALL_TIME_MS * 3
+    heldout_wall_time_ms: int = HELD_OUT_WALL_TIME_MS * 3
+    # Per-call output caps. Section 21 already authorizes a demo Builder cap
+    # above the ModelSettings ceiling (8,000) in budget mode; these are
+    # passed directly to LearningSequence and never touch ModelSettings.
+    action_max_output_tokens: int = 4_000
+    builder_max_output_tokens: int = 32_000
     deadline_seconds: float = 3_600.0
 
 
@@ -137,12 +161,15 @@ def classify_stop(
     learning_token_budget: int,
     learning_calls_spent: int,
     learning_call_budget: int,
+    action_truncated_count: int = 0,
+    builder_truncated_count: int = 0,
 ) -> LimitKey | None:
     """Which limit key, if any, stopped this attempt short of the sample task.
 
     Returns `None` when nothing here matches a token, call, decision,
-    primitive, or deadline limit (for example a repair-budget exhaustion or a
-    connector loss): those stops are reported but never escalated.
+    primitive, wall-time, output-cap, or deadline limit (for example a
+    repair-budget exhaustion or a connector loss): those stops are reported
+    but never escalated.
     """
     if timed_out:
         return "deadline"
@@ -150,6 +177,8 @@ def classify_stop(
         return "training_decision"
     if training_stop_reason == "primitive_limit":
         return "training_primitive"
+    if training_stop_reason == "wall_time_limit":
+        return "training_wall_time"
     if not builder_accepted:
         if builder_stop_reason == "learning_budget_exhausted":
             if learning_tokens_spent >= learning_token_budget:
@@ -160,12 +189,22 @@ def classify_stop(
             # before either counter reached its own ceiling; tokens are the
             # more common cause, so escalate them first.
             return "learning_token"
+        if builder_stop_reason == "truncated_reply":
+            # Read the truncated role from the recorded calls' purpose and
+            # finish_reason, and raise that role's per-call output cap.
+            if builder_truncated_count > 0:
+                return "builder_output_tokens"
+            if action_truncated_count > 0:
+                return "action_output_tokens"
+            return "builder_output_tokens"
         return None
     for reason in heldout_stop_reasons:
         if reason == "decision_limit":
             return "heldout_decision"
         if reason == "primitive_limit":
             return "heldout_primitive"
+        if reason == "wall_time_limit":
+            return "heldout_wall_time"
     return None
 
 
@@ -220,6 +259,34 @@ def _spent(store: EpisodeStore, sequence_id: str) -> tuple[int, int]:
     return tokens, len(calls)
 
 
+_BUILDER_PURPOSES = {"build", "repair", "refine"}
+
+
+def _truncated_counts(calls: Sequence[ModelCallRecord]) -> tuple[int, int]:
+    """Count truncated (`finish_reason == "length"`) calls per role.
+
+    Returns `(action_truncated_count, builder_truncated_count)`, read
+    straight from each call record's `purpose` and `finish_reason`.
+    """
+    action_count = 0
+    builder_count = 0
+    for call in calls:
+        if call.finish_reason != "length":
+            continue
+        if call.purpose == "action":
+            action_count += 1
+        elif call.purpose in _BUILDER_PURPOSES:
+            builder_count += 1
+    return action_count, builder_count
+
+
+def _all_calls(store: EpisodeStore, sequence_id: str) -> tuple[ModelCallRecord, ...]:
+    """Every model call recorded for one sequence, training and held-out."""
+    return store.read_model_calls(
+        experiment_id=f"{sequence_id}-training"
+    ) + store.read_model_calls(experiment_id=f"{sequence_id}-heldout")
+
+
 def _weave_url(settings: IntegrationSettings, sequence_id: str) -> str | None:
     if not settings.trace.enabled:
         return None
@@ -241,6 +308,11 @@ class AttemptRecord:
     calls_spent: int
     heldout_grades: list[dict[str, object]]
     weave_url: str | None
+    # For the monitor: what actually bound, per role and per episode.
+    action_truncated_calls: int = 0
+    builder_truncated_calls: int = 0
+    training_stop_reason: str | None = None
+    heldout_stop_reasons: list[str] = field(default_factory=list)
     error: str | None = None
 
 
@@ -268,8 +340,10 @@ async def _run_attempt(
                 executor=executor,
                 grade=_grade,
                 trace=trace,
-                action_max_output_tokens=settings.model.action_max_output_tokens,
-                builder_max_output_tokens=settings.model.builder_max_output_tokens,
+                action_max_output_tokens=limits.action_max_output_tokens,
+                builder_max_output_tokens=limits.builder_max_output_tokens,
+                action_thinking=settings.model.action_thinking,
+                builder_thinking=settings.model.builder_thinking,
                 condition=RUN_KIND,
                 learning_token_budget=limits.learning_token_budget,
                 learning_call_budget=limits.learning_call_budget,
@@ -277,6 +351,8 @@ async def _run_attempt(
                 training_primitive_budget=limits.training_primitive_budget,
                 heldout_decision_budget=limits.heldout_decision_budget,
                 heldout_primitive_budget=limits.heldout_primitive_budget,
+                training_wall_time_ms=limits.training_wall_time_ms,
+                heldout_wall_time_ms=limits.heldout_wall_time_ms,
             )
             run = sequence.run(
                 sequence_id=sequence_id,
@@ -289,6 +365,9 @@ async def _run_attempt(
             except TimeoutError:
                 timed_out = True
             tokens_spent, calls_spent = _spent(store, sequence_id)
+            action_truncated, builder_truncated = _truncated_counts(
+                _all_calls(store, sequence_id)
+            )
     finally:
         try:
             close_trace(trace)
@@ -307,6 +386,8 @@ async def _run_attempt(
             learning_token_budget=limits.learning_token_budget,
             learning_calls_spent=calls_spent,
             learning_call_budget=limits.learning_call_budget,
+            action_truncated_count=action_truncated,
+            builder_truncated_count=builder_truncated,
         )
         return (
             AttemptRecord(
@@ -318,6 +399,10 @@ async def _run_attempt(
                 calls_spent=calls_spent,
                 heldout_grades=[],
                 weave_url=weave_url,
+                action_truncated_calls=action_truncated,
+                builder_truncated_calls=builder_truncated,
+                training_stop_reason=None,
+                heldout_stop_reasons=[],
             ),
             stop_key,
         )
@@ -333,6 +418,8 @@ async def _run_attempt(
         learning_token_budget=limits.learning_token_budget,
         learning_calls_spent=calls_spent,
         learning_call_budget=limits.learning_call_budget,
+        action_truncated_count=action_truncated,
+        builder_truncated_count=builder_truncated,
     )
     completed = task_completed(
         training_stop_reason=result.training.stop_reason,
@@ -363,6 +450,10 @@ async def _run_attempt(
             for episode in result.heldout
         ],
         weave_url=weave_url,
+        action_truncated_calls=action_truncated,
+        builder_truncated_calls=builder_truncated,
+        training_stop_reason=result.training.stop_reason,
+        heldout_stop_reasons=heldout_reasons,
     )
     return record, (None if completed else stop_key)
 
