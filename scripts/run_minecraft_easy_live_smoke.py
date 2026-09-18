@@ -78,6 +78,9 @@ UNBOUNDED_WALL_TIME_MS = 10**12
 ACTION_MAX_OUTPUT_TOKENS = 32_000
 BUILDER_MAX_OUTPUT_TOKENS = 100_000
 MAX_REPAIRS = 5
+# `None` keeps BuilderAgent's own DEFAULT_REPAIR_MAX_OUTPUT_TOKENS (3,000)
+# unchanged. A caller (the redstone demo trial) may set an int to raise it.
+REPAIR_MAX_OUTPUT_TOKENS: int | None = None
 # Finite counts remain only so a broken model or connector cannot loop forever.
 EPISODE_DECISION_BUDGET = 500
 EPISODE_PRIMITIVE_BUDGET = 1_000
@@ -168,6 +171,13 @@ class EasyGoalConnector:
 
     async def announce(self, text: str) -> None:
         await self._inner.announce(text)
+
+
+def _builder_kwargs() -> dict[str, int]:
+    """Extra BuilderAgent constructor kwargs; empty keeps today's default."""
+    if REPAIR_MAX_OUTPUT_TOKENS is None:
+        return {}
+    return {"repair_max_output_tokens": REPAIR_MAX_OUTPUT_TOKENS}
 
 
 def _easy_settings() -> MinecraftSettings:
@@ -303,6 +313,7 @@ async def _run_easy(
             executor=executor,
             max_repairs=MAX_REPAIRS,
             max_output_tokens=BUILDER_MAX_OUTPUT_TOKENS,
+            **_builder_kwargs(),
         ).build(
             select_evidence(stored),
             training_trace=stored,
