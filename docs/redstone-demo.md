@@ -69,33 +69,46 @@ NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python \
 ```
 
 `--escalate` implies `--trial`. Completion is the Builder accepting a skill
-AND the reuse attempt lighting the lamp (a lit cold lamp is not required). If
-an attempt does not complete, a fresh attempt reruns with only the limit the
-records show was exhausted doubled — wall time, decision/primitive limit,
-Action cap (max 32,000), Builder cap (max 128,000), repair cap (max
-128,000, doubled separately from the Builder cap: a build that finishes
-cleanly but whose repair reply is truncated needs a bigger repair cap, not a
-bigger build cap, which never helps it), whole-run deadline (max 7,200s), or
-the token/call ceiling (tokens max 8,000,000) — up to 4 escalations. A
-Builder reply that finished normally but could not be parsed into a skill
-package (`unusable_reply` — invalid JSON metadata or a missing fenced block)
-is not a limit exhaustion; it reruns a fresh attempt at the *same* limits,
-still counted toward the 4-escalation cap and recorded in the index as
-`"builder_retry_reason": "unusable_reply"`. Each attempt writes its own
-database and JSON at `.noob-agent/<base-run-id>-a01.{sqlite3,json}`, `-a02`,
-and so on, all labeled `non-benchmark-minecraft-redstone-demo-trial`, plus
-one index JSON at `.noob-agent/<base-run-id>-index.json` listing every
-attempt's limits, stop reason, tokens by phase, cold/reuse lamp-lit state,
-skill ID, skill uses, the Builder's own stop reason, the build and repair
-calls' finish reasons, and any public validation-rejection summaries (never a
-private grader predicate, clean/faulty label, or held-out answer).
+AND the reuse attempt lighting the lamp AND the reuse attempt actually
+invoking that skill at least once (`skill_uses >= 1`; a lit cold lamp is not
+required). An accepted skill that the reuse attempt never calls does not
+demonstrate learned-skill reuse, even if the lamp still lights some other
+way (live evidence `minecraft-redstone-20260918T121759Z`-a01: Builder
+accepted `light_redstone_lamp@2` and the reuse attempt lit the lamp, but
+`skill_uses: 0`). If an attempt does not complete, a fresh attempt reruns
+with only the limit the records show was exhausted doubled — wall time,
+decision/primitive limit, Action cap (max 32,000), Builder cap (max
+128,000), repair cap (max 128,000, doubled separately from the Builder cap:
+a build that finishes cleanly but whose repair reply is truncated needs a
+bigger repair cap, not a bigger build cap, which never helps it), whole-run
+deadline (max 7,200s), or the token/call ceiling (tokens max 8,000,000) — up
+to 4 escalations. Two situations are not limit exhaustion and instead rerun
+a fresh attempt at the *same* limits, still counted toward the
+4-escalation cap: a Builder reply that finished normally but could not be
+parsed into a skill package (`unusable_reply` — invalid JSON metadata or a
+missing fenced block; recorded in the index as
+`"builder_retry_reason": "unusable_reply"`), and a Builder skill that was
+accepted but never invoked during reuse (`skill_uses == 0`; recorded as
+`"retry_reason": "skill_not_used"`). Nothing about either retry nudges the
+model to use its skill — the reruns only change trial accounting, never a
+prompt, tool availability, or the Action agent's choices. Each attempt
+writes its own database and JSON at
+`.noob-agent/<base-run-id>-a01.{sqlite3,json}`, `-a02`, and so on, all
+labeled `non-benchmark-minecraft-redstone-demo-trial`, plus one index JSON
+at `.noob-agent/<base-run-id>-index.json` listing every attempt's limits,
+stop reason, tokens by phase, cold/reuse lamp-lit state, skill ID, skill
+uses, whether the skill was offered as a callable tool during reuse
+(`skill_offered`), the Builder's own stop reason, the build and repair
+calls' finish reasons, either retry reason, and any public
+validation-rejection summaries (never a private grader predicate,
+clean/faulty label, or held-out answer).
 
 This mode's classification and doubling are pure functions
 (`classify_exhausted_limit`, `double_limit`, `is_retryable_builder_failure`,
-`extract_validation_rejections` in `scripts/run_minecraft_redstone_demo.py`),
-unit-tested in `tests/test_minecraft_redstone_trial_escalation.py` against
-fixtures built from live evidence, without a live model, connector, or
-database.
+`is_skill_not_used_retry`, `extract_validation_rejections` in
+`scripts/run_minecraft_redstone_demo.py`), unit-tested in
+`tests/test_minecraft_redstone_trial_escalation.py` against fixtures built
+from live evidence, without a live model, connector, or database.
 
 Live evidence from `minecraft-redstone-20260918T084449Z` showed the escalation
 loop itself (base attempt plus up to 4 escalations) is not off-by-one — a
