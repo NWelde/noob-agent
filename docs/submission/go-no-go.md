@@ -12,7 +12,7 @@ for every public-link check. Status reflects this repo as of 2026-09-18.
 | The repo is public; the Weave project and Report are public (checked logged out by the user) | Repo: public (confirmed per plan section 26 audit). Weave project `nathanweldegiorgis731-minerva-university/Noob-agent`: **visibility not yet confirmed public**. W&B Report: **does not exist yet** | Requester (make both public, verify logged out — an agent cannot check this) |
 | The video plays logged out and is 3 minutes or shorter | **Not started** — see `docs/submission/video-script.md` for the shot list and commands | Requester (record, upload unlisted, verify) |
 | No secrets: `.env` is untracked, and history has been grepped | `.env` is untracked (`.env.demo.example`/`.env.example` are the checked-in templates). A full `git log -p \| grep -i "api_key\|secret"` sweep of history has not been re-run as part of this task | Agent, on request — or requester before submitting |
-| Every README number matches the latest scorecard | Done in this PR: README headline results cite `docs/loop-optimization.md` (`loop-bench-24b-r2`) and `docs/demo-trials.md` (`doom-demo-trial-20260918c`) numbers directly, and the Minecraft claim is qualified as not yet proven, with a `<!-- MINECRAFT TRIAL 2 RESULT -->` placeholder for the pending second trial | Agent (done) / Requester (re-check after Minecraft trial 2 lands) |
+| Every README number matches the latest scorecard | Done in this PR: README headline results cite `docs/loop-optimization.md` (`loop-bench-24b-r2`), `docs/demo-trials.md` (`doom-demo-trial-20260918c`), and the Minecraft trial 4 (`minecraft-redstone-20260918T122657Z`, attempt a02: skill accepted, invoked, and reused; held-out transfer still qualified as unproven) | Agent (done) |
 | `CHANGELOG.md` is up to date; the release tag has been created by the user | Changelog entry added in this PR. **No release tag exists yet** | Requester (choose a version, tag, and push after `main` is ready) |
 | Submitted to the **Part 2** page before 2026-09-29 23:59 PT, and the confirmation screenshot is saved | **Not submitted** | Requester |
 
@@ -26,9 +26,11 @@ for every public-link check. Status reflects this repo as of 2026-09-18.
   README's `_link coming_` placeholder.
 - Merge the outstanding stacked PRs (#76, #81, #82, #83, and this one) in
   order, then re-run the reproducibility and CI checks against `main`.
-- Fill the `<!-- MINECRAFT TRIAL 2 RESULT -->` placeholders in the README and
-  `docs/submission/submission-text.md` once the second Minecraft demo trial
-  completes.
+- The Minecraft trial 4 result (`minecraft-redstone-20260918T122657Z`) is now
+  filled into the README and `docs/submission/submission-text.md`; re-check
+  it against `docs/demo-trials.md` once PR #83 lands on `main`, and update it
+  again if a later trial supersedes it (for example, one that proves
+  held-out transfer).
 - Create the release tag and submit on the AGI House **Part 2** page (not
   Part 1) by 2026-09-29 23:59 PT.
 - Confirm who attends the ceremony (2026-10-01, 4:50 PM, Moscone South Expo
