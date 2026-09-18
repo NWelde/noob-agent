@@ -1,20 +1,25 @@
 # Demo trials (non-benchmark)
 
-**Status: Doom complete; Minecraft awaiting a thinking-budget fix.** This
+**Status: Doom complete; Minecraft — Builder now accepts a skill after the
+thinking-budget fix, but skill reuse has not yet been demonstrated.** This
 document covers `hackathon_plan.md` step 26.4 non-benchmark demo trials
-across three rounds: the pre-fix attempt of each game (Doom `…a`, Minecraft
+across four rounds: the pre-fix attempt of each game (Doom `…a`, Minecraft
 `…081617Z`), a post-escalation-fix Doom re-run and a 4-attempt escalating
-Minecraft run (Doom `…b`, Minecraft `…084449Z`), and a further Doom re-run
-after the escalation logic was corrected again plus a second escalating
-Minecraft run after a repair-cap fix (Doom `…c`, PR #76; Minecraft
-`…113854Z`, PR #82). Doom `…c` completed successfully. Minecraft `…113854Z`
-was manually stopped by the coordinator partway through its 4th attempt
-after finding that Builder truncations were caused by unbounded
-chain-of-thought reasoning consuming the entire output-token budget
-(`"thinking": null` never disabled), not by the build/repair caps
-themselves — see "Minecraft redstone trial — escalating round 2" below. A
-further Minecraft run with a thinking-budget fix is expected as a follow-up
-and will be added as a new round when it lands. Each round is documented as
+Minecraft run (Doom `…b`, Minecraft `…084449Z`), a further Doom re-run after
+the escalation logic was corrected again plus a second escalating Minecraft
+run after a repair-cap fix (Doom `…c`, PR #76; Minecraft `…113854Z`, PR
+#82), and a third Minecraft round after a `thinking=False` fix on the Action
+and Builder calls (Minecraft `…121759Z`, PR #82). Doom `…c` completed
+successfully. Minecraft `…113854Z` was manually stopped by the coordinator
+partway through its 4th attempt after finding that Builder truncations were
+caused by unbounded chain-of-thought reasoning consuming the entire
+output-token budget (`"thinking": null` never disabled), not by the
+build/repair caps themselves. Minecraft `…121759Z`, run after that fix, is
+the first Minecraft round in this document where the Builder was actually
+**accepted** — but its reuse episode solved the task with the same raw
+primitives as the cold episode and never invoked the accepted skill
+(`skill_uses=0`), so it is **not** evidence of skill reuse working; a
+follow-up round requiring skill use is expected. Each round is documented as
 it completed; the "Anomalies flagged" and "Known limitations" sections below
 span all rounds.
 
@@ -146,6 +151,31 @@ repair pass needed, no truncation.
 did what attempt a01 of round b already showed was possible (skill
 acceptance without truncation), and this time the run's own `completed`
 flag reflects it correctly.
+
+**The accepted skill was actually invoked in every held-out episode** (not
+just offered) — verified with:
+`select e.episode_id, s.action_id from step s join episode e using(episode_id)
+where e.experiment_id like 'doom-demo-trial-20260918c%heldout%' order by
+e.episode_id, s.sequence` against `.noob-agent/demo-trial.sqlite3`
+(read-only). Nested primitives charged to a skill call carry a `.`-suffixed
+`action_id` (e.g. `a_0002.1`, `a_0002.2`); counting the distinct parent
+decision ids with at least one such nested step gives the number of
+skill-invoking decisions per episode:
+
+| Held-out episode (seed) | Skill-invoking decisions | Goal completed |
+|---|---|---|
+| `doom-basic-heldout-a` (101) | 14 | No |
+| `doom-basic-heldout-a` (102) | 1 | **Yes** |
+| `doom-basic-heldout-a` (103) | 17 | No |
+| `doom-basic-heldout-b` (201) | 17 | No |
+| `doom-basic-heldout-b` (202) | 17 | No |
+| `doom-basic-heldout-b` (203) | 12 | No |
+
+Every nested primitive under these skill-invoking decisions issues an
+`attack` tool call (`{"tool_name":"attack","arguments":{"ticks":10}}`),
+confirming the skill's actual mechanic. This distinguishes doom-c from the
+Minecraft round below: here the accepted skill was exercised by the Action
+agent in held-out, not merely built and left unused.
 
 ## Minecraft redstone trial
 
@@ -303,24 +333,34 @@ live and nesting is present.
 - Local subprocess sandbox only (`NOOB_AGENT_SANDBOX_MODE=local`); this is
   not a hardened isolation claim.
 - Doom: 1 successful full round (`…c`, 1 attempt) after two escalation-logic
-  fixes; 1 escalating round (`…b`, 5 attempts) that produced a skill and
-  held-out grading in its first attempt but never re-triggered Builder
-  activity in later attempts; 1 pre-fix failed round (`…a`). No statistical
-  conclusions should be drawn from this handful of runs.
-- Minecraft: 1 pre-escalation failed attempt (`…081617Z`) plus 1
-  4-attempt escalating round (`…084449Z`) that never got a Builder skill
-  accepted, root-caused (PR #82) to a fixed 3,000-token repair cap that
-  didn't scale with the escalated build cap, plus separate validation
-  failures (a02: `TypeError: 'PublicPosition' object is not subscriptable`;
-  a03: forbidden `getattr` call; a04: a zero-width space U+200B embedded in
-  the metadata JSON plus mismatched brackets in the generated source); plus
-  1 escalating round under the PR #82 fix (`…113854Z`, 3 completed attempts
-  + a04 killed pre-Builder) that still never got a Builder skill accepted —
-  root-caused this time not to the caps PR #82 fixed, but to unbounded
-  reasoning (`"thinking": null`) consuming the entire output-token budget
-  before any response text was emitted, which raising caps cannot fix. No
-  Minecraft round in this document reached Builder acceptance. A further
-  Minecraft round with a thinking-budget fix is expected as a follow-up.
+  fixes, where the accepted skill was confirmed invoked (not merely built)
+  in all 6 held-out episodes (14/1/17/17/17/12 skill-invoking decisions,
+  each issuing `attack` primitives); 1 escalating round (`…b`, 5 attempts)
+  that produced a skill and held-out grading in its first attempt but never
+  re-triggered Builder activity in later attempts; 1 pre-fix failed round
+  (`…a`). No statistical conclusions should be drawn from this handful of
+  runs.
+- Minecraft: 1 pre-escalation failed attempt (`…081617Z`); 1 4-attempt
+  escalating round (`…084449Z`) that never got a Builder skill accepted,
+  root-caused (PR #82) to a fixed 3,000-token repair cap that didn't scale
+  with the escalated build cap, plus separate validation failures (a02:
+  `TypeError: 'PublicPosition' object is not subscriptable`; a03: forbidden
+  `getattr` call; a04: a zero-width space U+200B embedded in the metadata
+  JSON plus mismatched brackets in the generated source); 1 escalating
+  round under the PR #82 cap fix (`…113854Z`, 3 completed attempts + a04
+  killed pre-Builder) that still never got a Builder skill accepted —
+  root-caused this time to unbounded reasoning (`"thinking": null`)
+  consuming the entire output-token budget before any response text was
+  emitted, which raising caps cannot fix; and 1 round after a
+  `thinking=False` fix (`…121759Z`) where the Builder was **finally
+  accepted** (after one repair pass fixing the same `PublicPosition`
+  subscript bug seen elsewhere) and the cold and reuse episodes both lit
+  the lamp — but the reuse episode never actually invoked the accepted
+  skill (`skill_uses=0`; it solved the task again with raw primitives
+  identical to the cold episode), so **no Minecraft round in this document
+  demonstrates skill reuse actually being exercised**, only that the
+  Builder can now be reached. A follow-up round requiring or measuring
+  skill use is expected (tracked as Minecraft trial 4).
 
 ## Minecraft redstone trial — escalating round 2 (PR #82 fix)
 
@@ -380,3 +420,43 @@ logic — it was manually terminated by the coordinator (`kill` on PID
 burning further budget on a bug that cap escalation could not fix. No
 `-index.json` or `-a04.json` was produced as a result; a03's own JSON
 summary is the last complete per-attempt record.
+
+## Minecraft redstone trial — round 3 (thinking=False fix)
+
+- Checkout: PR #82 head (`fix/26-4-redstone-repair`), with the Action and
+  Builder calls now given `thinking=False` explicitly; the limits block
+  records `action_thinking`/`builder_thinking` so this is directly
+  verifiable per attempt.
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: `.noob-agent/minecraft-redstone-20260918T121759Z-index.json`,
+  `-a01.json`, `-a01.sqlite3` (single attempt — the round completed on a01).
+- Source: read-only. Fix confirmed with `select purpose, finish_reason,
+  output_tokens, length(response_text), length(reasoning),
+  request_options_json from model_call where purpose in ('build','repair')
+  order by started_at` and, for skill-use verification, `select episode_id,
+  sequence, action_id, request_json from step order by episode_id,
+  sequence` against the a01 SQLite file.
+
+| Field | Value |
+|---|---|
+| Sequence id | `minecraft-redstone-20260918T121759Z-a01` |
+| `completed` | **`true`** — single attempt, no escalation needed |
+| Limits | `action_thinking=false`, `builder_thinking=false` (both explicitly set, confirming the fix), builder_cap=32,000, repair_cap=32,000 |
+| Cold lamp lit | **Yes** — `terminal_state`/`lamp_lit`, 3 decisions / 3 primitives |
+| Builder | **Accepted** — `skill="light_redstone_lamp@2"`, `builder_stop_reason=accepted`. First candidate (`build`) was rejected in validation (`validation_rejections: ["[contract/SKILL_RAISED] training_replay violated the runtime contract: TypeError: 'PublicPosition' object is not subscriptable"]` — the same bug class seen in round 1/2's a01/a02), but the `repair` call fixed it and was accepted (`repair_finish_reason=stop`) |
+| Build/repair calls verified in DB | `build`: `finish_reason=stop`, `output_tokens=1,217`, `response_text` length 5,242 chars, `reasoning` **absent** (no reasoning-token consumption this time), `request_options_json={"thinking": false}`. `repair`: `finish_reason=stop`, `output_tokens=1,207`, `response_text` length 5,218 chars, same `"thinking": false`. **Fix confirmed directly in the DB** — no truncation, no empty response, no unbounded reasoning. |
+| Reuse (skill-reuse episode) | `reuse_lamp_lit=true` — the lamp was lit in the reuse episode too, 3 decisions / 3 primitives |
+| **Skill actually used in reuse?** | **No — `skill_uses=0`.** Verified directly: the reuse episode's `step` rows (`episode_id` ending `...s20260914-r001`) issue the exact same 3 raw primitives as the cold episode (`inspect_object` → `collect_object` → `place_object`), with no `.`-suffixed nested action_id anywhere — i.e. the Action agent solved the task again from scratch with primitives, never invoking `light_redstone_lamp@2`. The skill was offered but not exercised. |
+| Tokens by phase | cold: 4,622; builder: 10,068; reuse: 4,885 (from the index/attempt JSON `tokens_by_phase`) |
+| Escalation | Did not trigger — a01 completed on the first attempt |
+
+**Cold lamp lit:** yes (3 decisions).
+**Reuse lamp lit:** yes (3 decisions) — **but not via the skill.**
+**Builder/skill accepted:** yes, after one repair pass, with the same
+validation-rejection bug (`PublicPosition` not subscriptable) seen
+elsewhere in this document, successfully repaired this time.
+**Skill uses:** 0. **This round is not evidence that skill reuse works** —
+it only shows the Builder can now be reached and accepted once the
+thinking-budget bug is fixed. Whether the accepted skill is ever invoked,
+and whether invoking it helps, remains untested; a follow-up round that
+requires or measures skill use is expected (tracked as Minecraft trial 4).
