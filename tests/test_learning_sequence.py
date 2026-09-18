@@ -268,6 +268,63 @@ async def test_training_and_heldout_experiments_carry_the_frozen_budgets(
     assert "weaker isolation" in result.skill_isolation_note
 
 
+def test_repair_max_output_tokens_defaults_to_the_documented_repair_cap(
+    store: EpisodeStore,
+) -> None:
+    """Unchanged behavior: no override still caps repairs at
+    `min(builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS)`."""
+    from noob_agent.prompts.builder import DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
+    from noob_agent.runtime.sequence import training_experiment
+
+    sequence: LearningSequence = LearningSequence(
+        connector_factory=ConnectorFactory(),
+        client=RoutingModelClient(),
+        model_id="fake-model",
+        store=store,
+        registry=SkillRegistry(),
+        executor=LocalSubprocessSkillExecutor(),
+        grade=recording_grader([]),
+        clock=FakeClock(wall=STARTED_AT),
+        builder_max_output_tokens=2_000,
+    )
+    record = training_experiment(
+        experiment_id="seq_repair_default-training",
+        model_id="fake-model",
+        connector_version="fake-v1",
+        created_at=STARTED_AT,
+    )
+    builder = sequence._builder(record, "ep_repair_default")
+    assert builder._repair_max_output_tokens == min(2_000, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS)
+
+
+def test_repair_max_output_tokens_can_be_raised_to_match_the_build_cap(
+    store: EpisodeStore,
+) -> None:
+    """A demo-trial caller can give repairs the same cap as builds."""
+    from noob_agent.runtime.sequence import training_experiment
+
+    sequence: LearningSequence = LearningSequence(
+        connector_factory=ConnectorFactory(),
+        client=RoutingModelClient(),
+        model_id="fake-model",
+        store=store,
+        registry=SkillRegistry(),
+        executor=LocalSubprocessSkillExecutor(),
+        grade=recording_grader([]),
+        clock=FakeClock(wall=STARTED_AT),
+        builder_max_output_tokens=32_000,
+        repair_max_output_tokens=32_000,
+    )
+    record = training_experiment(
+        experiment_id="seq_repair_raised-training",
+        model_id="fake-model",
+        connector_version="fake-v1",
+        created_at=STARTED_AT,
+    )
+    builder = sequence._builder(record, "ep_repair_raised")
+    assert builder._repair_max_output_tokens == 32_000
+
+
 async def test_a_non_benchmark_condition_labels_both_experiments(store: EpisodeStore) -> None:
     sequence = LearningSequence(
         connector_factory=ConnectorFactory(),

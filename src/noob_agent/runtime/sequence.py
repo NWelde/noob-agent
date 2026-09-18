@@ -40,7 +40,13 @@ from noob_agent.models.client import ModelClient
 from noob_agent.models.recording import ModelRole, RecordingModelClient
 from noob_agent.observability.tracing import TraceSink
 from noob_agent.prompts.builder import DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
-from noob_agent.runtime.heldout import HeldOutRunner, heldout_experiment
+from noob_agent.runtime.heldout import (
+    HELD_OUT_DECISION_BUDGET,
+    HELD_OUT_PRIMITIVE_BUDGET,
+    HELD_OUT_WALL_TIME_MS,
+    HeldOutRunner,
+    heldout_experiment,
+)
 from noob_agent.runtime.runner import Clock, EpisodeRunner, SystemClock
 from noob_agent.settings import (
     DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
@@ -73,16 +79,25 @@ def training_experiment(
     connector_version: str,
     created_at: datetime,
     condition: str = "self-improving",
+    decision_budget: int = TRAINING_DECISION_BUDGET,
+    primitive_budget: int = TRAINING_PRIMITIVE_BUDGET,
+    wall_time_budget_ms: int = TRAINING_WALL_TIME_MS,
 ) -> ExperimentRecord:
-    """An experiment record carrying exactly the frozen training budgets."""
+    """An experiment record carrying the training budgets.
+
+    Defaults are exactly the frozen `connector_contract.md` limits. Training
+    has no analogue of held-out's `check_heldout_budgets` refusal, so a caller
+    that raises these (an explicitly labeled non-benchmark demo trial) is
+    trusted to keep the higher values out of benchmark records.
+    """
     return ExperimentRecord(
         experiment_id=experiment_id,
         model_id=model_id,
         condition=condition,
         connector_version=connector_version,
-        decision_budget=TRAINING_DECISION_BUDGET,
-        primitive_budget=TRAINING_PRIMITIVE_BUDGET,
-        wall_time_budget_ms=TRAINING_WALL_TIME_MS,
+        decision_budget=decision_budget,
+        primitive_budget=primitive_budget,
+        wall_time_budget_ms=wall_time_budget_ms,
         created_at=created_at,
     )
 
@@ -171,13 +186,31 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         max_repairs: int = 1,
         action_max_output_tokens: int = DEFAULT_ACTION_MAX_OUTPUT_TOKENS,
         builder_max_output_tokens: int = DEFAULT_BUILDER_MAX_OUTPUT_TOKENS,
+        repair_max_output_tokens: int | None = None,
         condition: str = "self-improving",
         persistent_connector: bool = False,
         action_thinking: bool | None = None,
         builder_thinking: bool | None = None,
         heldout_concurrency: int = 1,
         validation_concurrency: int = VALIDATION_CONCURRENCY,
+        learning_token_budget: int = LEARNING_TOKEN_BUDGET,
+        learning_call_budget: int = LEARNING_CALL_BUDGET,
+        training_decision_budget: int = TRAINING_DECISION_BUDGET,
+        training_primitive_budget: int = TRAINING_PRIMITIVE_BUDGET,
+        heldout_decision_budget: int = HELD_OUT_DECISION_BUDGET,
+        heldout_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
+        training_wall_time_ms: int = TRAINING_WALL_TIME_MS,
+        heldout_wall_time_ms: int = HELD_OUT_WALL_TIME_MS,
     ) -> None:
+        """Build one learning sequence.
+
+        `learning_token_budget` through `heldout_primitive_budget` default to
+        exactly the frozen `connector_contract.md`/`eval_protocol.md` limits
+        from this module and `runtime.heldout`. Only an explicitly labeled
+        non-benchmark caller (the section 26.3 demo-trial profile) should ever
+        pass higher values; this constructor never changes the module
+        constants themselves.
+        """
         if heldout_concurrency < 1:
             raise ValueError("heldout_concurrency must be at least 1.")
         if persistent_connector and heldout_concurrency > 1:
@@ -196,6 +229,11 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._max_repairs = max_repairs
         self._action_max_output_tokens = action_max_output_tokens
         self._builder_max_output_tokens = builder_max_output_tokens
+        self._repair_max_output_tokens = (
+            repair_max_output_tokens
+            if repair_max_output_tokens is not None
+            else min(builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS)
+        )
         self._condition = condition
         self._action_thinking = action_thinking
         self._builder_thinking = builder_thinking
@@ -203,8 +241,14 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._validation_concurrency = validation_concurrency
         # One game for the whole sequence: reset per episode, closed once at the end.
         self._persistent_connector = persistent_connector
-        self._learning_token_budget = LEARNING_TOKEN_BUDGET
-        self._learning_call_budget = LEARNING_CALL_BUDGET
+        self._learning_token_budget = learning_token_budget
+        self._learning_call_budget = learning_call_budget
+        self._training_decision_budget = training_decision_budget
+        self._training_primitive_budget = training_primitive_budget
+        self._heldout_decision_budget = heldout_decision_budget
+        self._heldout_primitive_budget = heldout_primitive_budget
+        self._training_wall_time_ms = training_wall_time_ms
+        self._heldout_wall_time_ms = heldout_wall_time_ms
 
     def _recording(
         self, experiment: ExperimentRecord, *, role: ModelRole, episode_id: str | None = None
@@ -256,6 +300,9 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             on_episode_started=opened.append,
             flush_trace=self._heldout_concurrency == 1,
             offered=offered,
+            max_decision_budget=self._heldout_decision_budget,
+            max_primitive_budget=self._heldout_primitive_budget,
+            max_wall_time_budget_ms=self._heldout_wall_time_ms,
         )
         result = await runner.run(
             experiment=record, scenario_id=cell.scenario_id, seed=cell.seed, split=split
@@ -326,9 +373,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             max_repairs=self._max_repairs,
             max_output_tokens=self._builder_max_output_tokens,
             thinking=self._builder_thinking,
-            repair_max_output_tokens=min(
-                self._builder_max_output_tokens, DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
-            ),
+            repair_max_output_tokens=self._repair_max_output_tokens,
             learning_token_budget=self._learning_token_budget,
             learning_call_budget=self._learning_call_budget,
             validation_concurrency=self._validation_concurrency,
@@ -350,6 +395,9 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             connector_version=manifest.connector_version,
             created_at=created_at,
             condition=self._condition,
+            decision_budget=self._training_decision_budget,
+            primitive_budget=self._training_primitive_budget,
+            wall_time_budget_ms=self._training_wall_time_ms,
         )
         heldout_record = heldout_experiment(
             experiment_id=f"{sequence_id}-heldout",
@@ -357,6 +405,9 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             connector_version=manifest.connector_version,
             created_at=created_at,
             condition=self._condition,
+            decision_budget=self._heldout_decision_budget,
+            primitive_budget=self._heldout_primitive_budget,
+            wall_time_budget_ms=self._heldout_wall_time_ms,
         )
         self._store.create_experiment(training_record)
         self._store.create_experiment(heldout_record)
