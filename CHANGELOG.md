@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+2026-09-18 04:36 PDT | [FIXED] | Fixed the redstone demo-trial escalation revealed by live evidence `minecraft-redstone-20260918T084449Z`: a separately capped `--repair-cap` (defaulting to the Builder cap under `--trial`, unset and behavior-unchanged otherwise) now doubles independently of `--builder-cap`, since a truncated repair reply was previously misclassified as an exhausted Builder cap that doubling never fixed; an `unusable_reply` Builder outcome (a normally-finished reply that could not be parsed into a skill package) now reruns a fresh attempt at unchanged limits, counted toward the escalation cap and recorded in the index as `builder_retry_reason`; and each index attempt record now also carries the Builder's own stop reason, the build and repair calls' finish reasons, and public validation-rejection summaries. Verified the escalation cap itself (base attempt plus up to 4 escalations) is not off-by-one; the live run's 4-attempt stop was the unclassified `unusable_reply` this fix addresses.
 
 
 2026-09-18 01:00 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 26, the production-ready and demo-ready submission: audit evidence (3 failing tests on main, no CI or license), invariants that keep benchmark budgets frozen, and steps 26.1–26.6 covering green main, CI, a labeled non-benchmark demo-trial mode with budgets of 1,000,000+ tokens and automatic escalation, monitored Doom and Minecraft demo trials, a fresh-clone reproducibility check, and a judge-facing README and submission package.
