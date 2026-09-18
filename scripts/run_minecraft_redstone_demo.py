@@ -246,6 +246,12 @@ class AttemptRecord:
     budget_exhausted: str | None = None  # "token", "call", or None
     builder_accepted: bool = False
     reuse_lit: bool = False
+    # How many times the reuse attempt actually invoked the accepted skill
+    # (`len(reuse.skill_uses)` from `_run_easy`'s summary). An accepted skill
+    # that the reuse Action agent never called is not learned-skill reuse
+    # (live evidence minecraft-redstone-20260918T121759Z-a01: builder_accepted
+    # and reuse_lit both true with skill_uses == 0).
+    skill_uses: int = 0
     # Public validation rejection summaries (check/code/message), read from the
     # repair prompt this attempt sent; never a private grader predicate.
     validation_rejections: tuple[str, ...] = ()
@@ -263,16 +269,19 @@ class AttemptRecord:
             budget_exhausted=None,
             builder_accepted=False,
             reuse_lit=False,
+            skill_uses=0,
             validation_rejections=(),
         )
 
 
 def attempt_completed(record: AttemptRecord) -> bool:
-    """Completion = the Builder accepted a skill AND reuse lit the lamp.
+    """Completion = the Builder accepted a skill AND reuse lit the lamp AND
+    the reuse attempt actually invoked that skill at least once.
 
-    A lit cold lamp is not required.
+    A lit cold lamp is not required. A skill that was merely offered but
+    never invoked does not demonstrate learned-skill reuse.
     """
-    return record.builder_accepted and record.reuse_lit
+    return record.builder_accepted and record.reuse_lit and record.skill_uses >= 1
 
 
 def _action_truncated(reasons: tuple[str | None, ...]) -> bool:
@@ -329,6 +338,20 @@ def is_retryable_builder_failure(record: AttemptRecord) -> bool:
     fresh attempt, still counted toward the escalation cap.
     """
     return record.builder_stop_reason == "unusable_reply"
+
+
+def is_skill_not_used_retry(record: AttemptRecord) -> bool:
+    """Whether a fresh attempt at the *same* limits is worth trying because the
+    Builder's skill was accepted but the reuse attempt never invoked it.
+
+    `skill_uses == 0` with `builder_accepted` true says nothing about any
+    limit being too small -- the skill was offered as a callable tool and the
+    model chose not to call it (or the reuse attempt never got that far).
+    Nothing is doubled; only a fresh, still-unforced attempt is worth trying,
+    counted toward the escalation cap (live evidence
+    minecraft-redstone-20260918T121759Z-a01).
+    """
+    return record.builder_accepted and record.skill_uses == 0
 
 
 _FAILING_CHECKS_RE = re.compile(
@@ -392,6 +415,8 @@ def run_escalating_attempts(
             current = current.escalate(kind)
         elif is_retryable_builder_failure(outcome.record):
             pass  # Same limits: an unusable reply says no limit was too small.
+        elif is_skill_not_used_retry(outcome.record):
+            pass  # Same limits: an unused skill says no limit was too small.
         else:
             break
         attempt_number += 1
@@ -564,6 +589,12 @@ async def run(
                 elif tokens_used >= limits.token_ceiling:
                     budget_exhausted = "token"
             builder_accepted = bool((summary.get("builder") or {}).get("accepted"))
+            # The reuse phase only runs, with the accepted skill registered as
+            # a callable tool for the reuse Action agent, when the Builder
+            # accepted a skill; `skill_offered` records that public fact
+            # regardless of whether the model chose to invoke it.
+            skill_offered = builder_accepted
+            skill_uses = int((reuse_info or {}).get("skill_uses") or 0) if reuse_info else 0
             cold_lit = (summary.get("training") or {}).get("terminal_reason") == m.SUCCESS_REASON
             reuse_lit = False
             if reuse_info and reuse_info.get("episode_id"):
@@ -583,6 +614,8 @@ async def run(
                 "tokens_by_phase": costs,
                 "cold_lamp_lit": cold_lit,
                 "reuse_lamp_lit": reuse_lit,
+                "skill_offered": skill_offered,
+                "skill_uses": skill_uses,
                 "builder_stop_reason": builder_stop_reason,
                 "build_finish_reason": build_finish_reason,
                 "repair_finish_reason": repair_finish_reason,
@@ -604,6 +637,7 @@ async def run(
                     budget_exhausted=budget_exhausted,
                     builder_accepted=builder_accepted,
                     reuse_lit=reuse_lit,
+                    skill_uses=skill_uses,
                     validation_rejections=validation_rejections,
                 )
     finally:
@@ -632,6 +666,10 @@ def _index_payload(base_run_id: str, attempts: list[AttemptOutcome]) -> dict[str
                 "skill_uses": ((outcome.payload.get("sequence") or {}).get("reuse") or {}).get(
                     "skill_uses"
                 ),
+                # Whether the accepted skill was registered and available as a
+                # callable tool for the reuse Action agent, regardless of
+                # whether the model chose to invoke it.
+                "skill_offered": outcome.payload.get("skill_offered", False),
                 "completed": attempt_completed(outcome.record),
                 "builder_stop_reason": outcome.record.builder_stop_reason,
                 "build_finish_reason": outcome.record.build_finish_reason,
@@ -641,6 +679,11 @@ def _index_payload(base_run_id: str, attempts: list[AttemptOutcome]) -> dict[str
                 # unchanged limits, not a limit escalation.
                 "builder_retry_reason": (
                     "unusable_reply" if is_retryable_builder_failure(outcome.record) else None
+                ),
+                # Set when this attempt's skill was accepted but never invoked
+                # during reuse, so a fresh attempt reran at unchanged limits.
+                "retry_reason": (
+                    "skill_not_used" if is_skill_not_used_retry(outcome.record) else None
                 ),
             }
             for outcome in attempts
