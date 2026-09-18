@@ -78,7 +78,7 @@ error, started_at from model_call order by started_at`).
 | Reuse/skill attempt | **Did not run** (`reuse: null` — the script only starts a reuse episode after Builder acceptance) |
 | Skill actually used | N/A — no skill was ever accepted |
 | Lamp lit with skill | N/A — no reuse attempt ran |
-| Tokens by phase | cold: 20,422; builder: 1,003,230 (per `tokens_by_phase` in the JSON summary — note this Builder token count is higher than what the single cancelled `model_call` row reports, since that row's `output_tokens` is `None`; the JSON summary's phase total likely reflects usage metered by the provider before cancellation, not the row's own token columns) |
+| Tokens by phase | cold: 20,422; builder: 1,003,230 (per `tokens_by_phase` in the JSON summary). This is a **charged upper bound, not actual output**: `_call_tokens()` in `scripts/run_minecraft_live_smoke.py` (reused via `run_minecraft_easy_live_smoke.py`'s `_call_tokens = _live_smoke._call_tokens`, and by `run_minecraft_redstone_demo.py`'s `m._call_tokens`) falls back to `record.max_output_tokens + (len(system) + len(prompt)) // 4` whenever `input_tokens`/`output_tokens` are `None` — exactly the case here, since the Builder call was cancelled before it reported usage. 1,000,000 (max_output_tokens) + 3,230 ≈ the reported 1,003,230, i.e. ≈12,920 prompt+system characters charged at the conservative 4-chars-per-token estimate, not tokens the model actually produced. |
 | Errors | 1: the Builder call's `CancelledError` |
 | Which limit stopped it | The whole-run 600 s deadline cancelled the in-flight Builder call, which had been given no cap other than the requested 1,000,000-token budget; the cold attempt itself was separately stopped by its own 120 s per-attempt clock, well before its 12-decision/24-primitive budget |
 
@@ -147,11 +147,15 @@ live and nesting is present.
    constraint was per-call output-token caps (Doom Action calls at 1,024)
    and per-episode/whole-run wall clocks, which is why the coordinator is
    having the 26.3 author add wall-time and per-call-cap escalation.
-4. **Reported vs. row-level token mismatch (Minecraft Builder):** the JSON
-   summary's `tokens_by_phase.builder = 1,003,230` does not match the single
-   cancelled `model_call` row, whose `output_tokens` is `NULL` because the
-   call never returned. The phase total appears to come from provider-side
-   usage metering rather than the stored row.
+4. **Minecraft Builder token total is a charged upper bound, not actual
+   output.** `tokens_by_phase.builder = 1,003,230` comes from `_call_tokens()`
+   (`scripts/run_minecraft_live_smoke.py`, shared with the easy-smoke and
+   redstone runners), which falls back to `max_output_tokens + (len(system) +
+   len(prompt)) // 4` whenever a call reports no `input_tokens`/`output_tokens`
+   — the case here, since the Builder call was cancelled before reporting
+   usage. This is the section 21 "Budget accounting" conservative-charge rule
+   working as designed, not a data-integrity bug; it should not be read as
+   1,003,230 tokens the model actually produced.
 
 ## Known limitations
 
