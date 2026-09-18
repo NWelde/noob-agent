@@ -84,6 +84,21 @@ def _apply_limits(module: Any, limits: Limits) -> None:
     # `None` keeps the easy harness's own default (DEFAULT_REPAIR_MAX_OUTPUT_TOKENS,
     # unchanged by this script); a plain DEFAULT_LIMITS run leaves it `None`.
     module.REPAIR_MAX_OUTPUT_TOKENS = limits.repair_cap
+    module.ACTION_THINKING = limits.action_thinking
+    module.BUILDER_THINKING = limits.builder_thinking
+
+
+def _resolve_thinking(limits: Limits, settings: Any) -> Limits:
+    """Thread `settings.model.action_thinking` / `builder_thinking` into a
+    copy of `limits`, so the harness's ActionAgent/BuilderAgent constructions
+    (cold, Builder, and reuse) stop defaulting to the provider's thinking-on
+    behavior and the resolved values are visible in the recorded `limits`
+    block of the per-attempt JSON and the escalation index."""
+    return replace(
+        limits,
+        action_thinking=settings.model.action_thinking,
+        builder_thinking=settings.model.builder_thinking,
+    )
 
 
 # --- Limits: one dataclass for every knob this script exposes --------------
@@ -106,6 +121,11 @@ class Limits:
     # DEFAULT_REPAIR_MAX_OUTPUT_TOKENS (3,000). Only the trial profile and an
     # explicit `--repair-cap` set this.
     repair_cap: int | None = None
+    # Provider reasoning per role; off by default, matching ModelSettings.
+    # `run()` overwrites these from `settings.model.action_thinking` /
+    # `builder_thinking` via `_resolve_thinking` before the attempt starts.
+    action_thinking: bool = False
+    builder_thinking: bool = False
 
     def escalate(self, kind: LimitKind) -> Limits:
         field = _FIELD_FOR_KIND[kind]
@@ -445,6 +465,10 @@ async def run(
     _apply_limits(m, limits)
     environment = os.environ if environ is None else environ
     settings = m.IntegrationSettings.from_environ(environment)
+    limits = _resolve_thinking(limits, settings)
+    _apply_limits(m, limits)
+    if attempt_sink is not None:
+        attempt_sink["limits"] = limits
     if not settings.trace.enabled or not settings.model.inference_model:
         print(
             "Refusing to run: configure a model provider, model ID, and Weave tracing "
@@ -644,15 +668,16 @@ def main(argv: list[str] | None = None, *, environ: dict[str, str] | None = None
                 attempt_sink=sink,
             )
         )
+        resolved_limits = sink.get("limits", attempt_limits)
         if code == 2 or "record" not in sink:
             refusal_code = code
             return AttemptOutcome(
                 attempt_id,
-                attempt_limits,
+                resolved_limits,
                 AttemptRecord.refused(),
                 sink.get("payload", {"run_id": attempt_id, "status": "refused"}),
             )
-        return AttemptOutcome(attempt_id, attempt_limits, sink["record"], sink["payload"])
+        return AttemptOutcome(attempt_id, resolved_limits, sink["record"], sink["payload"])
 
     attempts = run_escalating_attempts(
         run_one, base_run_id=base_run_id, limits=limits, escalate=args.escalate
