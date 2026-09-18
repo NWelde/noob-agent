@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ def load_demo():
         "redstone_demo", "scripts/run_minecraft_redstone_demo.py"
     )
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
