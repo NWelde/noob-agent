@@ -2875,6 +2875,109 @@ grader, validation rule, held-out scenario, or seed. Each needs its own approval
 Each step reverts alone. Reverting 24b restores the one-round stop and `basic-v2`;
 `basic-v3` becomes unused.
 
+## 26. Approved milestone: production-ready and demo-ready submission
+
+This section records the requester's `/goal` directive of 2026-09-18 for the
+CoreWeave Hacks Part 2 **Most Production-Ready** award. Judging is
+submission-only: the repository, README, demo video, and public W&B links are
+the demo. The safe submission deadline is 2026-09-29 23:59 PT; feature freeze
+is 2026-09-26. The requester directed that large work be split into small
+verifiable steps built by Sonnet agents in separate worktrees, that demo
+trials get token budgets of 1,000,000 or more and decision limits large enough
+to complete a sample task, that budgets rise incrementally until the task
+completes, and that a separate agent monitor every demo trial's traces. That
+directive is the approval for the steps below. Each step is still a separate
+test-first pull request that the requester reviews and merges.
+
+### Audit evidence (origin/main `3d14b3e`, 2026-09-18)
+
+- The repository is public. There is no `.github/workflows`, no `LICENSE`, and
+  no release tag.
+- `uv run pytest`: 568 passed, 3 skipped, **3 failed**:
+  `test_builder_agent.py::test_both_builder_prompts_document_the_real_skill_contract`
+  (the prompt lacks `await context.observe()`),
+  `test_sequence_summary.py::test_sequence_summary_is_written_once_and_round_trips`
+  (`no such table: sequence_summary`), and
+  `test_doom_token_budget_demo.py::test_budget_mode_has_its_approved_defaults`
+  (the section 21 budget flag is not implemented; argparse exits 2).
+- Ruff and strict mypy pass.
+- Benchmark budgets are frozen constants: training 20 decisions and 40
+  primitives, held-out 12 and 24, a learning budget of 60,000 tokens and 22
+  calls (`runtime/sequence.py`), and a multi-round budget of 300,000 tokens and
+  140 calls (`runtime/improvement.py`). The Minecraft redstone demo already uses
+  a 1,100,000-token budget.
+
+### Invariants
+
+- **Benchmark budgets do not change.** `eval_protocol.md`, the frozen constants
+  above, and every default of the normal commands stay as they are. Large
+  budgets exist only in an explicitly labeled demo-trial mode, whose records
+  carry `run_kind: non-benchmark-demo-trial` and a separate Git-ignored
+  database, and never enter a scorecard or comparison.
+- Prompts, tools, scenarios, seeds, skill policy, validation, and grading are
+  unchanged. No fixture skill is presented as model output.
+- No new dependencies. CI runs without credentials or network model calls.
+
+### Steps
+
+**26.1 Green main** (`[FIXED]`, core-loop tests). Make the builder-prompt and
+sequence-summary failures pass by fixing the production cause, not the tests,
+unless the test contradicts an approved section; in that case, report it and
+stop. Acceptance: `uv run pytest` passes, except the section 21 test, which
+26.3 owns; Ruff and mypy pass.
+
+**26.2 Continuous integration** (`[ADDED]`, CI; stacked on 26.1). Add
+`.github/workflows/ci.yml` on push and pull request: `uv sync --locked --group
+dev`, `uv run ruff check .`, `uv run mypy src`, and `uv run pytest`, with live
+Minecraft and model tests skipped by their existing guards. Add a CI badge to the
+top of `README.md`. Acceptance: the workflow is green on the PR branch.
+
+**26.3 Demo-trial budgets and escalation** (`[ADDED]`, non-benchmark runtime
+option and script). Implement the section 21 budget mode so its test passes.
+Add a demo-trial profile that raises only the demo run's limits: a learning
+budget of at least 1,000,000 tokens, training and held-out decision and
+primitive limits at least 3 times the benchmark values, and a whole-run safety
+deadline of up to 7,200 seconds. Add `scripts/demo_trial.py`. It runs one Doom
+learning sequence under the profile. If the sequence stops on a token,
+call, decision, primitive, or deadline limit before completing the task, it
+reruns a fresh sequence with the exhausted limit doubled, up to 8,000,000
+tokens and 4 escalations. It writes a JSON summary listing every attempt's
+sequence ID, limits, stop reason, tokens, and Weave URL. Tests first: the
+profile never changes benchmark constants; escalation doubles only the
+exhausted limit; escalation stops at the cap; and every record is labeled
+non-benchmark.
+
+**26.4 Monitored demo trials** (paid live runs, no code). Run
+`scripts/demo_trial.py` on Doom, then on the Minecraft redstone demo with the
+server started by `scripts/setup_minecraft_server.py`. While each runs, a
+separate monitoring agent reads the SQLite records and the Weave traces. It flags
+stalls, capped or unusable replies, repeated failures, and budget stops, and
+writes `docs/demo-trials.md` with run IDs, limits per attempt, outcomes,
+tokens, cost, and links. Acceptance: at least one sequence per game completes
+its sample task, or the report states plainly why it did not.
+
+**26.5 Fresh-clone reproducibility** (`[DOCUMENTED]` or `[FIXED]`). Clone into a
+scratch directory, follow the README word for word, and record every deviation.
+Fix the documentation or preflight checks for each one. Acceptance: a second clean
+clone succeeds with no deviation.
+
+**26.6 Judge-facing README and submission package** (`[DOCUMENTED]`, after
+26.4). The README's first screen: a one-line pitch, badges, the video link,
+headline results with run IDs, public Weave and W&B Report links, and a
+"What changed since Part 1" list. Draft the submission text and the demo video
+script under `docs/submission/`. Every number must trace to a run ID.
+
+### Requester actions (cannot be done by an agent)
+
+Choose a license; make the Weave project and W&B Report public and check them
+logged out; record the video; create the release tag; submit on the Part 2 page;
+and confirm ceremony attendance.
+
+### Rollback
+
+Each step reverts alone. Reverting 26.3 removes the demo-trial mode and leaves
+the benchmark budgets unchanged.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
