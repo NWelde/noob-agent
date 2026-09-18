@@ -296,6 +296,15 @@ Open `.env` and fill in two values: `WANDB_API_KEY` (from
 username or team, followed by `/noob-agent`). Everything else is already set.
 To check the install without credentials, run `uv run pytest`.
 
+On a fresh clone this currently reports 3 known failing tests, unrelated to
+your install: `test_both_builder_prompts_document_the_real_skill_contract`,
+`test_sequence_summary_is_written_once_and_round_trips`, and
+`test_budget_mode_has_its_approved_defaults` (see
+[`hackathon_plan.md`](hackathon_plan.md) section 26 for the tracked cause).
+It also skips 2 Minecraft connector tests until the Node sidecar's
+dependencies are installed, which `scripts/setup_minecraft_server.py` does
+for you in step 3 below.
+
 ### 2. Doom: a full learning sequence (no game install needed)
 
 ViZDoom installs with the Python packages. This runs one cold training attempt,
