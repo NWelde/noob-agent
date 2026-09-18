@@ -1,27 +1,35 @@
 # Demo trials (non-benchmark)
 
-**Status: Doom complete; Minecraft — Builder now accepts a skill after the
-thinking-budget fix, but skill reuse has not yet been demonstrated.** This
-document covers `hackathon_plan.md` step 26.4 non-benchmark demo trials
-across four rounds: the pre-fix attempt of each game (Doom `…a`, Minecraft
-`…081617Z`), a post-escalation-fix Doom re-run and a 4-attempt escalating
-Minecraft run (Doom `…b`, Minecraft `…084449Z`), a further Doom re-run after
-the escalation logic was corrected again plus a second escalating Minecraft
-run after a repair-cap fix (Doom `…c`, PR #76; Minecraft `…113854Z`, PR
-#82), and a third Minecraft round after a `thinking=False` fix on the Action
-and Builder calls (Minecraft `…121759Z`, PR #82). Doom `…c` completed
-successfully. Minecraft `…113854Z` was manually stopped by the coordinator
-partway through its 4th attempt after finding that Builder truncations were
-caused by unbounded chain-of-thought reasoning consuming the entire
-output-token budget (`"thinking": null` never disabled), not by the
-build/repair caps themselves. Minecraft `…121759Z`, run after that fix, is
-the first Minecraft round in this document where the Builder was actually
-**accepted** — but its reuse episode solved the task with the same raw
-primitives as the cold episode and never invoked the accepted skill
-(`skill_uses=0`), so it is **not** evidence of skill reuse working; a
-follow-up round requiring skill use is expected. Each round is documented as
-it completed; the "Anomalies flagged" and "Known limitations" sections below
-span all rounds.
+**Status: complete for both games as of this document.** Doom accepted and
+*used* a skill in held-out. Minecraft required a fifth round before an
+attempt both accepted a skill and actually invoked it during reuse — and
+even then, only 1 of that round's 2 attempts did (see the disclosure in
+"Minecraft redstone trial — round 4" below; this is a small, retry-selected
+sample, not a reliability claim). This document covers `hackathon_plan.md`
+step 26.4 non-benchmark demo trials across five rounds: the pre-fix attempt
+of each game (Doom `…a`, Minecraft `…081617Z`), a post-escalation-fix Doom
+re-run and a 4-attempt escalating Minecraft run (Doom `…b`, Minecraft
+`…084449Z`), a further Doom re-run after the escalation logic was corrected
+again plus a second escalating Minecraft run after a repair-cap fix (Doom
+`…c`, PR #76; Minecraft `…113854Z`, PR #82), a third Minecraft round after a
+`thinking=False` fix on the Action and Builder calls (Minecraft `…121759Z`,
+PR #82), and a fourth Minecraft round after a `skill_not_used` retry rule
+was added (Minecraft `…122657Z`, PR #82). Doom `…c` completed successfully,
+with the accepted skill confirmed invoked in all 6 held-out episodes.
+Minecraft `…113854Z` was manually stopped by the coordinator partway
+through its 4th attempt after finding that Builder truncations were caused
+by unbounded chain-of-thought reasoning consuming the entire output-token
+budget (`"thinking": null` never disabled), not by the build/repair caps
+themselves. Minecraft `…121759Z`, run after that fix, was the first round
+where the Builder was accepted, but its reuse episode never invoked the
+skill (`skill_uses=0`). Minecraft `…122657Z`, run after a rule requiring
+Builder-accepted AND reuse-lit AND skill-used, reproduced round 3's
+unused-skill outcome on its first attempt (correctly triggering a
+`skill_not_used` retry) and then had the skill actually invoked on its
+second attempt — the first and only attempt across all rounds in this
+document where a Minecraft skill was demonstrably used. Each round is
+documented as it completed; the "Anomalies flagged" and "Known
+limitations" sections below span all rounds.
 
 Every run here is explicitly **non-benchmark**: it uses the demo-trial
 profile's raised limits (`RUN_KIND = "non-benchmark-demo-trial"` /
@@ -351,16 +359,22 @@ live and nesting is present.
   killed pre-Builder) that still never got a Builder skill accepted —
   root-caused this time to unbounded reasoning (`"thinking": null`)
   consuming the entire output-token budget before any response text was
-  emitted, which raising caps cannot fix; and 1 round after a
-  `thinking=False` fix (`…121759Z`) where the Builder was **finally
-  accepted** (after one repair pass fixing the same `PublicPosition`
-  subscript bug seen elsewhere) and the cold and reuse episodes both lit
-  the lamp — but the reuse episode never actually invoked the accepted
-  skill (`skill_uses=0`; it solved the task again with raw primitives
-  identical to the cold episode), so **no Minecraft round in this document
-  demonstrates skill reuse actually being exercised**, only that the
-  Builder can now be reached. A follow-up round requiring or measuring
-  skill use is expected (tracked as Minecraft trial 4).
+  emitted, which raising caps cannot fix; 1 round after a `thinking=False`
+  fix (`…121759Z`) where the Builder was **finally accepted** (after one
+  repair pass fixing the same `PublicPosition` subscript bug seen
+  elsewhere) and the cold and reuse episodes both lit the lamp — but the
+  reuse episode never actually invoked the accepted skill (`skill_uses=0`;
+  it solved the task again with raw primitives identical to the cold
+  episode); and 1 round after adding a `skill_not_used` retry rule
+  (`…122657Z`) that reproduced the unused-skill outcome on attempt a01
+  (correctly retried) and then had the skill actually invoked once on
+  attempt a02 (`skill_uses=1`, verified via the single `.`-suffixed nested
+  step in a02's reuse episode). **This is the only attempt across every
+  Minecraft round in this document where a skill was demonstrably used**,
+  and it came from a retry rule that *selects for* skill use by discarding
+  attempts where it wasn't — 1 of 2 attempts in that round, not a
+  reliability rate. No larger-sample measurement of how often the Action
+  agent chooses to use an offered skill exists in this document.
 
 ## Minecraft redstone trial — escalating round 2 (PR #82 fix)
 
@@ -460,3 +474,51 @@ it only shows the Builder can now be reached and accepted once the
 thinking-budget bug is fixed. Whether the accepted skill is ever invoked,
 and whether invoking it helps, remains untested; a follow-up round that
 requires or measures skill use is expected (tracked as Minecraft trial 4).
+
+## Minecraft redstone trial — round 4 (`skill_not_used` retry rule)
+
+- Checkout: PR #82 head (`fix/26-4-redstone-repair`), with completion now
+  requiring Builder accepted **AND** reuse lamp lit **AND** `skill_uses≥1`;
+  an accepted-but-unused skill (round 3's outcome) now triggers a
+  `retry_reason=skill_not_used` retry at the same limits instead of
+  counting as done.
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: `.noob-agent/minecraft-redstone-20260918T122657Z-index.json`,
+  `-a01.json`/`-a01.sqlite3`, `-a02.json`/`-a02.sqlite3`.
+- Source: read-only. Verified `skill_uses` for both attempts directly
+  against `step` rows (`select episode_id, sequence, action_id,
+  request_json from step order by episode_id, sequence` on each attempt's
+  SQLite file), counting reuse-episode steps whose `action_id` has a `.`
+  suffix (a nested primitive charged to a skill call, as established in
+  the doom-c and round-3 write-ups above).
+
+| Attempt | Cold lamp lit | Skill id | Builder stop / build+repair finish | Validation rejections | Reuse lamp lit | Skill uses (verified) | Retry reason | Tokens (cold/builder/reuse) |
+|---|---|---|---|---|---|---|---|---|
+| a01 | Yes (4 dec) | `light_redstone_lamp@2` | `accepted` / `stop`+`stop` (2 build attempts — 1st rejected, repair fixed it) | `TypeError: 'PublicPosition' object is not subscriptable` | Yes (3 dec) | **0** — reuse `step` rows are `a_0001`, `a_0002`, `a_0003`, all plain (no `.`-suffixed id); the Action agent solved it again with raw primitives, same pattern as round 3 | `skill_not_used` | 6,318 / 9,910 / 4,863 |
+| a02 | Yes | `light_redstone_lamp@2` (same skill, rebuilt fresh for this attempt) | `accepted` / `stop`+`stop` (same validation rejection, repaired again) | `TypeError: 'PublicPosition' object is not subscriptable` | Yes | **1** — reuse `step` rows are `a_0001`, `a_0002`, **`a_0003.1`** (nested under decision `a_0003`), `a_0004`; the one `.`-suffixed step confirms the skill was invoked once, nested inside decision `a_0003` | none — round completed | 4,668 / 9,800 / 6,586 |
+
+**Round result:** `completed=true` after 2 attempts. a01 reproduced round
+3's outcome exactly (Builder accepted, skill offered, never used) and the
+new rule correctly retried it instead of stopping; a02 then had the Action
+agent invoke the skill once during reuse (`a_0003.1`, nested under `a_0003`)
+and the round completed.
+
+**Disclosure — read this before treating "skill used" as a solved
+problem:** the retry rule is a **selection filter**, not a change to the
+Action agent's own tendency to use the skill. It ran the identical
+cold→build→reuse pipeline twice and kept whichever attempt happened to
+invoke the skill, discarding the one that didn't. Out of the 2 attempts
+actually run in this round, the skill was used in **1 of 2**. This is not
+evidence that the Action agent reliably chooses to use an offered skill —
+it is evidence that *when* it does, the mechanism (nested `.`-suffixed
+primitive under a skill-invoking decision) works and lights the lamp. A
+larger sample (more attempts, or an explicit measurement of the Action
+agent's skill-use rate across many reuse episodes) would be needed to say
+anything about how often the skill gets used unretried.
+
+**Cold lamp lit:** 2 of 2 attempts.
+**Builder/skill accepted:** 2 of 2 attempts (same skill id, `light_redstone_lamp@2`,
+rebuilt independently for each attempt; same validation-rejection-then-repair
+pattern both times).
+**Reuse lamp lit:** 2 of 2 attempts.
+**Skill actually used:** 1 of 2 attempts (a02 only) — retried past on a01.
