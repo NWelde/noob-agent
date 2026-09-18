@@ -12,9 +12,12 @@ Version 3 adds the model_call table, one row per model request. It is additive
 in the same way: a version-2 database gains the table and keeps every row.
 
 Version 5 adds a nullable `request_options_json` column to model_call
-(`hackathon_plan.md` section 22). Version 4 was used by unmerged local work that
-added a `sequence_summary` table, so databases at 3 or 4 both upgrade by gaining
-the column; any extra table they carry is left untouched.
+(`hackathon_plan.md` section 22) and the `sequence_summary` table (one
+immutable, harness-only summary per completed learning sequence). Version 4
+was used by unmerged local work that added the same table ahead of the
+version bump, so databases at 3 or 4 both upgrade by gaining the column and
+the table, which is created with `IF NOT EXISTS` and so is a no-op for a
+version-4 database that already has it.
 """
 
 from __future__ import annotations
@@ -142,6 +145,27 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS schema_version (
         version INTEGER NOT NULL
+    )
+    """,
+    # One immutable, harness-only summary per completed learning sequence.
+    # Diagnostic output only: no private scenario configuration or predicate
+    # state is stored here.
+    """
+    CREATE TABLE IF NOT EXISTS sequence_summary (
+        sequence_id              TEXT    PRIMARY KEY,
+        run_kind                 TEXT    NOT NULL,
+        training_episode_id      TEXT    NOT NULL REFERENCES episode (episode_id),
+        training_goal_completed  INTEGER NOT NULL,
+        builder_stop_reason      TEXT    NOT NULL,
+        builder_truncated        INTEGER NOT NULL,
+        accepted_skill_name      TEXT,
+        accepted_skill_version   INTEGER,
+        heldout_total            INTEGER NOT NULL,
+        heldout_completed        INTEGER NOT NULL,
+        heldout_skipped_reason   TEXT,
+        input_tokens             INTEGER NOT NULL,
+        output_tokens            INTEGER NOT NULL,
+        finished_at              TEXT    NOT NULL
     )
     """,
 )
