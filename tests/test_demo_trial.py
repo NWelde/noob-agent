@@ -10,6 +10,7 @@ pure profile and escalation functions directly.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,9 @@ def _module():
     spec = importlib.util.spec_from_file_location("demo_trial", "scripts/demo_trial.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves `from __future__ import annotations` string
+    # annotations by looking the module up in sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -153,8 +157,13 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
     )
 
     assert m.classify_stop(**{**base, "timed_out": True}) == "deadline"
-    assert m.classify_stop(**{**base, "training_stop_reason": "decision_limit"}) == "training_decision"
-    assert m.classify_stop(**{**base, "training_stop_reason": "primitive_limit"}) == "training_primitive"
+    assert (
+        m.classify_stop(**{**base, "training_stop_reason": "decision_limit"}) == "training_decision"
+    )
+    assert (
+        m.classify_stop(**{**base, "training_stop_reason": "primitive_limit"})
+        == "training_primitive"
+    )
     assert (
         m.classify_stop(
             **{
@@ -179,11 +188,23 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
         == "learning_call"
     )
     assert (
-        m.classify_stop(**{**base, "builder_accepted": False, "builder_stop_reason": "repair_budget_exhausted"})
+        m.classify_stop(
+            **{
+                **base,
+                "builder_accepted": False,
+                "builder_stop_reason": "repair_budget_exhausted",
+            }
+        )
         is None
     )
-    assert m.classify_stop(**{**base, "heldout_stop_reasons": ("decision_limit",)}) == "heldout_decision"
-    assert m.classify_stop(**{**base, "heldout_stop_reasons": ("primitive_limit",)}) == "heldout_primitive"
+    assert (
+        m.classify_stop(**{**base, "heldout_stop_reasons": ("decision_limit",)})
+        == "heldout_decision"
+    )
+    assert (
+        m.classify_stop(**{**base, "heldout_stop_reasons": ("primitive_limit",)})
+        == "heldout_primitive"
+    )
     assert m.classify_stop(**base) is None
 
 
