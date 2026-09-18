@@ -1,5 +1,7 @@
 # noob-agent
 
+[![CI](https://github.com/NWelde/noob-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/NWelde/noob-agent/actions/workflows/ci.yml)
+
 noob-agent measures how well an AI model **learns** inside a game it has never
 seen. It doesn't just check whether the model can finish a fixed task.
 
