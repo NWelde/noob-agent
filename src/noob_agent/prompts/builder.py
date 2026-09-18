@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
+from typing import get_args
 
 from noob_agent.agents.evidence import EvidenceObservation, TraceEvidence
 from noob_agent.domain.model import ToolDefinition
+from noob_agent.skills.contract import EvidenceKind, SkillStatusClaim
 from noob_agent.skills.errors import SkillValidationIssue
 from noob_agent.skills.metadata import API_VERSION
 
@@ -143,7 +145,26 @@ API and the shape of a good skill; it is not a solution for any game you will se
 {json.dumps(WORKED_EXAMPLE_METADATA)}
 ```"""
 
-_REPLY_FORMAT = f"""Reply with exactly two fenced blocks and nothing that contradicts them.
+
+def _quoted(values: tuple[str, ...]) -> str:
+    return ", ".join(f'"{value}"' for value in values)
+
+
+# A live repair once spent its entire output cap guessing this API, so both the
+# build and the repair prompt restate the contract's exact shape rather than
+# leaving it to inference. This restates SKILL_API_REFERENCE (already in the
+# system prompt) compactly, to stay inside PROMPT_TOKEN_LIMIT.
+_CONTRACT = f"""Skill contract (the only API): `observation = await context.observe()` returns
+`observation.visible_objects` (each with `object_id`, `label`, `position`, `distance`,
+`properties`), `observation.messages`, `observation.sequence`, `observation.terminal`.
+`result = await context.call("name", **arguments)` returns `result.status`
+({_quoted(("succeeded", "rejected", "failed", "unknown"))}), `result.code`, `result.message`,
+`result.observation`. `context.remaining_budget()` and `context.log(event, fields)` are free.
+Return `SkillResult(status=..., summary="...", evidence=(EvidenceRef(kind=..., value="..."),),
+primitive_actions_used=...)`. `status` is one of {_quoted(get_args(SkillStatusClaim))};
+`kind` is one of {_quoted(get_args(EvidenceKind))}."""
+
+_REPLY_FORMAT_BASE = f"""Reply with exactly two fenced blocks and nothing that contradicts them.
 
 First, the skill source:
 
@@ -171,6 +192,14 @@ You may import only `math`, `statistics`, `dataclasses`, `typing`, `collections`
 import, and any file, environment, process, network, or dynamic-execution access,
 is refused. `max_primitive_actions` is at most 8 and `max_wall_time_seconds` at
 most 30."""
+
+# The build prompt always has room for the contract reminder (verified by
+# `test_the_worst_case_build_prompt_fits_the_protocol_budget`); the repair
+# prompt's worst case does not, so it offers `_CONTRACT` as its
+# highest-priority optional section instead (see `render_repair_prompt`).
+_REPLY_FORMAT = f"""{_CONTRACT}
+
+{_REPLY_FORMAT_BASE}"""
 
 
 def _render_observation(observation: EvidenceObservation) -> str:
@@ -311,8 +340,11 @@ The rejected source was:
 Fix exactly these problems and return the whole skill again. Do not work around a
 check, and do not change what the skill claims to do in order to pass.
 {keep_name}
-{_REPLY_FORMAT}"""
-    optional: list[str] = []
+{_REPLY_FORMAT_BASE}"""
+    # The contract reminder is the highest-priority optional section: it is
+    # small and, per `test_both_builder_prompts_document_the_real_skill_contract`,
+    # a repair should restate the contract whenever the budget allows it.
+    optional: list[str] = [_CONTRACT]
     names = tuple(primitive_names)
     if tools or names:
         optional.append(f"Primitive tools:\n{_render_tools(tools, names)}")
