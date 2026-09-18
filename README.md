@@ -59,7 +59,7 @@ in a way you could run in CI.
   [#82](https://github.com/NWelde/noob-agent/pull/82),
   [#83](https://github.com/NWelde/noob-agent/pull/83)).
 - Added this judge-facing README first screen and the `docs/submission/`
-  package (section 26.6, this branch).
+  package ([#84](https://github.com/NWelde/noob-agent/pull/84)).
 
 ## Quickstart
 
