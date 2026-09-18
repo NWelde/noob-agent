@@ -93,6 +93,51 @@ def test_profile_never_produces_a_benchmark_sized_limit() -> None:
     assert limits.heldout_wall_time_ms > HELD_OUT_WALL_TIME_MS
 
 
+def test_default_profile_call_budget_already_covers_training_plus_build_and_margin() -> None:
+    """The default limits satisfy the call-budget coupling with no repair needed."""
+    m = _module()
+    limits = m.DemoTrialLimits()
+    assert limits.learning_call_budget == m.min_learning_call_budget(
+        limits.training_decision_budget, limits.max_repairs
+    )
+
+
+def test_construction_repairs_an_under_provisioned_call_budget() -> None:
+    """A call budget below the coupling floor is raised, not left starving the Builder."""
+    m = _module()
+    limits = m.DemoTrialLimits(training_decision_budget=120, learning_call_budget=66)
+    assert limits.learning_call_budget >= m.min_learning_call_budget(120, limits.max_repairs)
+    assert limits.learning_call_budget > 66
+
+
+def test_construction_repairs_an_under_provisioned_token_budget() -> None:
+    """A token budget below the coupling floor is raised, not left starving the Builder."""
+    m = _module()
+    limits = m.DemoTrialLimits(
+        training_decision_budget=600, learning_token_budget=1_000, builder_max_output_tokens=32_000
+    )
+    assert limits.learning_token_budget >= m.min_learning_token_budget(
+        600, 32_000, limits.max_repairs
+    )
+    assert limits.learning_token_budget > 1_000
+
+
+def test_regression_a02_shape_training_120_decisions_does_not_starve_the_builder() -> None:
+    """Replays the live a02 failure: training escalated to 120 decisions while the
+    call budget stayed at the un-escalated 66. The call budget must self-repair."""
+    m = _module()
+    limits = m.DemoTrialLimits(training_decision_budget=120, learning_call_budget=66)
+    assert limits.learning_call_budget >= 120 + 1 + limits.max_repairs + m.CALL_BUDGET_MARGIN
+    # And escalating training decisions from the benchmark-scaled default must
+    # also carry the call budget up with it.
+    default_limits = m.DemoTrialLimits()
+    escalated = m.escalate(default_limits, "training_decision")
+    assert escalated.training_decision_budget == default_limits.training_decision_budget * 2
+    assert escalated.learning_call_budget >= m.min_learning_call_budget(
+        escalated.training_decision_budget, escalated.max_repairs
+    )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -126,11 +171,22 @@ def test_escalate_doubles_only_the_exhausted_limit(field: str) -> None:
     }[field]
     before = m.DemoTrialLimits(deadline_seconds=1_000)
     after = m.escalate(before, key)
+    # Escalating training_decision_budget also raises the call (and, at
+    # larger scales, token) budget it is coupled to, so the Builder is never
+    # starved by a training-decision escalation alone; every other key
+    # leaves those two fields untouched.
+    coupled_fields = (
+        {"learning_call_budget", "learning_token_budget"}
+        if field == "training_decision_budget"
+        else set()
+    )
     for other_field in before.__dataclass_fields__:
         before_value = getattr(before, other_field)
         after_value = getattr(after, other_field)
         if other_field == field:
             assert after_value == before_value * 2
+        elif other_field in coupled_fields:
+            assert after_value >= before_value
         else:
             assert after_value == before_value
 
@@ -194,7 +250,8 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
         training_stop_reason="goal_completed",
         builder_accepted=True,
         builder_stop_reason="accepted",
-        heldout_stop_reasons=(),
+        heldout_attempted=True,
+        heldout_goals_completed=1,
         learning_tokens_spent=0,
         learning_token_budget=1_000_000,
         learning_calls_spent=0,
@@ -204,22 +261,18 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
     )
 
     assert m.classify_stop(**{**base, "timed_out": True}) == "deadline"
-    assert (
-        m.classify_stop(**{**base, "training_stop_reason": "decision_limit"}) == "training_decision"
-    )
-    assert (
-        m.classify_stop(**{**base, "training_stop_reason": "primitive_limit"})
-        == "training_primitive"
-    )
-    assert (
-        m.classify_stop(**{**base, "training_stop_reason": "wall_time_limit"})
-        == "training_wall_time"
-    )
+    # A skill was accepted: training limits are never escalated, even when
+    # training itself reports hitting one (the a01 shape).
+    assert m.classify_stop(**{**base, "training_stop_reason": "decision_limit"}) is None
+    assert m.classify_stop(**{**base, "training_stop_reason": "primitive_limit"}) is None
+    assert m.classify_stop(**{**base, "training_stop_reason": "wall_time_limit"}) is None
     assert (
         m.classify_stop(
             **{
                 **base,
                 "builder_accepted": False,
+                "heldout_attempted": False,
+                "heldout_goals_completed": 0,
                 "builder_stop_reason": "learning_budget_exhausted",
                 "learning_tokens_spent": 1_000_000,
             }
@@ -231,6 +284,8 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
             **{
                 **base,
                 "builder_accepted": False,
+                "heldout_attempted": False,
+                "heldout_goals_completed": 0,
                 "builder_stop_reason": "learning_budget_exhausted",
                 "learning_tokens_spent": 0,
                 "learning_calls_spent": 66,
@@ -243,24 +298,74 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
             **{
                 **base,
                 "builder_accepted": False,
+                "heldout_attempted": False,
+                "heldout_goals_completed": 0,
                 "builder_stop_reason": "repair_budget_exhausted",
             }
         )
         is None
     )
+    assert m.classify_stop(**base) is None
+
+
+def test_classify_stop_escalates_training_limits_only_before_a_skill_is_accepted() -> None:
+    m = _module()
+    base = dict(
+        timed_out=False,
+        builder_accepted=False,
+        builder_stop_reason="",
+        heldout_attempted=False,
+        heldout_goals_completed=0,
+        learning_tokens_spent=0,
+        learning_token_budget=1_000_000,
+        learning_calls_spent=0,
+        learning_call_budget=66,
+        action_truncated_count=0,
+        builder_truncated_count=0,
+    )
+    assert m.classify_stop(**base, training_stop_reason="decision_limit") == "training_decision"
+    assert m.classify_stop(**base, training_stop_reason="primitive_limit") == "training_primitive"
+    assert m.classify_stop(**base, training_stop_reason="wall_time_limit") == "training_wall_time"
+
+
+def test_classify_stop_escalates_heldout_decisions_when_accepted_but_nothing_completed() -> None:
+    m = _module()
     assert (
-        m.classify_stop(**{**base, "heldout_stop_reasons": ("decision_limit",)})
+        m.classify_stop(
+            timed_out=False,
+            training_stop_reason="terminal_state",
+            builder_accepted=True,
+            builder_stop_reason="accepted",
+            heldout_attempted=True,
+            heldout_goals_completed=0,
+            learning_tokens_spent=0,
+            learning_token_budget=1_000_000,
+            learning_calls_spent=0,
+            learning_call_budget=66,
+        )
         == "heldout_decision"
     )
+
+
+def test_classify_stop_is_satisfied_once_a_skill_is_accepted_and_one_goal_completed() -> None:
+    m = _module()
+    # The a01 shape: training hit its own decision limit, but a skill was
+    # accepted and held-out completed a goal. Nothing should be escalated.
     assert (
-        m.classify_stop(**{**base, "heldout_stop_reasons": ("primitive_limit",)})
-        == "heldout_primitive"
+        m.classify_stop(
+            timed_out=False,
+            training_stop_reason="decision_limit",
+            builder_accepted=True,
+            builder_stop_reason="accepted",
+            heldout_attempted=True,
+            heldout_goals_completed=1,
+            learning_tokens_spent=0,
+            learning_token_budget=1_000_000,
+            learning_calls_spent=0,
+            learning_call_budget=66,
+        )
+        is None
     )
-    assert (
-        m.classify_stop(**{**base, "heldout_stop_reasons": ("wall_time_limit",)})
-        == "heldout_wall_time"
-    )
-    assert m.classify_stop(**base) is None
 
 
 def test_classify_stop_reads_the_truncated_role_from_call_counts() -> None:
@@ -270,7 +375,8 @@ def test_classify_stop_reads_the_truncated_role_from_call_counts() -> None:
         training_stop_reason="goal_completed",
         builder_accepted=False,
         builder_stop_reason="truncated_reply",
-        heldout_stop_reasons=(),
+        heldout_attempted=False,
+        heldout_goals_completed=0,
         learning_tokens_spent=0,
         learning_token_budget=1_000_000,
         learning_calls_spent=0,
@@ -335,37 +441,55 @@ def test_truncated_counts_reads_purpose_and_finish_reason() -> None:
     assert builder_count == 2
 
 
-def test_task_completed_requires_training_success_accepted_skill_and_heldout_graded() -> None:
+def test_task_completed_requires_an_accepted_skill_and_heldout_grade_with_a_goal_completed() -> (
+    None
+):
     m = _module()
     assert m.task_completed(
-        training_stop_reason="goal_completed",
         builder_accepted=True,
         heldout_skipped_reason=None,
         heldout_count=6,
+        heldout_goals_completed=1,
     )
     assert not m.task_completed(
-        training_stop_reason="decision_limit",
-        builder_accepted=True,
-        heldout_skipped_reason=None,
-        heldout_count=6,
-    )
-    assert not m.task_completed(
-        training_stop_reason="goal_completed",
         builder_accepted=False,
         heldout_skipped_reason="repair_budget_exhausted",
         heldout_count=0,
+        heldout_goals_completed=0,
     )
     assert not m.task_completed(
-        training_stop_reason="goal_completed",
         builder_accepted=True,
         heldout_skipped_reason=None,
         heldout_count=0,
+        heldout_goals_completed=0,
+    )
+    assert not m.task_completed(
+        builder_accepted=True,
+        heldout_skipped_reason=None,
+        heldout_count=6,
+        heldout_goals_completed=0,
     )
 
 
-def test_max_escalations_is_four_and_token_cap_is_eight_million() -> None:
+def test_task_completed_does_not_require_training_to_reach_its_own_goal() -> None:
+    """The a01 shape: training stopped on `decision_limit`, not `goal_completed`,
+    but a skill was accepted and held-out completed a goal. Completion does not
+    depend on `training_stop_reason` at all."""
     m = _module()
-    assert m.MAX_ESCALATIONS == 4
+    assert m.task_completed(
+        builder_accepted=True,
+        heldout_skipped_reason=None,
+        heldout_count=6,
+        heldout_goals_completed=1,
+    )
+    import inspect
+
+    assert "training_stop_reason" not in inspect.signature(m.task_completed).parameters
+
+
+def test_max_escalations_is_six_and_token_cap_is_eight_million() -> None:
+    m = _module()
+    assert m.MAX_ESCALATIONS == 6
     assert m.TOKEN_BUDGET_CAP == 8_000_000
 
 
@@ -373,3 +497,33 @@ def test_summary_path_lands_under_git_ignored_noob_agent_dir() -> None:
     m = _module()
     assert m.SUMMARY_DIR == Path(".noob-agent/demo-trials")
     assert m.DEFAULT_DATABASE == Path(".noob-agent/demo-trial.sqlite3")
+
+
+def test_attempt_record_reports_skill_accepted_and_heldout_goal_counts() -> None:
+    """Every attempt's summary carries skill_accepted, heldout_goals_completed,
+    and heldout_cells (section 26.3's fifth demo-trial requirement)."""
+    m = _module()
+    record = m.AttemptRecord(
+        sequence_id="seq-a01",
+        limits={},
+        stop_reason="completed",
+        completed=True,
+        tokens_spent=0,
+        calls_spent=0,
+        heldout_grades=[],
+        weave_url=None,
+        skill_accepted=True,
+        heldout_goals_completed=1,
+        heldout_cells=6,
+    )
+    assert record.skill_accepted is True
+    assert record.heldout_goals_completed == 1
+    assert record.heldout_cells == 6
+
+
+def test_demo_trial_limits_default_max_repairs_matches_learning_sequence_default() -> None:
+    """`LearningSequence.max_repairs` defaults to 1; the demo-trial limits carry
+    the same default so the call/token coupling formulas match what actually
+    gets passed to `LearningSequence`."""
+    m = _module()
+    assert m.DemoTrialLimits().max_repairs == 1
