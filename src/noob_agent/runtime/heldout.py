@@ -49,13 +49,15 @@ def heldout_experiment(
     condition: str = "self-improving",
     decision_budget: int = HELD_OUT_DECISION_BUDGET,
     primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
+    wall_time_budget_ms: int = HELD_OUT_WALL_TIME_MS,
 ) -> ExperimentRecord:
     """An experiment record carrying the held-out budgets.
 
     Defaults are exactly the frozen `connector_contract.md` limits. A caller
-    that raises `decision_budget` or `primitive_budget` above them (for
-    example, an explicitly labeled non-benchmark demo trial) must also raise
-    the matching `check_heldout_budgets` maximum, or the run is refused.
+    that raises `decision_budget`, `primitive_budget`, or
+    `wall_time_budget_ms` above them (for example, an explicitly labeled
+    non-benchmark demo trial) must also raise the matching
+    `check_heldout_budgets` maximum, or the run is refused.
     """
     return ExperimentRecord(
         experiment_id=experiment_id,
@@ -64,7 +66,7 @@ def heldout_experiment(
         connector_version=connector_version,
         decision_budget=decision_budget,
         primitive_budget=primitive_budget,
-        wall_time_budget_ms=HELD_OUT_WALL_TIME_MS,
+        wall_time_budget_ms=wall_time_budget_ms,
         created_at=created_at,
     )
 
@@ -74,12 +76,14 @@ def check_heldout_budgets(
     *,
     max_decision_budget: int = HELD_OUT_DECISION_BUDGET,
     max_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
+    max_wall_time_budget_ms: int = HELD_OUT_WALL_TIME_MS,
 ) -> None:
     """Refuse an experiment whose budgets exceed the allowed held-out limits.
 
     The defaults are the frozen benchmark limits. Only an explicitly higher
-    `max_decision_budget`/`max_primitive_budget`, threaded in by a labeled
-    non-benchmark caller, ever admits an experiment above them.
+    `max_decision_budget`/`max_primitive_budget`/`max_wall_time_budget_ms`,
+    threaded in by a labeled non-benchmark caller, ever admits an experiment
+    above them.
     """
     if experiment.decision_budget > max_decision_budget:
         raise ValueError(
@@ -91,9 +95,9 @@ def check_heldout_budgets(
             f"Held-out primitive budget is {max_primitive_budget}; "
             f"experiment asks for {experiment.primitive_budget}."
         )
-    if experiment.wall_time_budget_ms > HELD_OUT_WALL_TIME_MS:
+    if experiment.wall_time_budget_ms > max_wall_time_budget_ms:
         raise ValueError(
-            f"Held-out wall-time budget is {HELD_OUT_WALL_TIME_MS} ms; "
+            f"Held-out wall-time budget is {max_wall_time_budget_ms} ms; "
             f"experiment asks for {experiment.wall_time_budget_ms}."
         )
 
@@ -132,6 +136,7 @@ class HeldOutRunner:
         offered: Sequence[SkillVersion] | None = None,
         max_decision_budget: int = HELD_OUT_DECISION_BUDGET,
         max_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
+        max_wall_time_budget_ms: int = HELD_OUT_WALL_TIME_MS,
     ) -> None:
         self._connector = connector
         self._store = store
@@ -153,6 +158,7 @@ class HeldOutRunner:
         # caller ever raises them.
         self._max_decision_budget = max_decision_budget
         self._max_primitive_budget = max_primitive_budget
+        self._max_wall_time_budget_ms = max_wall_time_budget_ms
 
     async def run(
         self,
@@ -167,6 +173,7 @@ class HeldOutRunner:
             experiment,
             max_decision_budget=self._max_decision_budget,
             max_primitive_budget=self._max_primitive_budget,
+            max_wall_time_budget_ms=self._max_wall_time_budget_ms,
         )
 
         manifest = await self._connector.manifest()
