@@ -48,10 +48,11 @@ in a way you could run in CI.
   plan, and added a matching Claude Code skill
   ([#75](https://github.com/NWelde/noob-agent/pull/75),
   [#74](https://github.com/NWelde/noob-agent/pull/74)).
-- Fixed the two Part-1-audit test failures (missing `sequence_summary`
-  table, a dropped Builder-prompt contract reminder) so only one
-  section-26.3-owned test still fails on a fresh clone
-  ([#77](https://github.com/NWelde/noob-agent/pull/77)).
+- Fixed the three test failures found in the Part 2 audit (missing
+  `sequence_summary` table, a dropped Builder-prompt contract reminder, and
+  the unimplemented section 21 budget mode), so the full suite passes
+  ([#77](https://github.com/NWelde/noob-agent/pull/77),
+  [#76](https://github.com/NWelde/noob-agent/pull/76)).
 - Added a GitHub Actions CI workflow (ruff, mypy, pytest, no credentials
   needed) and the badge above
   ([#81](https://github.com/NWelde/noob-agent/pull/81), landing on `main`).
@@ -376,14 +377,8 @@ Open `.env` and fill in two values: `WANDB_API_KEY` (from
 username or team, followed by `/noob-agent`). Everything else is already set.
 To check the install without credentials, run `uv run pytest`.
 
-As of 2026-09-18, on a fresh clone of `main` this reports `1 failed, 597
-passed, 5 skipped`, unrelated to your install: `test_budget_mode_has_its_
-approved_defaults` fails until [PR #76](https://github.com/NWelde/noob-agent/pull/76)
-(section 26.3) merges (see [`hackathon_plan.md`](hackathon_plan.md) section 26
-for the tracked cause). The two tests that used to fail here
-(`test_both_builder_prompts_document_the_real_skill_contract`,
-`test_sequence_summary_is_written_once_and_round_trips`) were fixed in
-[PR #77](https://github.com/NWelde/noob-agent/pull/77). Of the 5 skips, 2 wait
+As of 2026-09-18, on a fresh clone of `main` this reports `674 passed, 5
+skipped`. Of the 5 skips, 2 wait
 on the Node sidecar's dependencies and 3 need a live Minecraft server running
 during the test; `scripts/setup_minecraft_server.py` installs the sidecar
 dependencies for you in step 3 below but does not itself run the tests.
