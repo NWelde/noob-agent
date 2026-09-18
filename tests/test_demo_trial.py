@@ -15,12 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from noob_agent.runtime.heldout import HELD_OUT_DECISION_BUDGET, HELD_OUT_PRIMITIVE_BUDGET
+from noob_agent.runtime.heldout import (
+    HELD_OUT_DECISION_BUDGET,
+    HELD_OUT_PRIMITIVE_BUDGET,
+    HELD_OUT_WALL_TIME_MS,
+)
 from noob_agent.runtime.sequence import (
     LEARNING_CALL_BUDGET,
     LEARNING_TOKEN_BUDGET,
     TRAINING_DECISION_BUDGET,
     TRAINING_PRIMITIVE_BUDGET,
+    TRAINING_WALL_TIME_MS,
 )
 
 
@@ -67,6 +72,10 @@ def test_default_profile_raises_only_demo_limits_and_leaves_constants_untouched(
     assert limits.training_primitive_budget >= 3 * TRAINING_PRIMITIVE_BUDGET
     assert limits.heldout_decision_budget >= 3 * HELD_OUT_DECISION_BUDGET
     assert limits.heldout_primitive_budget >= 3 * HELD_OUT_PRIMITIVE_BUDGET
+    assert limits.training_wall_time_ms >= 3 * TRAINING_WALL_TIME_MS
+    assert limits.heldout_wall_time_ms >= 3 * HELD_OUT_WALL_TIME_MS
+    assert limits.action_max_output_tokens == 4_000
+    assert limits.builder_max_output_tokens == 32_000
     assert 0 < limits.deadline_seconds <= 7_200
 
 
@@ -80,6 +89,8 @@ def test_profile_never_produces_a_benchmark_sized_limit() -> None:
     assert limits.heldout_primitive_budget > HELD_OUT_PRIMITIVE_BUDGET
     assert limits.learning_token_budget > LEARNING_TOKEN_BUDGET
     assert limits.learning_call_budget > LEARNING_CALL_BUDGET
+    assert limits.training_wall_time_ms > TRAINING_WALL_TIME_MS
+    assert limits.heldout_wall_time_ms > HELD_OUT_WALL_TIME_MS
 
 
 @pytest.mark.parametrize(
@@ -91,6 +102,10 @@ def test_profile_never_produces_a_benchmark_sized_limit() -> None:
         "training_primitive_budget",
         "heldout_decision_budget",
         "heldout_primitive_budget",
+        "training_wall_time_ms",
+        "heldout_wall_time_ms",
+        "action_max_output_tokens",
+        "builder_max_output_tokens",
         "deadline_seconds",
     ],
 )
@@ -103,6 +118,10 @@ def test_escalate_doubles_only_the_exhausted_limit(field: str) -> None:
         "training_primitive_budget": "training_primitive",
         "heldout_decision_budget": "heldout_decision",
         "heldout_primitive_budget": "heldout_primitive",
+        "training_wall_time_ms": "training_wall_time",
+        "heldout_wall_time_ms": "heldout_wall_time",
+        "action_max_output_tokens": "action_output_tokens",
+        "builder_max_output_tokens": "builder_output_tokens",
         "deadline_seconds": "deadline",
     }[field]
     before = m.DemoTrialLimits(deadline_seconds=1_000)
@@ -136,6 +155,32 @@ def test_escalate_stops_at_the_deadline_cap() -> None:
     assert m.is_at_cap(escalated, "deadline")
 
 
+def test_escalate_stops_at_the_action_output_cap() -> None:
+    m = _module()
+    limits = m.DemoTrialLimits(action_max_output_tokens=15_000)
+    escalated = m.escalate(limits, "action_output_tokens")
+    assert escalated.action_max_output_tokens == 16_000
+    assert m.is_at_cap(escalated, "action_output_tokens")
+    assert not m.is_at_cap(limits, "action_output_tokens")
+
+
+def test_escalate_stops_at_the_builder_output_cap() -> None:
+    m = _module()
+    limits = m.DemoTrialLimits(builder_max_output_tokens=100_000)
+    escalated = m.escalate(limits, "builder_output_tokens")
+    assert escalated.builder_max_output_tokens == 128_000
+    assert m.is_at_cap(escalated, "builder_output_tokens")
+
+
+def test_escalate_wall_time_keys_have_no_explicit_cap() -> None:
+    m = _module()
+    limits = m.DemoTrialLimits(training_wall_time_ms=10_000_000, heldout_wall_time_ms=10_000_000)
+    assert not m.is_at_cap(limits, "training_wall_time")
+    assert not m.is_at_cap(limits, "heldout_wall_time")
+    escalated = m.escalate(limits, "training_wall_time")
+    assert escalated.training_wall_time_ms == 20_000_000
+
+
 def test_escalate_rejects_a_non_escalatable_key() -> None:
     m = _module()
     with pytest.raises(ValueError):
@@ -154,6 +199,8 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
         learning_token_budget=1_000_000,
         learning_calls_spent=0,
         learning_call_budget=66,
+        action_truncated_count=0,
+        builder_truncated_count=0,
     )
 
     assert m.classify_stop(**{**base, "timed_out": True}) == "deadline"
@@ -163,6 +210,10 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
     assert (
         m.classify_stop(**{**base, "training_stop_reason": "primitive_limit"})
         == "training_primitive"
+    )
+    assert (
+        m.classify_stop(**{**base, "training_stop_reason": "wall_time_limit"})
+        == "training_wall_time"
     )
     assert (
         m.classify_stop(
@@ -205,7 +256,83 @@ def test_classify_stop_maps_each_limit_to_its_key() -> None:
         m.classify_stop(**{**base, "heldout_stop_reasons": ("primitive_limit",)})
         == "heldout_primitive"
     )
+    assert (
+        m.classify_stop(**{**base, "heldout_stop_reasons": ("wall_time_limit",)})
+        == "heldout_wall_time"
+    )
     assert m.classify_stop(**base) is None
+
+
+def test_classify_stop_reads_the_truncated_role_from_call_counts() -> None:
+    m = _module()
+    base = dict(
+        timed_out=False,
+        training_stop_reason="goal_completed",
+        builder_accepted=False,
+        builder_stop_reason="truncated_reply",
+        heldout_stop_reasons=(),
+        learning_tokens_spent=0,
+        learning_token_budget=1_000_000,
+        learning_calls_spent=0,
+        learning_call_budget=66,
+    )
+    assert (
+        m.classify_stop(**base, action_truncated_count=0, builder_truncated_count=1)
+        == "builder_output_tokens"
+    )
+    assert (
+        m.classify_stop(**base, action_truncated_count=8, builder_truncated_count=0)
+        == "action_output_tokens"
+    )
+    # A truncated build reply is the literal stop reason: prefer it when both
+    # roles show truncated calls.
+    assert (
+        m.classify_stop(**base, action_truncated_count=8, builder_truncated_count=1)
+        == "builder_output_tokens"
+    )
+    # No call-level evidence at all: still escalate the builder, since that
+    # is what the stop reason itself reports.
+    assert (
+        m.classify_stop(**base, action_truncated_count=0, builder_truncated_count=0)
+        == "builder_output_tokens"
+    )
+
+
+def _call(*, purpose: str, finish_reason: str | None) -> object:
+    from datetime import UTC, datetime
+
+    from noob_agent.domain.records import ModelCallRecord
+
+    return ModelCallRecord(
+        call_id=f"call-{purpose}-{finish_reason}",
+        experiment_id="seq-training",
+        purpose=purpose,  # type: ignore[arg-type]
+        episode_id=("episode-1" if purpose == "action" else None),
+        provider="fake",
+        model_id="fake-model",
+        system="",
+        prompt="",
+        max_output_tokens=100,
+        temperature=0.0,
+        response_text="...",
+        finish_reason=finish_reason,
+        latency_ms=0,
+        started_at=datetime(2026, 9, 18, tzinfo=UTC),
+    )
+
+
+def test_truncated_counts_reads_purpose_and_finish_reason() -> None:
+    m = _module()
+    calls = [
+        _call(purpose="action", finish_reason="length"),
+        _call(purpose="action", finish_reason="stop"),
+        _call(purpose="build", finish_reason="length"),
+        _call(purpose="repair", finish_reason="length"),
+        _call(purpose="refine", finish_reason="stop"),
+    ]
+    action_count, builder_count = m._truncated_counts(calls)
+    assert action_count == 1
+    assert builder_count == 2
 
 
 def test_task_completed_requires_training_success_accepted_skill_and_heldout_graded() -> None:
