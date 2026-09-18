@@ -1,7 +1,10 @@
 """The redstone demo compares fresh attempts under identical limits."""
 
+import asyncio
 import importlib.util
 from pathlib import Path
+
+import pytest
 
 
 def load_demo():
@@ -44,3 +47,23 @@ def test_connector_exposes_the_lamp_and_its_public_lit_state():
     assert '"redstone_lamp"' in allowlist
     assert '"redstone_block"' in allowlist
     assert "lit: block.getProperties().lit" in source
+
+
+def test_the_demo_refuses_a_missing_wandb_key_before_touching_weave_or_the_network(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fresh clone with .env.demo.example copied but no key filled in must get the
+    same clear, actionable refusal as scripts/run_doom_learning_sequence.py, not a
+    Weave login prompt followed by a traceback."""
+    demo = load_demo()
+    environ = {
+        "NOOB_AGENT_TRACE_MODE": "weave",
+        "WEAVE_DISABLED": "false",
+        "NOOB_AGENT_MODEL_PROVIDER": "wandb-inference",
+        "NOOB_AGENT_INFERENCE_MODEL": "some-model",
+    }
+
+    code = asyncio.run(demo.run(environ=environ))
+
+    assert code == 2
+    assert "WANDB_API_KEY is not set" in capsys.readouterr().err
