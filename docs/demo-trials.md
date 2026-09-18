@@ -1,13 +1,22 @@
 # Demo trials (non-benchmark)
 
-**Status: in progress.** This document covers `hackathon_plan.md` step 26.4
-non-benchmark demo trials across three rounds: the pre-fix attempt of each
-game (Doom `…a`, Minecraft `…081617Z`), a post-escalation-fix Doom re-run and
-a 4-attempt escalating Minecraft run (Doom `…b`, Minecraft `…084449Z`), and a
-further Doom re-run after the escalation logic was corrected again plus a
-second escalating Minecraft run after a repair-cap fix (Doom `…c`, PR #76;
-Minecraft `…113854Z`, PR #82). Each round is documented as it completed; the
-"Anomalies flagged" and "Known limitations" sections below span all rounds.
+**Status: Doom complete; Minecraft awaiting a thinking-budget fix.** This
+document covers `hackathon_plan.md` step 26.4 non-benchmark demo trials
+across three rounds: the pre-fix attempt of each game (Doom `…a`, Minecraft
+`…081617Z`), a post-escalation-fix Doom re-run and a 4-attempt escalating
+Minecraft run (Doom `…b`, Minecraft `…084449Z`), and a further Doom re-run
+after the escalation logic was corrected again plus a second escalating
+Minecraft run after a repair-cap fix (Doom `…c`, PR #76; Minecraft
+`…113854Z`, PR #82). Doom `…c` completed successfully. Minecraft `…113854Z`
+was manually stopped by the coordinator partway through its 4th attempt
+after finding that Builder truncations were caused by unbounded
+chain-of-thought reasoning consuming the entire output-token budget
+(`"thinking": null` never disabled), not by the build/repair caps
+themselves — see "Minecraft redstone trial — escalating round 2" below. A
+further Minecraft run with a thinking-budget fix is expected as a follow-up
+and will be added as a new round when it lands. Each round is documented as
+it completed; the "Anomalies flagged" and "Known limitations" sections below
+span all rounds.
 
 Every run here is explicitly **non-benchmark**: it uses the demo-trial
 profile's raised limits (`RUN_KIND = "non-benchmark-demo-trial"` /
@@ -304,12 +313,70 @@ live and nesting is present.
   didn't scale with the escalated build cap, plus separate validation
   failures (a02: `TypeError: 'PublicPosition' object is not subscriptable`;
   a03: forbidden `getattr` call; a04: a zero-width space U+200B embedded in
-  the metadata JSON plus mismatched brackets in the generated source). A
-  second escalating round under the PR #82 fix (repair cap escalating
-  32,000→128,000 separately from the build cap; unusable replies retried at
-  the same limits) is covered below.
+  the metadata JSON plus mismatched brackets in the generated source); plus
+  1 escalating round under the PR #82 fix (`…113854Z`, 3 completed attempts
+  + a04 killed pre-Builder) that still never got a Builder skill accepted —
+  root-caused this time not to the caps PR #82 fixed, but to unbounded
+  reasoning (`"thinking": null`) consuming the entire output-token budget
+  before any response text was emitted, which raising caps cannot fix. No
+  Minecraft round in this document reached Builder acceptance. A further
+  Minecraft round with a thinking-budget fix is expected as a follow-up.
 
 ## Minecraft redstone trial — escalating round 2 (PR #82 fix)
 
-See the dedicated section below once run `minecraft-redstone-20260918T113854Z`
-completes.
+- Checkout: PR #82 head (`fix/26-4-redstone-repair`) — repair cap now
+  escalates 32,000→128,000 separately from the builder cap, unusable
+  Builder replies are retried at the same limits, and the index records
+  build/repair finish reasons, validation rejections, and retry reasons.
+- Command: `cd /home/nathan/noob-agent-mctrial && NOOB_AGENT_SANDBOX_MODE=local uv run --env-file .env python scripts/run_minecraft_redstone_demo.py --escalate`
+- Records: per-attempt `.noob-agent/minecraft-redstone-20260918T113854Z-a01.json`
+  through `-a03.json` (and matching `.sqlite3` files); **no `-index.json`
+  and no `-a04.json`** — the coordinator stopped the process (killed
+  PID 125432) partway through a04 after diagnosing the root cause below, so
+  this round never reached a completed/escalation-classified end state.
+- Source: read-only, per-attempt JSON plus
+  `select purpose, max_output_tokens, finish_reason, output_tokens,
+  length(response_text), length(reasoning), request_options_json from
+  model_call where purpose in ('build','repair') order by started_at`
+  against each attempt's own SQLite file (`mode=ro` URI).
+
+| Attempt | builder_cap / repair_cap | Cold lamp lit | Build `finish_reason` / `output_tokens` | `len(response_text)` / `len(reasoning)` | Repair attempted? | Builder accepted |
+|---|---|---|---|---|---|---|
+| a01 | 32,000 / 32,000 | Yes (7 dec) | `stop` / 20,826 | 7,590 / 78,164 | Yes — rejected `TypeError: 'PublicPosition' object is not subscriptable`, repair `finish_reason=length`, `output_tokens=32000`, `len(response_text)=0` / `len(reasoning)=138,245` | No — `truncated_reply` |
+| a02 | 32,000 / 64,000 | Yes (15 dec) | `length` / 32,000 | **0** / 127,404 | No (`validation_rejections=[]`, `attempts=1` — first draft itself truncated) | No — `truncated_reply` |
+| a03 | 64,000 / 64,000 | Yes (6 dec) | `length` / 64,000 | **0** / 252,011 | No (same pattern as a02, at the raised cap) | No — `truncated_reply` |
+| a04 | 128,000 / 128,000 (index limits, unused) | Cold episode reached `terminal_state`/`lamp_lit` after 4 decisions / 4 primitives, but the round was killed before the Builder was ever called (`model_call` for a04 has only 4 `action` rows, no `build`/`repair` row) | — | — | — | Round terminated by coordinator, not by the connector |
+
+**Root cause (found by the coordinator, verified directly against the
+SQLite rows above):** every Builder call in this round has
+`request_options_json = {"response_schema": null, "thinking": null}` —
+`thinking` is never explicitly disabled. In every truncated case
+(a02's build, a03's build, a01's repair), `length(response_text)` is
+**0** while `length(reasoning)` is tens to hundreds of thousands of
+characters (up to 252,011 for a03) — i.e. the model spent its entire
+`max_output_tokens` budget on chain-of-thought reasoning and never
+reached the point of emitting the actual skill JSON in `response_text`.
+Raising `builder_cap`/`repair_cap` (32k→64k→128k across this round) did
+not fix this because reasoning consumed whatever budget was given; a03
+in fact used **more** reasoning tokens (252,011 chars) than a02 (127,404
+chars) despite having a larger cap. This matches the "easy" Minecraft
+harness path never passing the `thinking=False` request option that the
+Doom paths do (Doom's `build_finish_reason` was never `length` with an
+empty `response_text` across any of the Doom runs above). Escalating
+output-token caps cannot fix a reasoning-token-starvation bug; the fix is
+to pass `thinking: false` (or an explicit reasoning-token cap) on Builder
+and repair calls in the Minecraft easy-harness path — tracked as a
+follow-up (Minecraft trial 3, with the thinking fix, to be run and
+documented separately).
+
+**Cold lamp lit:** 3 of the 3 completed attempts (a01, a02, a03); a04's
+cold episode also reached `lamp_lit` before the round was stopped.
+**Builder/skill accepted:** 0 of 4 attempts — none reached acceptance,
+and a04 never got a Builder call at all before termination.
+**Skill-reuse attempt:** did not run in any attempt.
+**Anomaly:** this round did not end via the connector's own stop/escalation
+logic — it was manually terminated by the coordinator (`kill` on PID
+125432) once the reasoning-token root cause was confirmed, to avoid
+burning further budget on a bug that cap escalation could not fix. No
+`-index.json` or `-a04.json` was produced as a result; a03's own JSON
+summary is the last complete per-attempt record.
