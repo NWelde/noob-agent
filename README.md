@@ -1,5 +1,79 @@
 # noob-agent
 
+[![CI](https://github.com/NWelde/noob-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/NWelde/noob-agent/actions/workflows/ci.yml)
+
+noob-agent is a drop-in harness that measures whether a model can turn
+experience in an unfamiliar game into tested, reusable code, and it does this
+in a way you could run in CI.
+
+**Demo video:** _link coming_
+
+## Headline results
+
+- **Doom benchmark (`docs/loop-optimization.md`, `loop-bench-24b-r2`):**
+  after the section 22-24 loop fixes, the model built and validated a skill
+  in 5 of 5 benchmark sequences, with 0 of 597 Action replies unusable.
+  Held-out transfer to unseen seeds completed 8 of 30 goals; the best
+  sequence solved 4 of 4 practice seeds and 5 of 6 held-out cells.
+- **Doom demo trial, non-benchmark (`docs/demo-trials.md`, run
+  `doom-demo-trial-20260918c`):** under the raised, explicitly non-benchmark
+  demo-trial profile, the run built and accepted a skill on its first
+  attempt, no repair needed, and completed 1 of 6 held-out goals, spending
+  79,288 tokens across 61 model calls with 0 truncated replies. This is one
+  labeled demo-trial run, not a benchmark result — see
+  [`docs/demo-trials.md`](docs/demo-trials.md) for every attempt.
+- **Minecraft:** the same Action loop runs live on the second game with no
+  connector-specific tuning — a cold training episode had 0 of 10 unusable
+  replies and a 690 ms median decision
+  (`mc-confirm-22g-20260913T125747Z`). The full learning loop (Builder,
+  skill validation, held-out transfer) is **not yet proven** on Minecraft:
+  the recorded redstone-lamp demo trial has not gotten a skill accepted in
+  any attempt so far (`docs/demo-trials.md`).
+  <!-- MINECRAFT TRIAL 2 RESULT -->
+
+**Links:** Weave project — `nathanweldegiorgis731-minerva-university/Noob-agent`
+(_public link coming_) · W&B Report (_public link coming_)
+
+## What changed since Part 1 (Sep 13)
+
+- Approved `hackathon_plan.md` section 26, the production-ready submission
+  plan, and added a matching Claude Code skill
+  ([#75](https://github.com/NWelde/noob-agent/pull/75),
+  [#74](https://github.com/NWelde/noob-agent/pull/74)).
+- Fixed the two Part-1-audit test failures (missing `sequence_summary`
+  table, a dropped Builder-prompt contract reminder) so only one
+  section-26.3-owned test still fails on a fresh clone
+  ([#77](https://github.com/NWelde/noob-agent/pull/77)).
+- Added a GitHub Actions CI workflow (ruff, mypy, pytest, no credentials
+  needed) and the badge above
+  ([#81](https://github.com/NWelde/noob-agent/pull/81), landing on `main`).
+- Recorded a fresh-clone reproducibility pass and fixed a crash where the
+  Minecraft redstone demo hit an interactive login prompt instead of a
+  clear refusal when `WANDB_API_KEY` was unset
+  ([#78](https://github.com/NWelde/noob-agent/pull/78)).
+- Built a labeled non-benchmark demo-trial mode with automatic budget
+  escalation, and ran monitored Doom and Minecraft demo trials, fixing two
+  escalation bugs found live
+  ([#76](https://github.com/NWelde/noob-agent/pull/76),
+  [#80](https://github.com/NWelde/noob-agent/pull/80),
+  [#82](https://github.com/NWelde/noob-agent/pull/82),
+  [#83](https://github.com/NWelde/noob-agent/pull/83)).
+- Added this judge-facing README first screen and the `docs/submission/`
+  package (section 26.6, this branch).
+
+## Quickstart
+
+```sh
+git clone https://github.com/NWelde/noob-agent.git && cd noob-agent
+uv sync --group dev --group integrations && cp .env.demo.example .env
+uv run pytest -q
+```
+
+Fill in `.env` with your own `WANDB_API_KEY` and
+`NOOB_AGENT_INFERENCE_PROJECT` before running a live demo. See
+[Run the demo yourself](#run-the-demo-yourself) for the Doom and Minecraft
+commands.
+
 noob-agent measures how well an AI model **learns** inside a game it has never
 seen. It doesn't just check whether the model can finish a fixed task.
 
@@ -294,14 +368,17 @@ Open `.env` and fill in two values: `WANDB_API_KEY` (from
 username or team, followed by `/noob-agent`). Everything else is already set.
 To check the install without credentials, run `uv run pytest`.
 
-On a fresh clone this currently reports 3 known failing tests, unrelated to
-your install: `test_both_builder_prompts_document_the_real_skill_contract`,
-`test_sequence_summary_is_written_once_and_round_trips`, and
-`test_budget_mode_has_its_approved_defaults` (see
-[`hackathon_plan.md`](hackathon_plan.md) section 26 for the tracked cause).
-It also skips 2 Minecraft connector tests until the Node sidecar's
-dependencies are installed, which `scripts/setup_minecraft_server.py` does
-for you in step 3 below.
+As of 2026-09-18, on a fresh clone of `main` this reports `1 failed, 597
+passed, 5 skipped`, unrelated to your install: `test_budget_mode_has_its_
+approved_defaults` fails until [PR #76](https://github.com/NWelde/noob-agent/pull/76)
+(section 26.3) merges (see [`hackathon_plan.md`](hackathon_plan.md) section 26
+for the tracked cause). The two tests that used to fail here
+(`test_both_builder_prompts_document_the_real_skill_contract`,
+`test_sequence_summary_is_written_once_and_round_trips`) were fixed in
+[PR #77](https://github.com/NWelde/noob-agent/pull/77). Of the 5 skips, 2 wait
+on the Node sidecar's dependencies and 3 need a live Minecraft server running
+during the test; `scripts/setup_minecraft_server.py` installs the sidecar
+dependencies for you in step 3 below but does not itself run the tests.
 
 ### 2. Doom: a full learning sequence (no game install needed)
 
