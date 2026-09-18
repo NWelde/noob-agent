@@ -2978,6 +2978,230 @@ and confirm ceremony attendance.
 Each step reverts alone. Reverting 26.3 removes the demo-trial mode and leaves
 the benchmark budgets unchanged.
 
+## 27. Proposed milestone: evaluation that answers the question, and a long-horizon redstone computer
+
+**Status: proposed on 2026-09-18, awaiting the requester's approval.** Nothing in
+this section may be built until the requester approves it; each step then lands as
+its own test-first pull request. Part A changes protected evaluation code and
+Part B adds connector tools, a scenario, and a grader, so both are core-loop work.
+
+### Why
+
+The section 26 audit showed that the measurement machinery works: independent
+private grading, held-out seeds with a fresh conversation, frozen budgets,
+accepted-only skill carry-over, and SQLite records mirrored to Weave. But the
+experiment `eval_protocol.md` promises has not been run:
+
+| Protocol promise | Evidence on `main` (2026-09-18) |
+| --- | --- |
+| Self-improvement lift: self-improving minus cold held-out success on the same seeds and budgets | No cold condition has ever run on held-out cells, and no lift metric exists in `src/` or `scripts/`. `loop-bench-24b-r2`'s 8 of 30 held-out goals has no baseline. |
+| Budget-matched notes control | No notes condition exists. |
+| Two models compared | One model (`deepseek-ai/DeepSeek-V4-Flash-0731`). |
+| Cold and self-improving in one W&B evaluation comparison (BDP item 11) | No Weave `EvaluationLogger` use; traces only. |
+| Cost in dollars and reproducibility hashes | Tokens only; no prompt, scenario, or connector hashes are recorded. |
+| Learning an unfamiliar mechanic | Doom is aim-and-shoot. The redstone lamp task is solved cold in 3 decisions (`docs/demo-trials.md`), so a skill has no room to show lift. |
+| Enough samples to trust a number | 6 held-out cells per sequence; sequences range from 0 to 6 of 6. |
+
+Part A closes the evaluation gaps that matter most before the 2026-09-26 feature
+freeze. Part B adds the requester's proposed long-horizon task: the model builds
+a redstone computer in Minecraft over multiple sessions, recorded end to end.
+Part B cannot reach a full computer by the freeze; it is structured as a graded
+ladder so every level reached is real, verified evidence.
+
+### Invariants
+
+- Benchmark budgets, prompts, seeds, and the held-out split stay frozen for Part A.
+  Part A adds conditions and reporting; it does not tune the loop.
+- All outcomes come from private graders. No grader state, expected truth table,
+  or hidden answer reaches the model, the Builder, or public records.
+- Every compared condition uses the identical per-game tool manifest.
+- Demo-only limits stay labeled non-benchmark, as in section 26.
+- Publication follows `eval_protocol.md`: raw numerators and denominators, every
+  point shown, no confidence claims the sample cannot support, replays labeled.
+
+### Part A: evaluation that answers the question
+
+**27.1 Paired cold baseline and lift (core-loop, about 1 day).** Add a `cold`
+condition to `scripts/loop_bench.py` that plays every held-out cell with an empty
+`SkillRegistry`, under the identical held-out budgets, seeds, and prompts. Each
+learning sequence's held-out cells are paired with the cold cells on the same
+seeds. The scorecard reports, per seed, cold and self-improving outcomes and the
+lift, with raw counts. Tests first: a cold cell is offered no skills; cold and
+self-improving cells share seeds and budgets; lift is computed only over paired
+cells; a missing pair is reported, not imputed.
+
+**27.2 Provenance and dollar cost (core-loop, about half a day).** Each experiment
+record stores the model ID, SHA-256 hashes of the Action and Builder prompts, the
+scenario manifest, and the connector version, plus dollar cost computed from a
+checked-in W&B Inference price table (per million input and output tokens, dated).
+The scorecard prints them. Tests first: hashes change when a prompt changes;
+cost uses the recorded usage and the dated price row; an unknown model has no cost
+rather than a guessed cost.
+
+**27.3 Weave evaluation comparison and public W&B Report (about 1 day).** Log each
+paired held-out cell under both conditions with Weave's `EvaluationLogger`, with
+the private grade as the score and cost and tokens as extra fields, grouped by
+run ID. Build a W&B Report showing lift per seed, success rates with raw counts,
+learning cost next to the lift (as `eval_protocol.md` requires), and links to
+the underlying traces. The requester makes the Report public. Tests first, with a
+fake logger: one evaluation per condition; every paired cell logged once; no
+private grader fields beyond the outcome.
+
+**27.4 A sample large enough to report (paid runs, about half a day).** Add held-out
+seeds so each Doom variation has 10 (precommitted in a new `basic-v4` manifest,
+with the old manifests unchanged), and run at least 5 learning sequences plus the
+paired cold cells. Report a paired sign test and a bootstrap interval over
+sequences, labeled as a small sample. Acceptance: the scorecard and Report show
+the lift with its spread, whatever its sign.
+
+**27.5 Second model (paid runs, after 27.1–27.4).** Repeat 27.4 with a second W&B
+Inference model, same manifest and budgets. Report per-model lift side by side.
+No ranking claim beyond what the sample supports.
+
+The notes control (`eval_protocol.md` condition 3) is deferred to a later section;
+it is the key scientific control but needs lift to exist first.
+
+### Part B: a long-horizon redstone computer in Minecraft
+
+**Task.** In a flat, walled build plot, the model builds redstone logic of
+increasing complexity, ending in a small computer. The plot has fixed, labeled
+*interface pads*: input levers and output lamps at public coordinates. A supply
+chest refills ordinary redstone parts (dust, torches, repeaters, comparators,
+levers, lamps, and building blocks). Nothing tells the model how redstone works
+beyond what a new player sees; it must discover signal strength, torch inversion,
+repeater direction and delay, and comparator behavior by experiment, turn working
+circuits into skills, and compose them.
+
+**Ladder (each level is graded independently):**
+
+| Level | Circuit | Pass condition (private grader) |
+| --- | --- | --- |
+| L0 | Lever lights a lamp 10+ blocks away | Lamp follows the lever |
+| L1 | NOT gate | Output is the inverse of the input |
+| L2 | AND and OR gates | Full 2-input truth tables |
+| L3 | XOR gate | Full truth table |
+| L4 | Half adder | Sum and carry for all 4 inputs |
+| L5 | Full adder | All 8 input combinations |
+| L6 | 4-bit ripple-carry adder | All 256 input pairs, or a fixed random sample of 64 |
+| L7 | 1-bit memory (latch) | Set, reset, and hold across a wait |
+| L8 | 4-bit register | Stores and holds a 4-bit value |
+| L9 | Clock | Output toggles at a steady period |
+| L10 | 4-bit adder–accumulator ("the computer") | A lever program of 3 add steps leaves the right value in the register |
+
+"Computer" means L10: a 4-bit accumulator machine with a clock, which is
+honest for the scope. Larger designs (a real ALU with an instruction ROM) are
+beyond this section.
+
+**Grader.** A data pack test harness, run only by the harness after the model's
+session ends or at a checkpoint, sets the input levers by command, waits for
+propagation, and reads the output lamps. The pass/fail result and the failing
+input combination are private. The model sees only ordinary in-game state.
+
+**27.6 Connector tools the task needs (core-loop, about 1 day).** The current
+Minecraft manifest cannot build redstone: `place_object` takes no facing, there
+is no way to remove a block, and `observe` sees at most 8 blocks. Add, as new
+game-specific tools in a new manifest version (the old manifest is unchanged):
+`place_object` with an optional `facing` (north, south, east, west, up, down);
+`break_object(object_id)`; `use_object` on repeaters and comparators to change
+their mode or delay (already normal controls); and `observe` with a plot-scoped
+`region` view that lists redstone components and their public powered state
+across the plot. Tests first against the live server: facing is honoured for
+repeaters, comparators, and wall torches; breaking returns the item to the
+inventory; the region view never includes grader-only data.
+
+**27.7 Scenario, reset, and grader (core-loop, about 1–2 days).** Add
+`scenarios/minecraft/redstone-computer-v1`: plot build and reset functions, the
+supply chest, interface pads per level, and the private test harness for L0–L6
+first. Held-out variation: a mirrored or rotated plot with interface pads moved,
+so a memorised layout fails. Tests first: reset is repeatable; each level's
+grader passes a hand-built reference circuit and fails a broken one (the
+reference circuits are grader fixtures, never shown to the model and never
+presented as model work).
+
+**27.8 Multi-session runner (core-loop, about 1–2 days).** A long-horizon run is a
+series of sessions against one persistent plot:
+
+- **Persistence:** the plot is not reset between sessions; a session ends on its
+  own decision, token, or wall-time budget, and the next resumes from the world
+  as it stands.
+- **Checkpoints:** after each session the harness saves a world snapshot (the plot
+  as a structure file) and the run state (session number, accepted skills, spend),
+  so a crash or a usage-limit stop resumes from the last checkpoint.
+- **Skill library:** accepted skills persist across sessions with immutable
+  versions, built and validated by the normal Builder path from that session's
+  public trace. Validation of a redstone skill runs on a scratch copy of the plot.
+- **Working notes:** the model may keep a short public notes file that is carried
+  between sessions and recorded (it is part of the public trace, never graded).
+- **Budgets:** per-session and whole-run token, call, and wall-time ceilings,
+  escalating as in section 26 when a level is still unmet; every session's spend
+  is recorded and summed.
+- **Grading:** after each session the private grader checks every level; the run
+  record shows which session first passed each level.
+- **Lift inside the task:** each level's held-out check runs on the rotated plot
+  twice, cold (no skills) and with the skill library, so composition of earlier
+  skills into later levels is measured, not assumed.
+
+Tests first with the fake connector: resume after a simulated crash continues the
+same run; skills from session N are offered in session N+1; the grader result
+never enters the next session's prompt.
+
+**27.9 Recording the whole attempt (about 1 day).** Three layers, cheapest first:
+
+1. **Authoritative record (always on, no new dependency):** SQLite and Weave
+   traces of every decision, plus the per-session structure snapshots from 27.8.
+   A script renders a timelapse from the snapshots afterwards, showing the build
+   growing session by session.
+2. **Live screen recording of the TLauncher client:** the TLauncher client joins as
+   a spectator that follows the bot. A script in WSL starts and stops OBS on
+   Windows through OBS's WebSocket interface at each session boundary, so every
+   session produces one labeled video file. This needs OBS on the Windows host and
+   the WSL-to-Windows network route already used for the TLauncher connection.
+3. **Optional, needs dependency approval:** ReplayMod on a Fabric profile in
+   TLauncher for a free-camera replay of every session, or a headless
+   bot-viewpoint renderer in the Node sidecar (for example `prismarine-viewer`)
+   that writes video without a desktop client. Each is a new dependency and needs
+   the requester's explicit approval before it is added.
+
+Every video is labeled with its run ID and session number. Multi-day recording
+means the Windows host stays on and connected; if it drops, layer 1 still has the
+full record.
+
+### Schedule
+
+| Dates (2026) | Work |
+| --- | --- |
+| Sep 18–20 | 27.1 and 27.2; 27.6 connector tools in parallel |
+| Sep 21–22 | 27.3 Report; 27.7 scenario and grader for L0–L6 |
+| Sep 23–24 | 27.4 sample runs; 27.8 multi-session runner; 27.9 layers 1–2 |
+| Sep 25 | Start the long-horizon run; 27.5 second model if the budget allows |
+| Sep 26 | Feature freeze. The long-horizon run may keep going; the submission reports the highest level verified by the grader at submission time, with the run still marked in progress |
+| Sep 27–Oct 1 | Record the video from real sessions; the run can continue toward L10 for the Oct 1 stage demo |
+
+If time runs short, cut in this order: 27.5, then Part B levels beyond L6, then
+27.9 layer 2. Never cut 27.1 or 27.2; without them the submission cannot claim a
+measured result.
+
+### Decisions for the requester
+
+1. Approve Part A, Part B, or both.
+2. Recording: layers 1 and 2 only, or also approve a layer 3 dependency (which one).
+3. Long-horizon spend ceiling for the whole run (for example 20,000,000 tokens) and
+   per session (for example 1,000,000, escalating).
+4. The second model for 27.5.
+
+### Not authorized by this section
+
+Changing frozen benchmark budgets, prompts, or seeds; editing the Doom or existing
+Minecraft manifests in place; a notes control; custom mods on the server; new
+dependencies without approval; and presenting grader reference circuits or
+replays as model work.
+
+### Rollback
+
+Each step reverts alone. Part A adds a condition and reporting fields; reverting
+it leaves existing results readable. Part B adds a new manifest version and
+scenario; reverting it leaves the existing Minecraft scenarios unchanged.
+
 ## References
 
 - [CoreWeave Hacks Participant Handbook](https://wandbai.notion.site/CoreWeave-Hacks-Participant-Handbook-3c9e2f5c7ef380eab21ecdde12620caf)
