@@ -189,6 +189,117 @@ def test_easy_runner_is_generous_and_has_no_wall_clock_deadline() -> None:
     assert experiment.wall_time_budget_ms >= 10**12
 
 
+def test_repair_max_output_tokens_defaults_to_none_and_keeps_todays_behavior() -> None:
+    """`None` means the BuilderAgent's own `DEFAULT_REPAIR_MAX_OUTPUT_TOKENS`
+    (3,000) applies unchanged, matching every caller that never sets this."""
+    module = _load_run_script()
+
+    assert module.REPAIR_MAX_OUTPUT_TOKENS is None
+    assert module._builder_kwargs() == {}
+
+
+def test_repair_max_output_tokens_when_set_is_threaded_to_the_builder() -> None:
+    module = _load_run_script()
+
+    module.REPAIR_MAX_OUTPUT_TOKENS = 9_000
+    assert module._builder_kwargs() == {"repair_max_output_tokens": 9_000}
+
+
+def test_action_and_builder_agents_default_to_no_thinking() -> None:
+    """The provider default is thinking on; the easy harness must opt out
+    unless settings say otherwise, matching the Doom paths' False default."""
+    module = _load_run_script()
+
+    assert module.ACTION_THINKING is False
+    assert module.BUILDER_THINKING is False
+
+
+def test_cold_action_and_builder_agents_receive_the_modules_thinking_flag(
+    tmp_path: Path,
+) -> None:
+    """Both the cold ActionAgent and the BuilderAgent must be constructed with
+    `thinking=` set from the module's globals, not left at the provider
+    default (thinking on), which is the bug that exhausted 64k output tokens
+    on reasoning alone in the live redstone trial."""
+    module = _load_run_script()
+    captured: dict[str, bool | None] = {}
+
+    class _RecordingActionAgent(module.ActionAgent):
+        def __init__(self, *args, **kwargs):
+            captured["action_thinking"] = kwargs.get("thinking")
+            super().__init__(*args, **kwargs)
+
+    class _RecordingBuilderAgent(module.BuilderAgent):
+        def __init__(self, *args, **kwargs):
+            captured["builder_thinking"] = kwargs.get("thinking")
+            super().__init__(*args, **kwargs)
+
+    module.ActionAgent = _RecordingActionAgent
+    module.BuilderAgent = _RecordingBuilderAgent
+    module.ACTION_THINKING = False
+    module.BUILDER_THINKING = False
+
+    fakes: list[_FakeMinecraft] = []
+
+    def factory() -> _FakeMinecraft:
+        fakes.append(_FakeMinecraft())
+        return fakes[-1]
+
+    model = _ScriptedModel()
+    run_id = "non-benchmark-minecraft-easy-thinking-test"
+    database = tmp_path / f"{run_id}.sqlite3"
+    with EpisodeStore.open(database) as store:
+        asyncio.run(
+            module._run_easy(
+                store=store,
+                client=module.EasyBudgetedClient(model, store, run_id),
+                model_id="test-model",
+                executor=DisabledSkillExecutor(),
+                trace=NullTraceSink(),
+                run_id=run_id,
+                connector_factory=factory,
+            )
+        )
+
+    assert captured["action_thinking"] is False
+    assert captured["builder_thinking"] is False
+
+
+def test_main_threads_settings_thinking_into_the_modules_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`main()` must read `settings.model.action_thinking` /
+    `builder_thinking` and store them on the module before running, since
+    `_run_easy` (and every agent it constructs, including the reuse
+    ActionAgent) reads those globals rather than taking a `thinking=`
+    parameter of its own."""
+    module = _load_run_script()
+    recorded: dict[str, bool] = {}
+
+    async def fake_run_easy(**kwargs) -> dict[str, object]:
+        recorded["action_thinking"] = module.ACTION_THINKING
+        recorded["builder_thinking"] = module.BUILDER_THINKING
+        return {}
+
+    monkeypatch.setattr(module, "_run_easy", fake_run_easy)
+    monkeypatch.setattr(module, "build_trace_sink", lambda *a, **k: NullTraceSink())
+    monkeypatch.setattr(module, "build_model_client", lambda *a, **k: _ScriptedModel())
+    monkeypatch.setattr(module, "build_skill_executor", lambda *a, **k: DisabledSkillExecutor())
+
+    environ = {
+        "NOOB_AGENT_TRACE_MODE": "weave",
+        "WEAVE_DISABLED": "false",
+        "NOOB_AGENT_MODEL_PROVIDER": "wandb-inference",
+        "NOOB_AGENT_INFERENCE_MODEL": "test-model",
+        "NOOB_AGENT_ACTION_THINKING": "false",
+        "NOOB_AGENT_BUILDER_THINKING": "false",
+    }
+    code = module.main(["--live-easy-smoke"], environ=environ)
+
+    assert code == 0
+    assert recorded == {"action_thinking": False, "builder_thinking": False}
+
+
 def test_easy_runner_does_not_change_the_frozen_manifest_or_normal_goal() -> None:
     module = _load_run_script()
 
