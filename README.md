@@ -25,11 +25,19 @@ in a way you could run in CI.
 - **Minecraft:** the same Action loop runs live on the second game with no
   connector-specific tuning — a cold training episode had 0 of 10 unusable
   replies and a 690 ms median decision
-  (`mc-confirm-22g-20260913T125747Z`). The full learning loop (Builder,
-  skill validation, held-out transfer) is **not yet proven** on Minecraft:
-  the recorded redstone-lamp demo trial has not gotten a skill accepted in
-  any attempt so far (`docs/demo-trials.md`).
-  <!-- MINECRAFT TRIAL 2 RESULT -->
+  (`mc-confirm-22g-20260913T125747Z`). The redstone-lamp demo trial has now
+  shown the full loop working end to end on a simple, same-task check
+  (non-benchmark; cold attempt vs. skill reuse on the *same* task, not
+  held-out transfer to an unseen variation): in run
+  `minecraft-redstone-20260918T122657Z` (attempt a02, after a thinking=off
+  fix, PR #82), a cold attempt lit the lamp, the Builder's
+  `light_redstone_lamp@2` skill was accepted after one repair, and a fresh
+  attempt invoked that skill once and lit the lamp again, spending about
+  21,000 tokens for the attempt. An earlier attempt in the same round (a01)
+  also had its skill accepted but never invoked it on reuse, so skill *use*
+  succeeded in 1 of 2 attempts across the round. Minecraft held-out
+  transfer, like the Builder's practice-and-refine loop, is still not
+  proven (`docs/demo-trials.md`).
 
 **Links:** Weave project — `nathanweldegiorgis731-minerva-university/Noob-agent`
 (_public link coming_) · W&B Report (_public link coming_)
