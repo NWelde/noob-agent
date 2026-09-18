@@ -24,6 +24,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -80,6 +81,24 @@ def _apply_limits(module: Any, limits: Limits) -> None:
     module.ACTION_MAX_OUTPUT_TOKENS = limits.action_cap
     module.BUILDER_MAX_OUTPUT_TOKENS = limits.builder_cap
     module.MAX_REPAIRS = limits.repairs
+    # `None` keeps the easy harness's own default (DEFAULT_REPAIR_MAX_OUTPUT_TOKENS,
+    # unchanged by this script); a plain DEFAULT_LIMITS run leaves it `None`.
+    module.REPAIR_MAX_OUTPUT_TOKENS = limits.repair_cap
+    module.ACTION_THINKING = limits.action_thinking
+    module.BUILDER_THINKING = limits.builder_thinking
+
+
+def _resolve_thinking(limits: Limits, settings: Any) -> Limits:
+    """Thread `settings.model.action_thinking` / `builder_thinking` into a
+    copy of `limits`, so the harness's ActionAgent/BuilderAgent constructions
+    (cold, Builder, and reuse) stop defaulting to the provider's thinking-on
+    behavior and the resolved values are visible in the recorded `limits`
+    block of the per-attempt JSON and the escalation index."""
+    return replace(
+        limits,
+        action_thinking=settings.model.action_thinking,
+        builder_thinking=settings.model.builder_thinking,
+    )
 
 
 # --- Limits: one dataclass for every knob this script exposes --------------
@@ -98,10 +117,23 @@ class Limits:
     deadline_s: float
     token_ceiling: int
     call_budget: int
+    # `None` means: do not override the easy harness's own
+    # DEFAULT_REPAIR_MAX_OUTPUT_TOKENS (3,000). Only the trial profile and an
+    # explicit `--repair-cap` set this.
+    repair_cap: int | None = None
+    # Provider reasoning per role; off by default, matching ModelSettings.
+    # `run()` overwrites these from `settings.model.action_thinking` /
+    # `builder_thinking` via `_resolve_thinking` before the attempt starts.
+    action_thinking: bool = False
+    builder_thinking: bool = False
 
     def escalate(self, kind: LimitKind) -> Limits:
         field = _FIELD_FOR_KIND[kind]
         current = getattr(self, field)
+        if current is None:
+            # Only repair_cap can be unset, and only escalation from a
+            # non-trial run could reach this; treat it as the harness default.
+            current = _HARNESS_DEFAULT_REPAIR_CAP
         doubled = double_limit(kind, current)
         value = int(doubled) if isinstance(current, int) else doubled
         return replace(self, **{field: value})
@@ -118,9 +150,11 @@ DEFAULT_LIMITS = Limits(
     deadline_s=600,
     token_ceiling=1_100_000,
     call_budget=30,
+    repair_cap=None,
 )
 
 # The demo-trial profile: large enough to plausibly finish the sample task.
+# The repair cap defaults to the builder cap, per hackathon_plan.md section 26.4.
 TRIAL_LIMITS = Limits(
     decisions=36,
     primitives=72,
@@ -131,17 +165,19 @@ TRIAL_LIMITS = Limits(
     deadline_s=1_800,
     token_ceiling=1_100_000,
     call_budget=90,
+    repair_cap=32_000,
 )
 
 
 class LimitKind(StrEnum):
-    """Which of the nine limits an attempt exhausted."""
+    """Which of the ten limits an attempt exhausted."""
 
     WALL_TIME = "wall_time"
     DECISION = "decision"
     PRIMITIVE = "primitive"
     ACTION_CAP = "action_cap"
     BUILDER_CAP = "builder_cap"
+    REPAIR_CAP = "repair_cap"
     DEADLINE = "deadline"
     TOKEN_CEILING = "token_ceiling"
     CALL_BUDGET = "call_budget"
@@ -153,16 +189,23 @@ _FIELD_FOR_KIND: dict[LimitKind, str] = {
     LimitKind.PRIMITIVE: "primitives",
     LimitKind.ACTION_CAP: "action_cap",
     LimitKind.BUILDER_CAP: "builder_cap",
+    LimitKind.REPAIR_CAP: "repair_cap",
     LimitKind.DEADLINE: "deadline_s",
     LimitKind.TOKEN_CEILING: "token_ceiling",
     LimitKind.CALL_BUDGET: "call_budget",
 }
+
+# Matches DEFAULT_REPAIR_MAX_OUTPUT_TOKENS in src/noob_agent/prompts/builder.py,
+# restated here so escalating a `None` repair_cap has a starting point without
+# importing production code into this demo-trial script.
+_HARNESS_DEFAULT_REPAIR_CAP = 3_000
 
 # Caps named in hackathon_plan.md section 26.4's escalation approval. A kind
 # absent here doubles with no explicit ceiling beyond the 4-escalation limit.
 _LIMIT_CAPS: dict[LimitKind, float | None] = {
     LimitKind.ACTION_CAP: 32_000,
     LimitKind.BUILDER_CAP: 128_000,
+    LimitKind.REPAIR_CAP: 128_000,
     LimitKind.DEADLINE: 7_200,
     LimitKind.TOKEN_CEILING: 8_000_000,
 }
@@ -190,11 +233,28 @@ class AttemptRecord:
 
     stop_reasons: frozenset[str]
     action_finish_reasons: tuple[str | None, ...]
-    builder_finish_reason: str | None
-    run_status: str
-    budget_exhausted: str | None  # "token", "call", or None
-    builder_accepted: bool
-    reuse_lit: bool
+    # The build call's finish_reason, and the last repair call's, kept apart:
+    # a truncated repair must double the (separately capped) repair budget,
+    # never the build budget, and vice versa.
+    build_finish_reason: str | None
+    repair_finish_reason: str | None = None
+    # The Builder's own outcome.stop_reason ("truncated_reply", "unusable_reply",
+    # "accepted", "repair_budget_exhausted", "learning_budget_exhausted",
+    # "validated", or None if the Builder never ran).
+    builder_stop_reason: str | None = None
+    run_status: str = "completed"
+    budget_exhausted: str | None = None  # "token", "call", or None
+    builder_accepted: bool = False
+    reuse_lit: bool = False
+    # How many times the reuse attempt actually invoked the accepted skill
+    # (`len(reuse.skill_uses)` from `_run_easy`'s summary). An accepted skill
+    # that the reuse Action agent never called is not learned-skill reuse
+    # (live evidence minecraft-redstone-20260918T121759Z-a01: builder_accepted
+    # and reuse_lit both true with skill_uses == 0).
+    skill_uses: int = 0
+    # Public validation rejection summaries (check/code/message), read from the
+    # repair prompt this attempt sent; never a private grader predicate.
+    validation_rejections: tuple[str, ...] = ()
 
     @classmethod
     def refused(cls, run_status: str = "refused") -> AttemptRecord:
@@ -202,20 +262,26 @@ class AttemptRecord:
         return cls(
             stop_reasons=frozenset(),
             action_finish_reasons=(),
-            builder_finish_reason=None,
+            build_finish_reason=None,
+            repair_finish_reason=None,
+            builder_stop_reason=None,
             run_status=run_status,
             budget_exhausted=None,
             builder_accepted=False,
             reuse_lit=False,
+            skill_uses=0,
+            validation_rejections=(),
         )
 
 
 def attempt_completed(record: AttemptRecord) -> bool:
-    """Completion = the Builder accepted a skill AND reuse lit the lamp.
+    """Completion = the Builder accepted a skill AND reuse lit the lamp AND
+    the reuse attempt actually invoked that skill at least once.
 
-    A lit cold lamp is not required.
+    A lit cold lamp is not required. A skill that was merely offered but
+    never invoked does not demonstrate learned-skill reuse.
     """
-    return record.builder_accepted and record.reuse_lit
+    return record.builder_accepted and record.reuse_lit and record.skill_uses >= 1
 
 
 def _action_truncated(reasons: tuple[str | None, ...]) -> bool:
@@ -245,7 +311,13 @@ def classify_exhausted_limit(record: AttemptRecord) -> LimitKind | None:
         return LimitKind.PRIMITIVE
     if _action_truncated(record.action_finish_reasons):
         return LimitKind.ACTION_CAP
-    if record.builder_finish_reason == "length":
+    # A repair's own truncation is checked first: it can only happen after a
+    # build that finished cleanly, and doubling the build cap again (as a
+    # combined "last builder call" check once did) never helps it (live
+    # evidence a02/a03).
+    if record.repair_finish_reason == "length":
+        return LimitKind.REPAIR_CAP
+    if record.build_finish_reason == "length":
         return LimitKind.BUILDER_CAP
     if record.run_status in {"TimeoutError", "CancelledError"}:
         return LimitKind.DEADLINE
@@ -254,6 +326,53 @@ def classify_exhausted_limit(record: AttemptRecord) -> LimitKind | None:
     if record.budget_exhausted == "call":
         return LimitKind.CALL_BUDGET
     return None
+
+
+def is_retryable_builder_failure(record: AttemptRecord) -> bool:
+    """Whether a fresh attempt at the *same* limits is worth trying.
+
+    `unusable_reply` means the model's reply could not be parsed into a skill
+    package (for example invalid JSON or a missing fenced block) even though
+    it finished normally (`finish_reason=stop`) -- live evidence a04. That says
+    nothing about any limit being too small, so nothing is doubled; only a
+    fresh attempt, still counted toward the escalation cap.
+    """
+    return record.builder_stop_reason == "unusable_reply"
+
+
+def is_skill_not_used_retry(record: AttemptRecord) -> bool:
+    """Whether a fresh attempt at the *same* limits is worth trying because the
+    Builder's skill was accepted but the reuse attempt never invoked it.
+
+    `skill_uses == 0` with `builder_accepted` true says nothing about any
+    limit being too small -- the skill was offered as a callable tool and the
+    model chose not to call it (or the reuse attempt never got that far).
+    Nothing is doubled; only a fresh, still-unforced attempt is worth trying,
+    counted toward the escalation cap (live evidence
+    minecraft-redstone-20260918T121759Z-a01).
+    """
+    return record.builder_accepted and record.skill_uses == 0
+
+
+_FAILING_CHECKS_RE = re.compile(
+    r"Failing checks:\n\n(.*?)\n\nThe rejected source was:", re.DOTALL
+)
+_ISSUE_LINE_RE = re.compile(r"^- (\[.+)$", re.MULTILINE)
+
+
+def extract_validation_rejections(repair_prompt_text: str) -> tuple[str, ...]:
+    """Pull the public validation-issue summaries out of a stored repair prompt.
+
+    `render_repair_prompt` (src/noob_agent/prompts/builder.py) always writes a
+    "Failing checks:" section listing only public check/code/message text --
+    never a private grader predicate or held-out data -- before "The rejected
+    source was:". This reads that same text back from the stored prompt,
+    without importing or re-running any production code.
+    """
+    match = _FAILING_CHECKS_RE.search(repair_prompt_text)
+    if match is None:
+        return ()
+    return tuple(_ISSUE_LINE_RE.findall(match.group(1)))
 
 
 # --- Escalation driver: pure orchestration over an injected attempt runner --
@@ -292,9 +411,14 @@ def run_escalating_attempts(
         if attempt_number > max_escalations:
             break
         kind = classify_exhausted_limit(outcome.record)
-        if kind is None:
+        if kind is not None:
+            current = current.escalate(kind)
+        elif is_retryable_builder_failure(outcome.record):
+            pass  # Same limits: an unusable reply says no limit was too small.
+        elif is_skill_not_used_retry(outcome.record):
+            pass  # Same limits: an unused skill says no limit was too small.
+        else:
             break
-        current = current.escalate(kind)
         attempt_number += 1
     return attempts
 
@@ -309,6 +433,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wall-time-ms", type=int, default=None)
     parser.add_argument("--action-cap", type=int, default=None)
     parser.add_argument("--builder-cap", type=int, default=None)
+    parser.add_argument("--repair-cap", type=int, default=None)
     parser.add_argument("--repairs", type=int, default=None)
     parser.add_argument("--deadline-s", type=float, default=None)
     parser.add_argument("--token-ceiling", type=int, default=None)
@@ -340,6 +465,7 @@ def _limits_from_args(args: argparse.Namespace) -> Limits:
         "wall_time_ms": args.wall_time_ms,
         "action_cap": args.action_cap,
         "builder_cap": args.builder_cap,
+        "repair_cap": args.repair_cap,
         "repairs": args.repairs,
         "deadline_s": args.deadline_s,
         "token_ceiling": args.token_ceiling,
@@ -364,6 +490,10 @@ async def run(
     _apply_limits(m, limits)
     environment = os.environ if environ is None else environ
     settings = m.IntegrationSettings.from_environ(environment)
+    limits = _resolve_thinking(limits, settings)
+    _apply_limits(m, limits)
+    if attempt_sink is not None:
+        attempt_sink["limits"] = limits
     if not settings.trace.enabled or not settings.model.inference_model:
         print(
             "Refusing to run: configure a model provider, model ID, and Weave tracing "
@@ -442,8 +572,16 @@ async def run(
             action_finish_reasons = tuple(
                 call.finish_reason for call in records if call.purpose == "action"
             )
-            builder_records = [call for call in records if call.purpose in {"build", "repair"}]
-            builder_finish_reason = builder_records[-1].finish_reason if builder_records else None
+            build_records = [call for call in records if call.purpose == "build"]
+            repair_records = [call for call in records if call.purpose == "repair"]
+            build_finish_reason = build_records[0].finish_reason if build_records else None
+            repair_finish_reason = repair_records[-1].finish_reason if repair_records else None
+            builder_stop_reason = (summary.get("builder") or {}).get("stop_reason")
+            validation_rejections = tuple(
+                rejection
+                for call in repair_records
+                for rejection in extract_validation_rejections(call.prompt)
+            )
             budget_exhausted = None
             if status == "EasyBudgetExhausted":
                 if calls_used >= limits.call_budget:
@@ -451,6 +589,12 @@ async def run(
                 elif tokens_used >= limits.token_ceiling:
                     budget_exhausted = "token"
             builder_accepted = bool((summary.get("builder") or {}).get("accepted"))
+            # The reuse phase only runs, with the accepted skill registered as
+            # a callable tool for the reuse Action agent, when the Builder
+            # accepted a skill; `skill_offered` records that public fact
+            # regardless of whether the model chose to invoke it.
+            skill_offered = builder_accepted
+            skill_uses = int((reuse_info or {}).get("skill_uses") or 0) if reuse_info else 0
             cold_lit = (summary.get("training") or {}).get("terminal_reason") == m.SUCCESS_REASON
             reuse_lit = False
             if reuse_info and reuse_info.get("episode_id"):
@@ -470,6 +614,12 @@ async def run(
                 "tokens_by_phase": costs,
                 "cold_lamp_lit": cold_lit,
                 "reuse_lamp_lit": reuse_lit,
+                "skill_offered": skill_offered,
+                "skill_uses": skill_uses,
+                "builder_stop_reason": builder_stop_reason,
+                "build_finish_reason": build_finish_reason,
+                "repair_finish_reason": repair_finish_reason,
+                "validation_rejections": list(validation_rejections),
                 "sequence": summary,
             }
             output = database.with_suffix(".json")
@@ -480,11 +630,15 @@ async def run(
                 attempt_sink["record"] = AttemptRecord(
                     stop_reasons=stop_reasons,
                     action_finish_reasons=action_finish_reasons,
-                    builder_finish_reason=builder_finish_reason,
+                    build_finish_reason=build_finish_reason,
+                    repair_finish_reason=repair_finish_reason,
+                    builder_stop_reason=builder_stop_reason,
                     run_status=status,
                     budget_exhausted=budget_exhausted,
                     builder_accepted=builder_accepted,
                     reuse_lit=reuse_lit,
+                    skill_uses=skill_uses,
+                    validation_rejections=validation_rejections,
                 )
     finally:
         trace.flush()
@@ -512,7 +666,25 @@ def _index_payload(base_run_id: str, attempts: list[AttemptOutcome]) -> dict[str
                 "skill_uses": ((outcome.payload.get("sequence") or {}).get("reuse") or {}).get(
                     "skill_uses"
                 ),
+                # Whether the accepted skill was registered and available as a
+                # callable tool for the reuse Action agent, regardless of
+                # whether the model chose to invoke it.
+                "skill_offered": outcome.payload.get("skill_offered", False),
                 "completed": attempt_completed(outcome.record),
+                "builder_stop_reason": outcome.record.builder_stop_reason,
+                "build_finish_reason": outcome.record.build_finish_reason,
+                "repair_finish_reason": outcome.record.repair_finish_reason,
+                "validation_rejections": list(outcome.record.validation_rejections),
+                # Set when this attempt itself was an unusable-reply retry at
+                # unchanged limits, not a limit escalation.
+                "builder_retry_reason": (
+                    "unusable_reply" if is_retryable_builder_failure(outcome.record) else None
+                ),
+                # Set when this attempt's skill was accepted but never invoked
+                # during reuse, so a fresh attempt reran at unchanged limits.
+                "retry_reason": (
+                    "skill_not_used" if is_skill_not_used_retry(outcome.record) else None
+                ),
             }
             for outcome in attempts
         ],
@@ -539,15 +711,16 @@ def main(argv: list[str] | None = None, *, environ: dict[str, str] | None = None
                 attempt_sink=sink,
             )
         )
+        resolved_limits = sink.get("limits", attempt_limits)
         if code == 2 or "record" not in sink:
             refusal_code = code
             return AttemptOutcome(
                 attempt_id,
-                attempt_limits,
+                resolved_limits,
                 AttemptRecord.refused(),
                 sink.get("payload", {"run_id": attempt_id, "status": "refused"}),
             )
-        return AttemptOutcome(attempt_id, attempt_limits, sink["record"], sink["payload"])
+        return AttemptOutcome(attempt_id, resolved_limits, sink["record"], sink["payload"])
 
     attempts = run_escalating_attempts(
         run_one, base_run_id=base_run_id, limits=limits, escalate=args.escalate
