@@ -43,6 +43,7 @@ from noob_agent.prompts.builder import DEFAULT_REPAIR_MAX_OUTPUT_TOKENS
 from noob_agent.runtime.heldout import (
     HELD_OUT_DECISION_BUDGET,
     HELD_OUT_PRIMITIVE_BUDGET,
+    HELD_OUT_WALL_TIME_MS,
     HeldOutRunner,
     heldout_experiment,
 )
@@ -80,6 +81,7 @@ def training_experiment(
     condition: str = "self-improving",
     decision_budget: int = TRAINING_DECISION_BUDGET,
     primitive_budget: int = TRAINING_PRIMITIVE_BUDGET,
+    wall_time_budget_ms: int = TRAINING_WALL_TIME_MS,
 ) -> ExperimentRecord:
     """An experiment record carrying the training budgets.
 
@@ -95,7 +97,7 @@ def training_experiment(
         connector_version=connector_version,
         decision_budget=decision_budget,
         primitive_budget=primitive_budget,
-        wall_time_budget_ms=TRAINING_WALL_TIME_MS,
+        wall_time_budget_ms=wall_time_budget_ms,
         created_at=created_at,
     )
 
@@ -196,6 +198,8 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         training_primitive_budget: int = TRAINING_PRIMITIVE_BUDGET,
         heldout_decision_budget: int = HELD_OUT_DECISION_BUDGET,
         heldout_primitive_budget: int = HELD_OUT_PRIMITIVE_BUDGET,
+        training_wall_time_ms: int = TRAINING_WALL_TIME_MS,
+        heldout_wall_time_ms: int = HELD_OUT_WALL_TIME_MS,
     ) -> None:
         """Build one learning sequence.
 
@@ -237,6 +241,8 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
         self._training_primitive_budget = training_primitive_budget
         self._heldout_decision_budget = heldout_decision_budget
         self._heldout_primitive_budget = heldout_primitive_budget
+        self._training_wall_time_ms = training_wall_time_ms
+        self._heldout_wall_time_ms = heldout_wall_time_ms
 
     def _recording(
         self, experiment: ExperimentRecord, *, role: ModelRole, episode_id: str | None = None
@@ -290,6 +296,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             offered=offered,
             max_decision_budget=self._heldout_decision_budget,
             max_primitive_budget=self._heldout_primitive_budget,
+            max_wall_time_budget_ms=self._heldout_wall_time_ms,
         )
         result = await runner.run(
             experiment=record, scenario_id=cell.scenario_id, seed=cell.seed, split=split
@@ -386,6 +393,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             condition=self._condition,
             decision_budget=self._training_decision_budget,
             primitive_budget=self._training_primitive_budget,
+            wall_time_budget_ms=self._training_wall_time_ms,
         )
         heldout_record = heldout_experiment(
             experiment_id=f"{sequence_id}-heldout",
@@ -395,6 +403,7 @@ class LearningSequence(Generic[ConnectorT, GradeT]):
             condition=self._condition,
             decision_budget=self._heldout_decision_budget,
             primitive_budget=self._heldout_primitive_budget,
+            wall_time_budget_ms=self._heldout_wall_time_ms,
         )
         self._store.create_experiment(training_record)
         self._store.create_experiment(heldout_record)
