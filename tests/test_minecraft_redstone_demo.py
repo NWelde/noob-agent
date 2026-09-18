@@ -51,6 +51,31 @@ def test_connector_exposes_the_lamp_and_its_public_lit_state():
     assert "lit: block.getProperties().lit" in source
 
 
+def test_limits_default_to_no_thinking_and_can_be_resolved_from_settings():
+    """`Limits` must carry the two thinking flags so a per-attempt payload's
+    `limits` block records them, and `_resolve_thinking` must thread
+    `settings.model.action_thinking` / `builder_thinking` into a copy without
+    a live model call or a real `IntegrationSettings` object."""
+    demo = load_demo()
+
+    assert demo.DEFAULT_LIMITS.action_thinking is False
+    assert demo.DEFAULT_LIMITS.builder_thinking is False
+
+    class _FakeModelSettings:
+        action_thinking = True
+        builder_thinking = False
+
+    class _FakeSettings:
+        model = _FakeModelSettings()
+
+    resolved = demo._resolve_thinking(demo.DEFAULT_LIMITS, _FakeSettings())
+
+    assert resolved.action_thinking is True
+    assert resolved.builder_thinking is False
+    # The base Limits object passed in must be left untouched (frozen dataclass).
+    assert demo.DEFAULT_LIMITS.action_thinking is False
+
+
 def test_the_demo_refuses_a_missing_wandb_key_before_touching_weave_or_the_network(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
