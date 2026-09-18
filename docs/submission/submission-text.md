@@ -55,10 +55,18 @@ the connector changes between games.
 - **Minecraft**: the shared Action loop runs live on the second game with no
   connector-specific tuning — a cold training episode had 0 of 10 unusable
   replies and a 690 ms median decision (`mc-confirm-22g-20260913T125747Z`).
-  The full learning loop (Builder, validation, held-out transfer) is **not
-  yet proven** on Minecraft: the redstone-lamp demo trial has not gotten a
-  skill accepted in any attempt recorded so far (`docs/demo-trials.md`).
-  <!-- MINECRAFT TRIAL 2 RESULT -->
+  The redstone-lamp demo trial now shows the full loop working end to end
+  on a simple, same-task check: in run
+  `minecraft-redstone-20260918T122657Z` (attempt a02, after a thinking=off
+  fix, PR #82), a cold attempt lit the lamp, the Builder's
+  `light_redstone_lamp@2` skill was accepted after one repair, and a fresh
+  attempt invoked that skill once and lit the lamp again (about 21,000
+  tokens for the attempt). This is non-benchmark, same-task
+  cold-vs-skill-reuse evidence, not held-out transfer to an unseen
+  variation — Minecraft held-out transfer is still not proven. Skill use
+  itself is not yet reliable either: a prior attempt in the same round
+  (a01) had its skill accepted but never invoked it on reuse, so skill use
+  succeeded in 1 of 2 attempts across the round (`docs/demo-trials.md`).
 
 ## Why it is production-ready
 
@@ -118,11 +126,13 @@ package was written.
 
 ## Known limitations
 
-- Minecraft's full learning loop (Builder → validated skill → held-out
-  transfer) has not been proven live: every recorded redstone-lamp demo
-  trial attempt failed to get a skill accepted, most recently traced to a
-  repair-cap bug fixed in PR #82 but not yet re-confirmed by a clean
-  escalating run. <!-- MINECRAFT TRIAL 2 RESULT -->
+- Minecraft's learning loop is now proven end to end on one simple,
+  same-task check (`minecraft-redstone-20260918T122657Z`: skill accepted,
+  invoked, and lit the lamp on reuse), but **not** on held-out transfer to
+  an unseen variation, and skill *use* is not yet reliable — a sibling
+  attempt in the same round accepted a skill but never invoked it, so
+  skill use succeeded in only 1 of 2 attempts. This is one labeled,
+  non-benchmark run, not a statistic.
 - Doom held-out transfer is real but uneven: the benchmark's best sequence
   solved 5 of 6 held-out cells, but held-out totals across 5 sequences are
   8 of 30, and multi-round refinement has not yet improved held-out results
