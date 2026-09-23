@@ -2,9 +2,140 @@
 
 ## Unreleased
 
+2026-09-22 | [FIXED] | Milestone 4 planner-facing grading stops at the first observed behavioral mismatch and returns saved incomplete evidence for repair. Added strictly validated parameter-bit recipe templates for compact value/address declarations; explicit recipes and exhaustive diagnostic grading remain available. Scheduling optimization and legacy cleanup remain pending in this bounded continuation.
+
+2026-09-22 | [ADDED] | Milestone 4 public register/arithmetic/storage/output behavioral checks with finite value-addressed level/wait recipes, raw observed snapshots compared in Python, shared module allowances and separate program deadlines, sample-only hold/reset timelines, and planner repair feedback. Controlled reader tests and live negative evidence are distinct from deferred model-designed circuit evidence. Focused verification: 122 Python tests and 10 Node tests pass; live reset correctly fails with observed A=8, expected 0, and seven verified fixture removals. Legacy scheduling cleanup and full hardware identity remain pending.
+
+2026-09-22 | [ADDED] | Milestone 4 bounded server timeline: strict level/wait recipes, chained 200-tick cycles, two-tick STEP and same-tick observed snapshots, aggregate generated-command/tick accounting, and journaled cleanup/recovery. Behavioral graders and model success remain pending.
+
+2026-09-22 | [ADDED] | Milestone 4 trusted grader control foundation: declared server-side probes and lever levels, two-server-tick scheduled STEP with game-time evidence, shared action guards and bounded grading tick accounting, sanitized uncertain failures, and dedicated-world control proof. Harness scheduling templates contain only control/timing operations. Programming recipes and four behavioral graders remain pending; no model success or acceptance.
+
+2026-09-22 | [ADDED] | Milestone 4 bounded interface foundation: strict planner-selected module probes/control declarations, charged read-only world inspection with detailed failures, block-specific structural identity separate from signal state, canonical --inspect-module mode, and provider-capable planner inspection feedback that continues after a checkpoint. Behavioral graders and trusted tick/control operations remain pending; inspection cannot establish module success. Tests-first and live evidence are recorded in docs/redstone-trials.md.
+
+2026-09-22 | [VERIFIED] | Retained milestone-3 fixture-driven live missing-dust failure and feedback-authorized repair under one ID, direct 15/true then 0/false dust/lamp readbacks, and two verified full-region resets; 4 planner/5 Jev fixture calls, 1 repair, 35 charged operations. Added fixture feedback/isolation regression. Focused checks: 128 Python and 12 Node tests, Ruff/format/mypy; README and trial docs retain exact artifacts and pending real-provider/full-machine/recording evidence. model_success remains false.
 
 
-2026-09-18 01:00 PDT | [DOCUMENTED] | Approved `hackathon_plan.md` section 26, the production-ready and demo-ready submission: audit evidence (3 failing tests on main, no CI or license), invariants that keep benchmark budgets frozen, and steps 26.1–26.6 covering green main, CI, a labeled non-benchmark demo-trial mode with budgets of 1,000,000+ tokens and automatic escalation, monitored Doom and Minecraft demo trials, a fresh-clone reproducibility check, and a judge-facing README and submission package.
+2026-09-22 | [FIXED] | Added a failing connected-run cleanup regression and preserve the original loop failure stage while attempting final restoration; explicit provider wiring/fresh adapter tests use no network and prove missing credentials never trigger fixture fallback.
+
+
+2026-09-22 | [ADDED] | Milestone 3 canonical explicit fixture/provider trial modes, immutable credential-free provider configuration, fresh W&B/shared-handler adapters and verified-reset orchestration. Added failing command-selection tests before implementation and a clearly labeled feedback-driven missing-dust fixture using the bounded Jev subprocess protocol. Live and focused verification results follow in trial documentation; no model success or milestone acceptance.
+
+
+2026-09-22 | [ADDED] | Milestone 3 adapter boundary: strict bounded planner intentions and fresh public context; reuse shared Jev handler through a deadline/output-bounded subprocess with exact offered-ID validation and preserved usage/model identity; reuse W&B ModelClient completion with zero SDK retries and explicit request timeout. Offline subprocess/provider tests retained; trial-loop accounting, canonical mode and live repair proof remain pending.
+
+2026-09-22 | [DOCUMENTED] | Retained two live full-region reset comparisons and passing normal lever/dust/lamp off/on/off with 33 charged operations; retained the earlier failed smoke. Documented 77 passing Python tests, 8 Node tests, Ruff/format/mypy checks, exact evidence paths, finite snapshot scope and remaining recording/review work. No model success or milestone acceptance claimed.
+
+2026-09-22 | [FIXED] | Added a failing persistence regression and now durably mark the action runtime stopped immediately on uncertain transport outcomes, before any attempted subsequent action.
+
+2026-09-22 | [FIXED] | Retained a real failed smoke where Mineflayer reported dust power as a string; added a failing regression then normalized integer block states through the 1.21.1 registry for consistent validation and effect readbacks. Tightened tick-rate matching and runtime target typing.
+
+2026-09-22 | [ADDED] | Added tests-first charged single-target placement/removal/lever use, whitelist and registry property validation, action/time limits, unknown-outcome stopping, and actual effect readbacks. Added --smoke for independent dust/lamp off/on/off observations between complete hashed resets; infrastructure only, recording remains missing.
+
+2026-09-22 | [ADDED] | Added tests-first trusted hashed baseline restoration, full 387072-cell state hashing, exact player/inventory checks, effective settings probes, and canonical --reset-check for two restores with an intervening dirty block. Added trusted sidecar settling and baseline scan; planner actions remain separate and pending. Live verification and checks are being retained under development-m2-reset.
+
+2026-09-22 | [ADDED] | Added a Vercel AI Gateway Jev evaluation handler using the local AI_GATEWAY_API_KEY, pinned AI SDK, reusable state/questions interface, JSON stdin command and billing example. Calls have a deadline and no automatic retries. Added offline handler tests and docs/jev-handler.md; Minecraft trial-loop integration remains separate.
+
+2026-09-22 | [DOCUMENTED] | Retained milestone-2 sidecar red/green evidence (67 Python tests, 6 Node tests, Ruff/format and mypy), actual dedicated-server attachment/readbacks and the next reset/runtime handoff. Live player position and empty inventory differ from the frozen initial conditions; the unique manifest remains incomplete and no live lever smoke or reset is claimed.
+
+2026-09-22 | [ADDED] | Added a separate fixed-endpoint redstone Mineflayer sidecar with actual player/block readbacks, registry property validation and bounded normal lever interaction. Added a deadline-bound Python JSONL client with pre-delivery journaling, sanitized durable failures and no retries after uncertainty, plus canonical --observe evidence mode. Tests preceded implementation. Reset, action budgets, full construction and module smoke remain pending; no trial or model success claimed.
+
+2026-09-22 | [DOCUMENTED] | Recorded milestone-2 transport/preflight red/green checks (58 focused tests, Ruff and mypy), two live read-only dedicated-server manifests and the remaining foundation handoff in docs/redstone-trials.md. Added the canonical incomplete-preflight command to README. No full reset, bot attachment, module smoke, recording or milestone acceptance is claimed.
+
+2026-09-22 | [FIXED] | Redstone preflight preserves the interruption stage and exception type before propagating cancellation; the pending probe stays unknown. Added a behavioral interruption regression before the fix.
+
+2026-09-22 | [FIXED] | Redstone preflight now records sanitized cleanup failures after a lost probe, preserving its unknown outcome and durable incomplete status; added a failing-then-passing regression. Unique manifest directory entries are fsynced before recording startup evidence.
+
+2026-09-22 | [ADDED] | Added unique, atomic, fsynced redstone manifests and a read-only dedicated-server preflight command. Attempts are persisted as unknown before transport delivery; startup failures, absent recording and pending reset/player/module evidence remain explicitly incomplete. This bounded milestone-2 chunk does not implement or claim a complete trial.
+
+2026-09-22 | [ADDED] | Began milestone 2 with a separate dedicated-server RCON adapter: bounded packet/deadline handling, multipart response barriers, local-only endpoint checks, sanitized authentication errors and explicit unknown outcomes without retries. Wire-level behavioral tests precede implementation. This is transport infrastructure; verified template reset and live module grading remain pending.
+
+2026-09-22 | [FIXED] | Reject numeric type drift in the frozen redstone JSON artifact, including float-valued integer literals. Added regression coverage for literal widths/capacity, nested numeric fields, booleans and harmless JSON reformatting; retained the existing failing behavioral test. Software-only verification is recorded in the contract documentation; live checks remain pending.
+
+2026-09-22 | [ADDED] | Implemented the frozen v1 redstone behavioral contract, strict scenario loader, bounded construction validation, software-only reference traces, and behavioral tests. Documented live acceptance requirements and pending adapters; no Minecraft success claimed.
+
+2026-09-22 19:28 PDT | [DOCUMENTED] | Saved the installed-CLI controller verification after interrupted-change recovery: 82/82 tests passed with no skips.
+
+2026-09-22 19:28 PDT | [FIXED] | Preserved interrupted worker edits through usage continuation and provisional retirement for full milestone review; baseline-free interruptions now block acceptance.
+
+2026-09-22 19:28 PDT | [FIXED] | Treated worker file assignments as advisory scope so unassigned edits are recorded and reviewed without pausing a full-permission worker.
+
+2026-09-22 19:22 PDT | [FIXED] | Ran coding workers directly with host shell and filesystem permissions while keeping coordinator and reviewer calls read-only; verified real CLI shell commands, assigned and unassigned edits, and usage recovery.
+
+2026-09-22 19:22 PDT | [DOCUMENTED] | Updated the milestone-0 plan and controller documentation for trusted full-permission workers and the resulting review scope.
+
+2026-09-22 17:04 PDT | [DOCUMENTED] | Saved the post-review installed-CLI controller verification: 85/85 tests passed, with nested-shell execution still open.
+
+2026-09-22 17:03 PDT | [FIXED] | Charged coordinator dispatch and interrupted recovery to the active milestone after milestone 0, with a regression test.
+
+2026-09-22 17:03 PDT | [DOCUMENTED] | Recorded the full-scope reviewer findings and the failed external-sandbox CLI probe; nested-shell execution remains unverified.
+
+2026-09-22 16:54 PDT | [DOCUMENTED] | Saved the full-scope milestone-0 installed-CLI verification at `.noob-agent/astra-controller/verification/milestone-0-full-review-20260922T1653.tap`: 84/84 tests passed with no skips.
+
+2026-09-22 16:53 PDT | [FIXED] | Expanded milestone-0 independent review to the controller implementation, tests, and plan after a documentation-only final worker; added an audited invalidation path for the prior limited review.
+
+2026-09-22 16:48 PDT | [DOCUMENTED] | Saved a fresh installed-CLI controller test run at `.noob-agent/astra-controller/verification/milestone-0-controller-20260922T1647.tap`: 82/82 passing with no skips.
+
+2026-09-22 16:47 PDT | [ADDED] | Added an audited operator transfer command for an idle coordinator whose milestone pool cannot cover the next dispatch estimate; it enforces the existing future-pool gates.
+
+2026-09-22 16:46 PDT | [DOCUMENTED] | Verified the milestone-0 controller suite with the installed CLI at 81/81 passing and corrected README evidence to distinguish native patch confinement from failed nested-shell execution. The temporary test output was not retained; a fresh durable verification run is needed before review.
+
+2026-09-22 16:43 PDT | [DOCUMENTED] | Clarified milestone-0 acceptance under the installed CLI's unverified internal model-call cap: bounded fresh calls, estimated context handoffs, controller tests, independent review, and explicit disclosure of the limit.
+
+2026-09-22 16:42 PDT | [FIXED] | Allowed provisional interrupted-worker accounting to transfer unused credits from a future milestone when the reserve is exhausted, with an exact run ID and recorded transfer.
+
+2026-09-22 16:40 PDT | [ADDED] | Added an opt-in local Responses fixture that drives the installed CLI through confined owned and denied unowned writes, emits usage, and verifies exactly-once interrupted recovery; the full controller suite passed 80/80 with the real CLI checks enabled.
+
+2026-09-22 16:40 PDT | [DOCUMENTED] | Clarified that the installed CLI has no verified pre-request model-call cap and that the 50% context handoff remains an estimate.
+
+2026-09-22 16:31 PDT | [ADDED] | Added opt-in installed-CLI offline startup-failure/recovery coverage using temporary state and a network namespace. Codex 0.155.1 rejected an unknown provider; confirmed exit, pending-state preservation, unchanged spending, and redispatch blocking passed. Full controller suite: 79/79. Successful CLI tool execution and usage-bearing recovery remain unverified.
+
+2026-09-22 16:31 PDT | [DOCUMENTED] | Recorded capability inspection, the unsupported model-turn limit, exact offline CLI evidence, and a precise milestone-0 handoff. Default dispatch still has no internal model-turn bound; runtime/output limits are not a substitute.
+
+2026-09-22 16:31 PDT | [FIXED] | Reject explicitly requested `codexRunner` model-turn limits before launch instead of silently ignoring them. This is a fail-closed API guard; default dispatch remains unbounded in model turns.
+
+2026-09-22 16:25 PDT | [DOCUMENTED] | Recorded the usage-only continuation checks and remaining milestone-0 gaps in README.md.
+
+2026-09-22 16:25 PDT | [FIXED] | Added `continue-usage RUN_ID` for recovered usage-only interrupted workers after confirmed exit and matching durable usage receipts; preserves artifacts and spending, invalidates prior results/review, and retains evidence/budget blocking. The controller suite passed 77/77 using fake fixtures.
+
+2026-09-22 16:18 PDT | [FIXED] | Added provisional retirement for an interrupted worker with no usage receipt, reserving credits from the milestone reserve while retaining the prior actual billing checkpoint.
+
+2026-09-22 16:15 PDT | [FIXED] | Added manual retirement for a legacy interrupted worker after observed exit and total billing reconciliation; preserved artifacts and invalidated stale review evidence.
+
+2026-09-22 16:12 PDT | [FIXED] | Stopped running agent calls when their response file exceeds the read ceiling and preserved a bounded partial copy; added a fake-process regression and documented the polling limit.
+
+2026-09-22 16:08 PDT | [FIXED] | Added conservative stale-lock recovery with process identity, serialized lock reclamation, worker exit receipts, and atomic interrupted-usage accounting that retains pending dispatch protection. Verification and remaining recovery limits are recorded in README.md.
+
+2026-09-22 16:01 PDT | [FIXED] | Made worker call estimates informational while keeping milestone and global budget gates, and updated the hackathon plan and controller documentation to match.
+
+2026-09-22 16:01 PDT | [FIXED] | Added a 1-MiB response read ceiling and 8-MiB combined stdout/stderr ceiling, preserving capped failure artifacts and pending dispatch protection; verified with fake executables.
+
+2026-09-22 16:01 PDT | [DOCUMENTED] | Documented response and stream limit boundaries, fake-worker evidence, and remaining real CLI and interruption-recovery gaps.
+
+2026-09-22 15:40 PDT | [FIXED] | Disabled the CLI's incompatible nested sandbox inside the Bubblewrap boundary while retaining role-specific read-only and owned-file write mounts.
+
+2026-09-22 15:38 PDT | [FIXED] | Attribute reconciled billed credits proportionally to milestone pools and the active work section, preserve later estimates, and allow a budget pause to resume only when its gates fit.
+
+2026-09-22 15:35 PDT | [FIXED] | Added a five-minute agent runtime checkpoint that waits for active tool items, preserves partial traces after interruption, and stops a hung item after one additional minute.
+
+2026-09-22 15:32 PDT | [FIXED] | Added a reconciled worker-overrun resume path that preserves section usage and returns control to the coordinator without repeating a model call.
+
+2026-09-22 15:32 PDT | [DOCUMENTED] | Documented the verified CLI adapter, Bubblewrap requirements and limitations, fake-agent smoke checks, and remaining runtime and recovery gaps.
+
+2026-09-22 15:32 PDT | [FIXED] | Confined CLI calls with Bubblewrap file mounts and fresh sessions, added prompt checkpoints, tied review and acceptance to content fingerprints, and added fake-runner regressions for confinement, stale evidence, and recovery.
+
+2026-09-22 14:56 PDT | [FIXED] | Raised the coordinator's per-call estimate allowance and added replay of a saved decision after the earlier allowance paused a completed run; documented live trace monitoring.
+
+2026-09-22 14:52 PDT | [FIXED] | Let the Astra controller reconcile included plan usage to zero billed credits while retaining later token estimates and milestone work allocations.
+
+2026-09-22 14:20 PDT | [ADDED] | Added the JavaScript Astra build controller with bounded dispatch, context handoffs, durable usage and run artifacts, file ownership checks, independent review and acceptance gates, recovery, and fake-agent tests; documented operation and credit reconciliation.
+
+2026-09-22 14:04 PDT | [DOCUMENTED] | Added the coordinator-only Astra development workflow, JavaScript controller bootstrap, 50% context handoffs, independent review gates, and a 2,000-credit allocation and usage ledger to the current hackathon plan.
+
+2026-09-22 13:56 PDT | [DOCUMENTED] | Replaced the obsolete multi-project hackathon plan with the current programmable 4-bit Minecraft machine direction, trial contract, implementation milestones, demo readiness criteria, and unresolved design decisions.
+
+2026-09-22 13:44 PDT | [ADDED] | Added a per-attempt Windows OBS recorder for TLauncher Minecraft with a dedicated window capture scene, run manifests, MKV originals, MP4 remuxing, and focused tests. Configured OBS WebSocket and verified a playable 1.21.1 capture; documented the redstone computer demo direction and recording workflow, and removed the requested repository AGENTS.md.
+
+2026-09-20 16:45 PDT | [DOCUMENTED] | Retired the three Minecraft learning-demo scripts and their runner-specific tests for the approved mod-based open-model/Jev evaluation pivot. Preserved data-pack checks, connectors, episode recording, Weave tracing, historical results, and shared legacy skill/Doom modules. Updated the plan and current usage documentation; a replacement evaluation runner and Jev integration are not yet implemented.
 
 2026-09-18 00:42 PDT | [DOCUMENTED] | Added the `production-ready-submission` Claude Code skill under `.claude/skills/`: a phased workflow (audit, plan approval, hardening, demo video, submission) for the CoreWeave Hacks Part 2 Most Production-Ready award, with a judge-facing rubric, a recorded-video shot list, and a submission and ceremony checklist that keep the event's eligibility rules and the repository's honesty and workflow rules.
 
@@ -158,3 +289,14 @@
 2026-09-12 14:12 PDT | [DOCUMENTED] | Added protected core-loop boundaries, isolated scaffolding rules, change gates, and repository-protection requirements.
 
 2026-09-12 14:06 PDT | [DOCUMENTED] | Added repository-wide agent workflow, Claude Code branch rules, and changelog conventions.
+
+### Milestone 3 connected-loop chunk
+
+- Added a fresh-trial planner/Jev loop with durable pre-dispatch model-call charges,
+  actual-result feedback, repair accounting and public checkpoint journaling.
+- Intentions now support multiple Jev-selected offers with per-step observations,
+  explicit early termination and action/time caps enforced inside Actions.
+- Real providers, canonical trial selection and live repair proof remain pending;
+  no model success or milestone acceptance is claimed.
+
+2026-09-22 | [VERIFIED] | Milestone 4 interface-only checkpoint: 152 focused Python tests, 12 relevant Node tests, Ruff/format/mypy. Retained one live unknown-outcome read failure and a fresh dedicated-world inspection with eight charged air readings/eight detailed interface rejections. No controls or world blocks changed; behavioral module graders, real tick control and agent-built module success remain pending. Exact evidence and same-milestone continuation are in docs/redstone-trials.md; no milestone acceptance.

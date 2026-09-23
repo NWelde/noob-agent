@@ -1,0 +1,10 @@
+{
+  "name": "noob-agent-model-handlers",
+  "private": true,
+  "scripts": {
+    "jev": "node --env-file-if-exists=.env scripts/jev_handler.mjs",
+    "test:jev": "node --test tests/jev_handler.test.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": { "ai": "7.0.111" }
+}

@@ -1,0 +1,129 @@
+{
+  "version": "redstone-computer-v1",
+  "minecraft_version": "1.21.1",
+  "data_bits": 4,
+  "instruction_bits": 6,
+  "storage_words": 8,
+  "encoding": "bits 5..4: 00 LOAD, 01 ADD, 10 OUT, 11 HALT; bits 3..0 unsigned operand",
+  "semantics": [
+    "LOAD n replaces A; ADD n sets A=(A+n) modulo 16; no carry register.",
+    "OUT copies A to latched O and emits one output event; OUT and HALT require operand 0.",
+    "HALT latches halted; further clock edges change no state until reset.",
+    "PC starts at 0, advances after non-HALT; HALT retains PC; no branches or wraparound.",
+    "Eight writable six-bit words; load only while reset held; unused words must be HALT=48.",
+    "Reset clears A, O, PC, halted and output-event strobe; preserves instruction storage.",
+    "STEP: high for 2 ticks, low for 198; one rising edge retires one instruction in 200 ticks.",
+    "STEP remains low during reset; hold reset 200 ticks, release and wait 200 before STEP.",
+    "No state changes without STEP except reset and the bounded settling after an edge.",
+    "Sample settled state at 200 ticks; no next edge before sampling; OUT strobe toggles per OUT.",
+    "O is four labeled lamps b3,b2,b1,b0 with weights 8,4,2,1; lit=1; persists until OUT/reset.",
+    "Expose labeled A, PC, halted, OUT strobe and all stored word bits for direct world probes."
+  ],
+  "build_min": [
+    0,
+    64,
+    0
+  ],
+  "build_max": [
+    95,
+    95,
+    95
+  ],
+  "permitted_blocks": [
+    "minecraft:stone",
+    "minecraft:glass",
+    "minecraft:redstone_wire",
+    "minecraft:redstone_torch",
+    "minecraft:redstone_wall_torch",
+    "minecraft:repeater",
+    "minecraft:comparator",
+    "minecraft:lever",
+    "minecraft:stone_button",
+    "minecraft:redstone_lamp",
+    "minecraft:redstone_block",
+    "minecraft:oak_sign",
+    "minecraft:oak_wall_sign"
+  ],
+  "construction_actions": [
+    "place",
+    "break",
+    "interact"
+  ],
+  "construction_rules": [
+    "Creative single-block placement/removal and normal use only, one target per primitive.",
+    "Direct placement is permitted if the inspected adapter supports it; all targets bounded.",
+    "No fill/clone/structure, commands, plugins, external computation or tick acceleration in circuit.",
+    "Movement/observation allowed but charged as primitives; harness reset is separate and recorded.",
+    "Whitelist applies to final blocks and action results; validate properties and effects live.",
+    "Freeze budgets before trial; stop at first exhausted limit, count failures and retries.",
+    "Planner and Jev calls both count, including retries; no uncounted repair subtrials."
+  ],
+  "world_rules": [
+    "Dedicated Java 1.21.1 creative superflat, seed 1600, structures off, peaceful.",
+    "Template: bedrock y=60, dirt y=61..62, grass y=63; build prism initially air.",
+    "Day time 6000, daylight/weather cycles off, clear weather, randomTickSpeed=0, 20 TPS target.",
+    "Before each trial restore identical template snapshot, player (48.5,64,98.5), yaw=180,pitch=0.",
+    "Empty inventory then one full stack of each permitted item (wall variants use base items).",
+    "Fresh conversation; no prior designs/notes; record snapshot hash and effective settings."
+  ],
+  "budgets": {
+    "wall_seconds": 3600,
+    "primitive_actions": 20000,
+    "planner_calls": 120,
+    "jev_calls": 1200,
+    "repair_rounds": 24,
+    "intention_actions": 256,
+    "intention_seconds": 60,
+    "program_steps": 8,
+    "program_game_ticks": 1600,
+    "program_wall_seconds": 120
+  },
+  "programs": [
+    {
+      "name": "ordinary_addition",
+      "words": [
+        3,
+        32,
+        21,
+        32,
+        48
+      ],
+      "expected_outputs": [
+        3,
+        8
+      ]
+    },
+    {
+      "name": "modular_addition",
+      "words": [
+        14,
+        32,
+        21,
+        32,
+        48
+      ],
+      "expected_outputs": [
+        14,
+        3
+      ]
+    }
+  ],
+  "public_module_checks": [
+    "Register: reset to 0; load each 0..15; hold for 400 ticks without STEP; reset again.",
+    "Arithmetic: (A,n)=(0,0),(0,15),(15,0),(15,1),(14,5),(7,8); check A=(A+n)%16 and O holds.",
+    "Storage: program all eight words, read every bit; reset preserves words; select addresses 0..7.",
+    "Output: OUT for each 0..15 lights matching lamps; LOAD/ADD preserve O; reset clears lamps."
+  ],
+  "independent_final_checks": [
+    "Trusted world reader, separate from planner/Jev claims, reads actual blocks and signal states.",
+    "Audit bounds/whitelist and declared probe map; missing or ambiguous probes fail closed.",
+    "Load program 1 plus HALT padding via declared programming controls; read back all 48 bits.",
+    "Reset and step; sample A, PC, O, halted and OUT strobe every retirement, compare full trace.",
+    "After HALT issue two more steps and require unchanged state; reset and check cleared state.",
+    "Load program 2 using only same programming controls, no hardware edits; repeat full checks.",
+    "Record before/after hardware block snapshots excluding declared program controls; require equality.",
+    "Add independent operand variations covering 0,15 and overflow; do not reveal order before final.",
+    "Require both public traces and all independent checks within budgets; missing evidence is failure.",
+    "Software oracle, model claims, HUD and video cannot establish Minecraft success."
+  ]
+}
