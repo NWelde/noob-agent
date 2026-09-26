@@ -5,16 +5,26 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from pydantic import ValidationError
+
 from noob_agent.models.client import ModelClient
-from noob_agent.redstone.actions import Actions, EffectMismatch
-from noob_agent.redstone.behavior import grade_module
-from noob_agent.redstone.jev import action_request, selected_action
-from noob_agent.redstone.modules import inspect_module
-from noob_agent.redstone.planner import PlannerContext, validate_intention
+from noob_agent.redstone.actions import Actions, EffectMismatch, InvalidBlockState
+from noob_agent.redstone.behavior import grade_module, required_recipes
+from noob_agent.redstone.jev import JevError, action_request, selected_action
+from noob_agent.redstone.modules import inspect_module, resolve_recipe
+from noob_agent.redstone.planner import (
+    PlannerContext,
+    validate_intention,
+)
+from noob_agent.redstone.provider_limits import (
+    JEV_HTTP_503_RETRIES_PER_SELECTION,
+    PLANNER_TIMEOUT_SECONDS,
+)
 from noob_agent.redstone.trial import CONTRACT_PATH, TrialManifest
 
 
@@ -24,6 +34,50 @@ class Evaluator(Protocol):
 
 class LoopLimit(RuntimeError):
     pass
+
+
+PUBLIC_MODULES = frozenset({"register", "arithmetic", "storage", "output"})
+FUNCTIONAL_BLOCKS = frozenset(
+    {
+        "minecraft:redstone_wire",
+        "minecraft:redstone_torch",
+        "minecraft:redstone_wall_torch",
+        "minecraft:repeater",
+        "minecraft:comparator",
+        "minecraft:lever",
+        "minecraft:stone_button",
+        "minecraft:redstone_lamp",
+    }
+)
+
+
+def _validation_field_reason(error: ValidationError) -> str:
+    """Return a bounded schema path and code, never untrusted input or error prose."""
+    first = error.errors(include_input=False, include_url=False)[0]
+    parts = first.get("loc", ())
+    safe_parts = []
+    for part in parts:
+        if type(part) is int and 0 <= part <= 1000:
+            safe_parts.append(str(part))
+        elif (
+            type(part) is str
+            and 1 <= len(part) <= 40
+            and part.isascii()
+            and all(char.isalnum() or char in "_-:" for char in part)
+        ):
+            safe_parts.append(part)
+        else:
+            return "Intention failed strict validation."
+    code = first.get("type")
+    if (
+        not safe_parts
+        or type(code) is not str
+        or not code.isascii()
+        or not all(char.islower() or char == "_" for char in code)
+    ):
+        return "Intention failed strict validation."
+    reason = f"Field {'.'.join(safe_parts)} failed {code}."
+    return reason if len(reason) <= 180 else "Intention failed strict validation."
 
 
 class TrialLoop:
@@ -43,20 +97,30 @@ class TrialLoop:
         jev: Evaluator,
         *,
         check: Callable[[Actions], dict[str, Any]] | None = None,
+        require_module_grading: bool = False,
+        jev_min_interval_seconds: float = 0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if "loop" in manifest.data or actions.used or actions.stopped:
             raise ValueError("Loop requires a fresh runtime; resumption is not supported")
         self.manifest, self.actions, self.planner, self.jev = manifest, actions, planner, jev
         self.contract = actions.contract
-        self.context = PlannerContext(self.contract)
+        self.context = PlannerContext(self.contract, require_module_grading=require_module_grading)
         self.clock, self.started = clock, clock()
         self.deadline = self.started + self.contract.budgets.wall_seconds
         self.intention_deadline: float | None = None
         self.intention_start = 0
         self.intention_max = self.contract.budgets.intention_actions
         self.checker = check
+        self.require_module_grading = require_module_grading
+        if not math.isfinite(jev_min_interval_seconds) or not 0 <= jev_min_interval_seconds <= 30:
+            raise ValueError("Invalid Jev call interval")
+        self.jev_min_interval_seconds = jev_min_interval_seconds
+        self.last_jev_started: float | None = None
         self.used = {"planner_calls": 0, "jev_calls": 0, "repair_rounds": 0}
+        self.stone_placements = 0
+        self.signal_control_placements = 0
+        self.placed_cells: dict[tuple[int, ...], tuple[str, tuple[tuple[str, Any], ...]]] = {}
         self.running = False
         self.manifest.data.update(
             contract={
@@ -68,6 +132,12 @@ class TrialLoop:
             loop_budget=self.used,
             loop={"status": "ready"},
         )
+        if require_module_grading:
+            self.manifest.data["milestone_4"] = {
+                "status": "pending",
+                "construction_epoch": 0,
+                "modules": {},
+            }
         self.actions.guard = self.guard
         self.manifest.save()
 
@@ -98,6 +168,7 @@ class TrialLoop:
             raise ValueError("A trial loop cannot be reused")
         self.running = True
         repair = False
+        validation_retries = 0
         try:
             while True:
                 self.intention_deadline = None
@@ -106,16 +177,133 @@ class TrialLoop:
                 request = self.context.request(observation)
                 self.charge("planner_calls")
                 event = self.manifest.attempt("planner_call", request.model_dump(mode="json"))
-                async with asyncio.timeout(min(30, self.remaining())):
+                async with asyncio.timeout(min(PLANNER_TIMEOUT_SECONDS, self.remaining())):
                     response = await self.planner.complete(request)
                 # Public output and identity/usage only; omit separate private reasoning.
                 self.manifest.observed(
                     event, response.model_dump(mode="json", exclude={"reasoning"})
                 )
                 self.remaining()
-                intention = validate_intention(json.loads(response.text), self.contract)
+                try:
+                    intention = validate_intention(json.loads(response.text), self.contract)
+                    if self.require_module_grading:
+                        for offer in intention.actions:
+                            if offer.action != "place" or offer.block is None:
+                                continue
+                            cell = tuple(offer.position)
+                            state = (offer.block, tuple(sorted((offer.properties or {}).items())))
+                            if self.placed_cells.get(cell) == state:
+                                raise ValueError(
+                                    "Block already verified at x "
+                                    f"{cell[0]} y {cell[1]} z {cell[2]}; "
+                                    "change the circuit or request grading."
+                                )
+                        minimum_actions = sum(
+                            {"place": 5, "break": 4, "interact": 4, "observe": 1}[offer.action]
+                            for offer in intention.actions
+                        )
+                        if intention.max_actions < minimum_actions:
+                            raise ValueError(
+                                "max_actions cannot cover offered actions and readbacks; "
+                                "omit it for default 256 or offer fewer actions."
+                            )
+                        if (
+                            self.signal_control_placements == 0
+                            and intention.actions
+                            and any(offer.action == "place" for offer in intention.actions)
+                            and not any(
+                                offer.action == "place" and offer.block in FUNCTIONAL_BLOCKS
+                                for offer in intention.actions
+                            )
+                        ):
+                            raise ValueError(
+                                "No signal or control block exists yet; include a lever, "
+                                "wire, torch, repeater, comparator, or lamp with support."
+                            )
+                        declaration = intention.module_inspection
+                        if declaration is not None:
+                            recipe_help = {
+                                "register": "recipe_templates.load for load:0..15",
+                                "arithmetic": "recipe_templates.load and add plus recipes.out",
+                                "storage": "recipe_templates.address and write",
+                                "output": "recipe_templates.load and add plus recipes.out",
+                            }
+                            for key in sorted(required_recipes(declaration.module)):
+                                try:
+                                    resolve_recipe(declaration, key)
+                                except ValueError as error:
+                                    raise ValueError(
+                                        f"Missing {declaration.module} recipe {key}; "
+                                        f"provide {recipe_help[declaration.module]}"
+                                    ) from error
+                except json.JSONDecodeError as error:
+                    if response.finish_reason == "length":
+                        reason = "Response reached its output token cap before complete JSON."
+                    else:
+                        reason = (
+                            "Response was not one complete JSON intention "
+                            f"(line {error.lineno}, column {error.colno})."
+                        )
+                except ValidationError as error:
+                    reason = _validation_field_reason(error)
+                except ValueError as error:
+                    raw_reason = str(error)
+                    if raw_reason == "Target outside inclusive build bounds":
+                        raw_reason = (
+                            "Target outside inclusive build bounds; use x=0..95, "
+                            "y=64..95, z=0..95 for every offered action."
+                        )
+                    reason = (
+                        raw_reason
+                        if raw_reason
+                        and len(raw_reason) <= 180
+                        and raw_reason.isascii()
+                        and all(char.isalnum() or char in " _.,:;()/-'" for char in raw_reason)
+                        else "Intention failed strict validation."
+                    )
+                else:
+                    reason = ""
+                if reason:
+                    validation = {
+                        "planner_call_sequence": event,
+                        "reason": reason,
+                        "response_sha256": hashlib.sha256(response.text.encode()).hexdigest(),
+                        "response_characters": len(response.text),
+                    }
+                    retry_scheduled = validation_retries < 2
+                    validation_event = self.manifest.attempt("planner_validation", validation)
+                    self.manifest.observed(
+                        validation_event,
+                        {
+                            "accepted": False,
+                            "jev_dispatched": False,
+                            "world_actions": 0,
+                            "retry_scheduled": retry_scheduled,
+                        },
+                    )
+                    if not retry_scheduled:
+                        raise ValueError("Repeated planner validation failure")
+                    validation_retries += 1
+                    instruction = (
+                        "Return a complete compact JSON intention with at most 8 actions, "
+                        "one short summary, brief criteria, compact recipe_templates, "
+                        "and no explanatory prose. No actions were dispatched."
+                        if response.finish_reason == "length"
+                        else "Return a corrected complete intention. No actions were dispatched."
+                    )
+                    self.context.feedback(
+                        {
+                            "intention_rejected": reason,
+                            "instruction": instruction,
+                        }
+                    )
+                    repair = True
+                    continue
+                validation_retries = 0
                 self.manifest.data["planner_intentions"].append(intention.model_dump(mode="json"))
                 self.manifest.save()
+                if self.require_module_grading and intention.request_grading:
+                    self.context.grading_enabled = True
                 self.intention_deadline = self.clock() + intention.max_seconds
                 self.intention_start, self.intention_max = self.actions.used, intention.max_actions
                 offers = {action.id: action for action in intention.actions}
@@ -136,15 +324,57 @@ class TrialLoop:
                         },
                         criteria,
                     )
-                    self.charge("jev_calls")
-                    event = self.manifest.attempt("jev_call", jev_request)
-                    answer = self.jev.evaluate(jev_request, timeout=min(30, self.remaining()))
-                    self.manifest.observed(event, answer)
+                    gateway_retries = 0
+                    while True:
+                        if self.last_jev_started is not None:
+                            delay = self.jev_min_interval_seconds - (
+                                self.clock() - self.last_jev_started
+                            )
+                            if delay > 0:
+                                if delay >= self.remaining():
+                                    raise LoopLimit("Jev pacing exceeds intention time")
+                                await asyncio.sleep(delay)
+                        self.charge("jev_calls")
+                        event = self.manifest.attempt("jev_call", jev_request)
+                        try:
+                            self.last_jev_started = self.clock()
+                            answer = self.jev.evaluate(
+                                jev_request, timeout=min(30, self.remaining())
+                            )
+                        except JevError as error:
+                            if (error.diagnostic or {}).get(
+                                "statusCode"
+                            ) != 503 or gateway_retries >= JEV_HTTP_503_RETRIES_PER_SELECTION:
+                                raise
+                            gateway_retries += 1
+                            self.manifest.observed(
+                                event,
+                                {"provider_error": error.diagnostic, "retry_scheduled": True},
+                            )
+                            continue
+                        self.manifest.observed(event, answer)
+                        break
                     self.remaining()
                     choice = selected_action(answer, jev_request)
                     if choice == "__finish__":
                         break
                     offer = offers.pop(choice)
+                    if self.require_module_grading and offer.action != "observe":
+                        milestone = self.manifest.data["milestone_4"]
+                        prior_modules = sorted(milestone["modules"])
+                        if prior_modules:
+                            invalidation = self.manifest.attempt(
+                                "milestone_4_invalidation",
+                                {"action_id": choice, "modules": prior_modules},
+                            )
+                            self.manifest.observed(
+                                invalidation,
+                                {"reason": "construction_action_attempted"},
+                            )
+                        milestone["construction_epoch"] += 1
+                        milestone["modules"] = {}
+                        milestone["status"] = "pending"
+                        self.manifest.save()
                     try:
                         actual = (
                             self.actions.observe(offer.position)
@@ -154,6 +384,18 @@ class TrialLoop:
                             )
                         )
                         result: dict[str, Any] = {"id": choice, "result": actual}
+                        if offer.action == "place" and actual.get("effect_verified") is True:
+                            assert offer.block is not None
+                            self.placed_cells[tuple(offer.position)] = (
+                                offer.block,
+                                tuple(sorted((offer.properties or {}).items())),
+                            )
+                            if offer.block == "minecraft:stone":
+                                self.stone_placements += 1
+                            elif offer.block in FUNCTIONAL_BLOCKS:
+                                self.signal_control_placements += 1
+                        elif offer.action in {"break", "interact"}:
+                            self.placed_cells.pop(tuple(offer.position), None)
                     except EffectMismatch:
                         # Actions already journaled the actual mismatching before/after state.
                         result = {
@@ -165,6 +407,9 @@ class TrialLoop:
                                 if event["kind"] == "bounded_action"
                             ),
                         }
+                        repair = True
+                    except InvalidBlockState:
+                        result = {"id": choice, "rejected": "invalid_block_state"}
                         repair = True
                     results.append(result)
                     event = self.manifest.attempt("action_feedback", result)
@@ -197,6 +442,25 @@ class TrialLoop:
                         else inspect_module(self.actions, intention.module_inspection)
                     )
                     self.manifest.observed(event, inspection)
+                    if self.require_module_grading:
+                        milestone = self.manifest.data["milestone_4"]
+                        module = intention.module_inspection.module
+                        milestone["modules"].pop(module, None)
+                        if (
+                            not repair
+                            and inspection.get("scope") == "public_module_behavior"
+                            and inspection.get("complete") is True
+                            and inspection.get("behavioral_passed") is True
+                        ):
+                            milestone["modules"][module] = {
+                                "construction_epoch": milestone["construction_epoch"],
+                                "grader_event": event,
+                                "check_count": len(inspection["checks"]),
+                            }
+                        if set(milestone["modules"]) == PUBLIC_MODULES:
+                            milestone["status"] = "checks_passed"
+                        if milestone["status"] != "checks_passed":
+                            self.context.grading_enabled = False
                     if not behavioral:
                         self.manifest.data["checks"].append(inspection)
                     self.manifest.save()
@@ -208,9 +472,32 @@ class TrialLoop:
                             and inspection.get("behavioral_passed") is False
                         )
                     )
+                elif self.require_module_grading and not intention.request_grading:
+                    # The planner asked for the full declaration schema but chose
+                    # another build turn; return to the bounded build schema.
+                    self.context.grading_enabled = False
                 observation = {"results": results, "check": public, "module_inspection": inspection}
+                if self.require_module_grading:
+                    milestone = self.manifest.data["milestone_4"]
+                    observation["milestone_4"] = {
+                        "construction_epoch": milestone["construction_epoch"],
+                        "passed_modules": sorted(milestone["modules"]),
+                        "remaining_modules": sorted(PUBLIC_MODULES - milestone["modules"].keys()),
+                    }
+                    observation["construction_progress"] = {
+                        "stone_placements": self.stone_placements,
+                        "signal_control_placements": self.signal_control_placements,
+                    }
                 self.context.feedback(observation)
                 repair = repair or public.get("passed") is False
+                if (
+                    self.require_module_grading
+                    and self.manifest.data["milestone_4"]["status"] == "checks_passed"
+                    and not repair
+                ):
+                    self.manifest.data["loop"] = {"status": "public_modules_passed"}
+                    self.manifest.save()
+                    break
                 if (
                     public.get("complete") is True
                     and public.get("passed") is True
@@ -220,9 +507,13 @@ class TrialLoop:
                     self.manifest.data["loop"] = {"status": "checkpoint_complete"}
                     break
         except BaseException as error:
-            self.manifest.data["errors"].append(
-                {"stage": "trial_loop", "type": type(error).__name__}
-            )
+            recorded_error: dict[str, Any] = {
+                "stage": "trial_loop",
+                "type": type(error).__name__,
+            }
+            if isinstance(error, JevError) and error.diagnostic:
+                recorded_error["provider_diagnostic"] = error.diagnostic
+            self.manifest.data["errors"].append(recorded_error)
             self.manifest.data["loop"] = {"status": "stopped", "reason": type(error).__name__}
             if not isinstance(error, Exception):
                 raise
@@ -234,9 +525,16 @@ class TrialLoop:
                 "stopped": True,
                 "reason": self.manifest.data["loop"]["status"],
             }
-            self.manifest.finish_incomplete(
+            reasons = (
                 [
+                    "All four public modules passed on one construction epoch; "
+                    "trusted final reset still required for milestone 4 acceptance",
+                    "Full-machine independent grading and recording pending; model success false",
+                ]
+                if self.manifest.data.get("milestone_4", {}).get("status") == "checks_passed"
+                else [
                     "Public checkpoint only; real-provider and full-machine verification pending",
                     "Recording pending; no model success or milestone acceptance",
                 ]
             )
+            self.manifest.finish_incomplete(reasons)
