@@ -21,7 +21,15 @@ from noob_agent.redstone.modules import Control, ModuleDeclaration, validate_dec
 from noob_agent.redstone.rcon import SERVER_DIRECTORY, RconClient
 from noob_agent.redstone.trial import CommandTransport, TrialManifest
 
-TEMPLATES = Path("scenarios/minecraft/redstone-grader")
+
+class ControlEvidenceMismatch(ValueError):
+    """A trusted world read completed and disproved a declared control state."""
+
+    def __init__(self, control_id: str, reason: str, powered: bool | None = None) -> None:
+        super().__init__(reason)
+        self.control_id = control_id
+        self.reason = reason
+        self.powered = powered
 
 
 class GraderControl:
@@ -158,7 +166,7 @@ class GraderControl:
                         f"minecraft:lever[{geometry},powered={str(powered).lower()}]",
                     ):
                         return control, geometry, powered
-        raise ValueError("Declared control is not a lever")
+        raise ControlEvidenceMismatch(control_id, "declared lever missing or mismatched")
 
     def set_control(self, control_id: str, powered: bool) -> dict[str, Any]:
         def apply() -> dict[str, Any]:
@@ -179,48 +187,6 @@ class GraderControl:
 
         return self._run("set_control", {"control": control_id, "powered": powered}, apply)
 
-    def _reserve_ticks(self, ticks: int) -> None:
-        if type(ticks) is not int or not 1 <= ticks <= 200:
-            raise ValueError("Wait must be 1..200 server ticks")
-        if self.ticks + ticks > self.max_ticks:
-            self.actions.stopped = True
-            self._save_budget()
-            raise ActionLimit("Grading tick budget exhausted")
-        self.ticks += ticks
-        self._save_budget()
-
-    def _schedule(self, start: str, finish: str, ticks: int) -> dict[str, Any]:
-        # Unique pack avoids replacing any existing pack or pending schedule.
-        directory = SERVER_DIRECTORY / "redstone-trials/datapacks" / self.namespace
-        functions = directory / "data" / self.namespace / "function"
-        functions.mkdir(parents=True, exist_ok=True)
-        (directory / "pack.mcmeta").write_text(
-            json.dumps({"pack": {"pack_format": 48, "description": "Harness timing only"}})
-        )
-        (functions / "start.mcfunction").write_text(start)
-        (functions / "finish.mcfunction").write_text(finish)
-        evidence = self.actions.manifest.path.parent / self.namespace / str(self.operations)
-        evidence.mkdir(parents=True, exist_ok=False)
-        (evidence / "start.mcfunction").write_text(start)
-        (evidence / "finish.mcfunction").write_text(finish)
-        self._command("reload", reload_connection=True)
-        self._command(f"scoreboard objectives add {self.objective} dummy")
-        self._command(f"function {self.namespace}:start")
-        deadline = time.monotonic() + 20
-        try:
-            while self._score("done") != 1:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("Server schedule deadline exceeded")
-                time.sleep(0.05)  # Polling only; never the stimulus clock.
-            result = {name: self._score(name) for name in ("start", "end")}
-            result["elapsed_server_ticks"] = result["end"] - result["start"]
-            if result["elapsed_server_ticks"] != ticks:
-                raise RuntimeError("Server tick interval mismatch")
-            return result
-        except BaseException:
-            self.actions.stop_unknown()
-            raise
-
     def _score(self, name: str) -> int:
         response = self._command(f"scoreboard players get {name} {self.objective}")
         match = re.fullmatch(rf"{name} has (-?\d+) \[{self.objective}\]", response)
@@ -229,34 +195,20 @@ class GraderControl:
         return int(match[1])
 
     def pulse_step(self) -> dict[str, Any]:
-        def pulse() -> dict[str, Any]:
-            control_id = next(c.id for c in self.declaration.controls if c.role == "step")
-            control, geometry, powered = self._control(control_id)
-            if powered:
-                raise ValueError("STEP must begin low")
-            self._reserve_ticks(2)
-            fields = {
-                "position": " ".join(map(str, control.position)),
-                "geometry": geometry,
-                "namespace": self.namespace,
-                "objective": self.objective,
-            }
-            result = self._schedule(
-                (TEMPLATES / "start.mcfunction.template").read_text().format(**fields),
-                (TEMPLATES / "finish.mcfunction.template").read_text().format(**fields),
-                2,
-            )
-            result.update(on=self._score("on"), off=self._score("off"))
-            if (
-                result["on"] != 1
-                or result["off"] != 1
-                or not self._matches(control.position, f"minecraft:lever[{geometry},powered=false]")
-            ):
-                self.actions.stop_unknown()
-                raise RuntimeError("STEP effect unverified")
-            return result
-
-        return self._run("pulse_step", {}, pulse)
+        """Two-tick pulse through the journaled timeline and cleanup lifecycle."""
+        result = self.timeline([], cycles=1, pulse_only=True)
+        timestamps = result["timestamps"]
+        effects = result["control_effects"]
+        step_id = next(c.id for c in self.declaration.controls if c.role == "step")
+        on = any(e["control"] == step_id and e["level"] for e in effects)
+        off = any(e["control"] == step_id and not e["level"] for e in effects)
+        return {
+            "start": timestamps["s0"],
+            "end": timestamps["s2"],
+            "elapsed_server_ticks": timestamps["s2"] - timestamps["s0"],
+            "on": int(on),
+            "off": int(off),
+        }
 
     def timeline(
         self,
@@ -265,16 +217,26 @@ class GraderControl:
         cycles: int = 1,
         sample_only: bool = False,
         program_id: str | None = None,
+        pulse_only: bool = False,
+        cycle_recipes: list[list[dict[str, Any]]] | None = None,
+        sample_cycles: list[int] | None = None,
+        fail_on_missing_probe: bool = True,
     ) -> dict[str, Any]:
-        """One server timeline: declarative preparation then 1..8 exact cycles.
+        """One server timeline: bounded preparation and clock or sample cycles.
 
         Snapshots are raw observed wire powers/lamp levels, never expected results.
+        Optional cycle_recipes supplies one bounded preparation recipe per cycle;
+        ordinary recipe preparation still runs once before all cycles. Sample-only
+        cycle recipes capture each settled checkpoint without issuing STEP.
+        sample_cycles can mark selected cycle indexes as sample-only inside a
+        clocked timeline; each index still needs its own bounded cycle recipe.
         Preparation and sample-only holds consume the shared aggregate allowance.
         Optional program IDs also retain eight-step/1600-tick/120-second deadlines
         across calls and instances; preparation is outside program execution ticks.
         """
 
         def run() -> dict[str, Any]:
+            operation_started = time.monotonic()
             if (
                 self.actions.manifest.data.get("timeline_resources", {}).get("state", "clean")
                 != "clean"
@@ -282,33 +244,64 @@ class GraderControl:
                 raise ValueError("Pending timeline resources require explicit recovery")
             if type(sample_only) is not bool:
                 raise ValueError("Invalid sample mode")
+            if type(pulse_only) is not bool:
+                raise ValueError("Invalid pulse mode")
+            if type(fail_on_missing_probe) is not bool:
+                raise ValueError("Invalid missing-probe mode")
+            if pulse_only and (sample_only or cycles != 1 or program_id is not None):
+                raise ValueError("Pulse-only timelines require one non-program cycle")
             if sample_only and program_id is not None:
                 raise ValueError("Program timelines require clock cycles")
             if type(cycles) is not int or not 1 <= cycles <= 8:
                 raise ValueError("Cycles must be 1..8")
-            if type(recipe) is not list or len(recipe) > 128:
-                raise ValueError("Recipe must contain at most 128 operations")
+            if type(recipe) is not list or len(recipe) > 1027:
+                raise ValueError("Recipe must contain at most 1027 operations")
+            if cycle_recipes is not None:
+                if (
+                    type(cycle_recipes) is not list
+                    or pulse_only
+                    or len(cycle_recipes) != cycles
+                    or any(type(item) is not list or len(item) > 129 for item in cycle_recipes)
+                    or recipe
+                ):
+                    raise ValueError("Cycle recipes require one bounded recipe per cycle")
+                recipes = cycle_recipes
+            else:
+                recipes = [recipe, *([[] for _ in range(cycles - 1)])]
+            if sample_cycles is not None and (
+                type(sample_cycles) is not list
+                or sample_only
+                or pulse_only
+                or program_id is not None
+                or cycle_recipes is None
+                or any(type(index) is not int or not 0 <= index < cycles for index in sample_cycles)
+                or len(set(sample_cycles)) != len(sample_cycles)
+            ):
+                raise ValueError("Invalid mixed sample cycles")
+            sample_indexes = set(sample_cycles or [])
+            clock_cycles = 0 if sample_only else cycles - len(sample_indexes)
             controls = {c.id: c for c in self.declaration.controls}
-            duration = 0 if sample_only else 200 * cycles
-            for operation in recipe:
-                if type(operation) is not dict:
-                    raise ValueError("Invalid recipe operation")
-                if set(operation) == {"wait"}:
-                    wait = operation["wait"]
-                    if type(wait) is not int or not 1 <= wait <= 200:
-                        raise ValueError("Wait must be 1..200 server ticks")
-                    duration += wait
-                elif set(operation) == {"control", "level"}:
-                    control_id = operation["control"]
-                    if (
-                        type(control_id) is not str
-                        or control_id not in controls
-                        or controls[control_id].role == "step"
-                        or type(operation["level"]) is not bool
-                    ):
-                        raise ValueError("Invalid declared level")
-                else:
-                    raise ValueError("Invalid recipe operation")
+            duration = 2 if pulse_only else 200 * clock_cycles
+            for cycle_recipe in recipes:
+                for operation in cycle_recipe:
+                    if type(operation) is not dict:
+                        raise ValueError("Invalid recipe operation")
+                    if set(operation) == {"wait"}:
+                        wait = operation["wait"]
+                        if type(wait) is not int or not 1 <= wait <= 200:
+                            raise ValueError("Wait must be 1..200 server ticks")
+                        duration += wait
+                    elif set(operation) == {"control", "level"}:
+                        control_id = operation["control"]
+                        if (
+                            type(control_id) is not str
+                            or control_id not in controls
+                            or controls[control_id].role == "step"
+                            or type(operation["level"]) is not bool
+                        ):
+                            raise ValueError("Invalid declared level")
+                    else:
+                        raise ValueError("Invalid recipe operation")
             if self.ticks + duration > self.max_ticks:
                 self.actions.stopped = True
                 self._save_budget()
@@ -335,16 +328,22 @@ class GraderControl:
             self.ticks += duration
             self._save_budget()
             step_id = next(c.id for c in controls.values() if c.role == "step")
-            used = {step_id} | {o["control"] for o in recipe if "control" in o}
+            used = {step_id} | {
+                operation["control"]
+                for cycle_recipe in recipes
+                for operation in cycle_recipe
+                if "control" in operation
+            }
             geometry = {}
             for control_id in sorted(used):
                 _, shape, powered = self._control(control_id)
                 if control_id == step_id and powered:
-                    raise ValueError("STEP must begin low")
+                    raise ControlEvidenceMismatch(control_id, "STEP must begin low", powered)
                 geometry[control_id] = shape
             frames: dict[int, list[str]] = {0: []}
             scores: list[str] = []
             snapshots: list[dict[str, Any]] = []
+            control_effects: list[dict[str, Any]] = []
             offset = 0
 
             def frame(tick: int) -> list[str]:
@@ -356,6 +355,7 @@ class GraderControl:
                 state = f"minecraft:lever[{geometry[control_id]},powered={str(powered).lower()}]"
                 name = f"x{len(scores)}"
                 scores.append(name)
+                control_effects.append({"control": control_id, "level": powered, "score": name})
                 frame(tick).extend(
                     [
                         f"execute if block {pos} minecraft:lever[{geometry[control_id]}] "
@@ -384,28 +384,55 @@ class GraderControl:
                             )
                 snapshots.append({"offset": tick, "phase": phase, "scores": names})
 
-            for operation in recipe:
-                if "wait" in operation:
-                    offset += operation["wait"]
-                    frame(offset)
-                else:
-                    level(offset, operation["control"], operation["level"])
             if sample_only:
-                snapshot(offset, "settled")
-            for _ in range(0 if sample_only else cycles):
+                if cycle_recipes is None:
+                    for operation in recipe:
+                        if "wait" in operation:
+                            offset += operation["wait"]
+                            frame(offset)
+                        else:
+                            level(offset, operation["control"], operation["level"])
+                    snapshot(offset, "settled")
+                else:
+                    for cycle_recipe in recipes:
+                        for operation in cycle_recipe:
+                            if "wait" in operation:
+                                offset += operation["wait"]
+                                frame(offset)
+                            else:
+                                level(offset, operation["control"], operation["level"])
+                        snapshot(offset, "settled")
+            for cycle_index in range(0 if sample_only else cycles):
+                for operation in recipes[cycle_index]:
+                    if "wait" in operation:
+                        offset += operation["wait"]
+                        frame(offset)
+                    else:
+                        level(offset, operation["control"], operation["level"])
+                if cycle_index in sample_indexes:
+                    snapshot(offset, "settled")
+                    continue
                 level(offset, step_id, True)
                 snapshot(offset + 2, "pulse_end")
                 level(offset + 2, step_id, False)
-                snapshot(offset + 200, "settled")
-                offset += 200
+                if pulse_only:
+                    offset += 2
+                else:
+                    snapshot(offset + 200, "settled")
+                    offset += 200
             functions: dict[str, str] = {}
             ticks = sorted(frames)
             for index, tick in enumerate(ticks):
                 name = f"s{tick}"
                 scores.append(name)
-                lines = [
+                lines = []
+                if index == 0:
+                    lines.append(
+                        f"data modify storage {self.namespace}:timeline results set value {{}}"
+                    )
+                lines.append(
                     f"execute store result score {name} {self.objective} run time query gametime"
-                ]
+                )
                 lines += frames[tick]
                 if index + 1 < len(ticks):
                     following = ticks[index + 1]
@@ -416,18 +443,46 @@ class GraderControl:
                 else:
                     lines.append(f"scoreboard players set done {self.objective} 1")
                 functions[f"t{tick}"] = "\n".join(lines) + "\n"
+            terminal = f"t{ticks[-1]}"
+            terminal_lines = functions[terminal].splitlines()
+            terminal_lines[-1:-1] = [
+                f"execute store result storage {self.namespace}:timeline results.{name} int 1 "
+                f"run scoreboard players get {name} {self.objective}"
+                for name in scores
+            ]
+            functions[terminal] = "\n".join(terminal_lines) + "\n"
             step_pos = " ".join(map(str, controls[step_id].position))
             functions["abort"] = (
                 f"execute if block {step_pos} minecraft:lever[{geometry[step_id]}] "
                 f"run setblock {step_pos} minecraft:lever[{geometry[step_id]},powered=false]\n"
             )
             values = self._execute_timeline(functions, duration, scores)
+            if fail_on_missing_probe and any(
+                values[name] < 0
+                for item in snapshots
+                for names in item["scores"].values()
+                for name in names
+            ):
+                raise ValueError("Timeline probe missing or mismatched")
             if program_id is not None and time.time() - budget["started"] > 120:
                 self.actions.stop_unknown()
                 raise ActionLimit("Program wall deadline exhausted")
+            elapsed = time.monotonic() - operation_started
             return {
                 "duration": duration,
-                "cycles": 0 if sample_only else cycles,
+                "nominal_seconds": duration / 20,
+                "elapsed_seconds": elapsed,
+                "overhead_seconds": max(0.0, elapsed - duration / 20),
+                "cycles": clock_cycles,
+                "pulse_only": pulse_only,
+                "control_effects": [
+                    {
+                        "control": effect["control"],
+                        "level": effect["level"],
+                        "verified": values[effect["score"]] == 1,
+                    }
+                    for effect in control_effects
+                ],
                 "timestamps": {key: val for key, val in values.items() if key.startswith("s")},
                 "snapshots": [
                     {
@@ -448,6 +503,10 @@ class GraderControl:
                 "cycles": cycles,
                 "sample_only": sample_only,
                 "program_id": program_id,
+                "pulse_only": pulse_only,
+                "cycle_recipes": cycle_recipes,
+                "sample_cycles": sample_cycles,
+                "fail_on_missing_probe": fail_on_missing_probe,
             },
             run,
         )
@@ -471,7 +530,11 @@ class GraderControl:
             "namespace": self.namespace,
             "functions": list(functions),
             "state": "pending",
-            "cleanup_command_limit": len(functions) + 3,
+            "cleanup_command_limit": len(functions)
+            + 4
+            + int(isinstance(self.actions.transport, RconClient)),
+            "storage": f"{self.namespace}:timeline",
+            "sprint_state": "not_started",
         }
         self.actions.manifest.data["timeline_resources"] = lifecycle
         self.actions.manifest.save()
@@ -488,20 +551,42 @@ class GraderControl:
             self._command(f"scoreboard objectives add {self.objective} dummy")
             self._command(f"scoreboard players set done {self.objective} 0")
             self._command(f"function {self.namespace}:t0")
+            if isinstance(self.actions.transport, RconClient) and duration > 0:
+                # Sprint executes the same game ticks and scheduled functions as
+                # normal play. Record intent before delivery so recovery stops
+                # a sprint whose command outcome became uncertain.
+                lifecycle["sprint_state"] = "starting"
+                self.actions.manifest.save()
+                response = self._command(f"tick sprint {duration}t")
+                if response != "The game is sprinting":
+                    raise RuntimeError("Server did not confirm timeline sprint")
+                lifecycle["sprint_state"] = "started"
+                self.actions.manifest.save()
             deadline = time.monotonic() + duration / 20 + 15
             while self._score("done") != 1:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Server timeline deadline exceeded")
                 time.sleep(0.1)
-            values = {name: self._score(name) for name in scores}
+            if isinstance(self.actions.transport, RconClient):
+                response = self._command(f"data get storage {self.namespace}:timeline results")
+                values: dict[str, int] = {}
+                for name, value in re.findall(
+                    r"(?<![A-Za-z0-9_])([bxs]\d+):\s*(-?\d+)(?:[bslfd])?(?![A-Za-z0-9_])",
+                    response,
+                ):
+                    if name in values and values[name] != int(value):
+                        raise RuntimeError("Conflicting timeline score readback")
+                    values[name] = int(value)
+                if set(values) != set(scores):
+                    raise RuntimeError("Incomplete timeline score readback")
+            else:
+                values = {name: self._score(name) for name in scores}
             origin = values["s0"]
             for name, value in values.items():
                 if name.startswith("s") and value != origin + int(name[1:]):
                     raise RuntimeError("Server timeline interval mismatch")
                 if name.startswith("x") and value != 1:
                     raise RuntimeError("Timeline control effect unverified")
-                if name.startswith("b") and value < 0:
-                    raise ValueError("Timeline probe missing or mismatched")
             return values
         except BaseException:
             self.actions.stop_unknown()
@@ -510,18 +595,8 @@ class GraderControl:
             cleanup_timeline(self.actions.manifest, self.actions.transport)
 
     def wait_ticks(self, ticks: int) -> dict[str, Any]:
-        def wait() -> dict[str, Any]:
-            self._reserve_ticks(ticks)
-            return self._schedule(
-                f"scoreboard players set done {self.objective} 0\n"
-                f"execute store result score start {self.objective} run time query gametime\n"
-                f"schedule function {self.namespace}:finish {ticks}t replace\n",
-                f"execute store result score end {self.objective} run time query gametime\n"
-                f"scoreboard players set done {self.objective} 1\n",
-                ticks,
-            )
-
-        return self._run("wait_ticks", {"ticks": ticks}, wait)
+        """Compatibility adapter using journaled sample-only timelines."""
+        return self.timeline([{"wait": ticks}], sample_only=True)
 
 
 def run_control_proof() -> Any:
@@ -583,14 +658,16 @@ def run_control_proof() -> Any:
                 checks["far_power"] = grader.probe("a", 3)
                 checks["far_off"] = grader.set_control("far_input", False)
                 checks["step"] = grader.pulse_step()
-                checks["settle"] = grader.wait_ticks(198)
                 checks["final"] = [grader.probe("a", i) for i in range(4)]
                 grader._command("setblock 92 64 95 minecraft:air")
                 checks["rejections"] = []
                 failures: tuple[tuple[str, Callable[[], Any]], ...] = (
                     ("undeclared", lambda: grader.set_control("unknown", True)),
                     ("step_level", lambda: grader.set_control("step", True)),
-                    ("oversize_wait", lambda: grader.wait_ticks(201)),
+                    (
+                        "oversize_wait",
+                        lambda: grader.wait_ticks(201),
+                    ),
                     ("missing_distant_lever", lambda: grader.set_control("far_input", True)),
                 )
                 for label, call in failures:
@@ -639,14 +716,16 @@ def run_control_proof() -> Any:
 def cleanup_timeline(manifest: TrialManifest, transport: CommandTransport) -> None:
     """Idempotent bounded recovery, permitted even after the trial runtime stops.
 
-    Recovery only cancels schedules and removes this timeline's objective/pack.
-    It does not resume grading or replenish any budget. The retained abort
-    function returns the declared STEP low before its pack is removed.
+    Recovery first stops a possibly active sprint, then cancels schedules and
+    removes this timeline's objective, score storage and pack. It does not
+    resume grading or replenish any budget. The retained abort function returns
+    the declared STEP low before its pack is removed.
     """
     resource = manifest.data.get("timeline_resources")
     if not resource or resource["state"] == "clean":
         return
     namespace, functions = resource["namespace"], resource["functions"]
+    storage = resource.get("storage")
     if not re.fullmatch(r"ng[0-9a-f]{12}", namespace) or (
         type(functions) is not list
         or len(functions) > 153
@@ -655,6 +734,11 @@ def cleanup_timeline(manifest: TrialManifest, transport: CommandTransport) -> No
         )
     ):
         raise ValueError("Invalid timeline recovery resource")
+    if storage is not None and storage != f"{namespace}:timeline":
+        raise ValueError("Invalid timeline storage recovery resource")
+    sprint_state = resource.get("sprint_state", "not_started")
+    if sprint_state not in ("not_started", "starting", "started"):
+        raise ValueError("Invalid timeline sprint recovery resource")
 
     def command(client: CommandTransport, text: str) -> None:
         event = manifest.attempt("timeline_cleanup", {"command": text})
@@ -666,15 +750,23 @@ def cleanup_timeline(manifest: TrialManifest, transport: CommandTransport) -> No
         # New connection for recovery from a possibly broken runtime connection.
         if isinstance(transport, RconClient):
             with RconClient.dedicated() as client:
+                if sprint_state != "not_started":
+                    command(client, "tick sprint stop")
                 for name in functions:
                     command(client, f"schedule clear {namespace}:{name}")
                 command(client, f"function {namespace}:abort")
                 command(client, f"scoreboard objectives remove {namespace}")
+                if storage:
+                    command(client, f"data remove storage {storage} results")
         else:
+            if sprint_state != "not_started":
+                command(transport, "tick sprint stop")
             for name in functions:
                 command(transport, f"schedule clear {namespace}:{name}")
             command(transport, f"function {namespace}:abort")
             command(transport, f"scoreboard objectives remove {namespace}")
+            if storage:
+                command(transport, f"data remove storage {storage} results")
         directory = SERVER_DIRECTORY / "redstone-trials/datapacks" / namespace
         if directory.exists():
             shutil.rmtree(directory)
@@ -703,27 +795,46 @@ def recover_timeline(path: Path) -> TrialManifest:
 
 
 def run_timeline_proof() -> TrialManifest:
-    """Temporary dust/lever timing fixture, not a module or model success."""
+    """Storage-scale probe and lever fixture, not a module or model success."""
     from noob_agent.redstone.trial import RUN_DIRECTORY
 
     manifest = TrialManifest(RUN_DIRECTORY)
     manifest.data["kind"] = "server_timeline_proof"
     positions = [[94, 64, 95], [93, 64, 95], [1, 64, 0], [2, 64, 0]]
+    isolated_positions = [
+        [x, 64, z]
+        for x in range(10, 35, 3)
+        for z in range(10, 29, 3)
+        if [x, 64, z] not in positions
+    ][:53]
+    positions.extend(isolated_positions)
     value = {
-        "module": "register",
-        "probes": {"a": [{"position": p, "block": "minecraft:redstone_wire"} for p in positions]},
+        "module": "storage",
+        "probes": {
+            "words": [{"position": p, "block": "minecraft:redstone_wire"} for p in positions[:48]],
+            "readout": [
+                {"position": p, "block": "minecraft:redstone_wire"} for p in positions[48:54]
+            ],
+            "address": [
+                {"position": p, "block": "minecraft:redstone_wire"} for p in positions[54:57]
+            ],
+        },
         "controls": [
             {"id": "step", "role": "step", "position": [95, 64, 95]},
             {"id": "reset", "role": "reset", "position": [0, 64, 0]},
+            {"id": "program", "role": "programming", "position": [0, 64, 2]},
         ],
     }
-    cells = positions + [[95, 64, 95], [0, 64, 0]]
+    cells = positions + [[95, 64, 95], [0, 64, 0], [0, 64, 2]]
     installed = []
     try:
         with RconClient.dedicated() as transport:
             actions = Actions(manifest, transport, None, max_actions=100)  # type: ignore[arg-type]
             grader = GraderControl(
-                actions, validate_declaration(value, actions.contract), max_ticks=604
+                actions,
+                validate_declaration(value, actions.contract),
+                max_ticks=4008,
+                max_commands=30000,
             )
             manifest.data["module_declaration"] = value
             manifest.save()
@@ -742,19 +853,32 @@ def run_timeline_proof() -> TrialManifest:
                     )
                     grader._command(f"setblock {' '.join(map(str, pos))} {block}")
                 result = grader.timeline(
-                    [
-                        {"control": "reset", "level": True},
-                        {"wait": 4},
-                        {"control": "reset", "level": False},
-                    ],
+                    [],
                     cycles=2,
+                    cycle_recipes=[
+                        [
+                            {"control": "reset", "level": True},
+                            {"wait": 4},
+                            {"control": "reset", "level": False},
+                        ],
+                        [
+                            {"control": "reset", "level": False},
+                            {"wait": 4},
+                        ],
+                    ],
                 )
                 manifest.data["checks"].append(result)
                 manifest.save()
                 # Independent Python expectations; never embedded in functions.
                 for snapshot in result["snapshots"]:
-                    observed = snapshot["signals"]["a"]
-                    expected = [15, 14, 0, 0] if snapshot["phase"] == "pulse_end" else [0, 0, 0, 0]
+                    words = [15, 14, 0, 0] if snapshot["phase"] == "pulse_end" else [0] * 4
+                    words.extend([0] * (48 - 4))
+                    expected = {
+                        "words": words,
+                        "readout": [0] * 6,
+                        "address": [0] * 3,
+                    }
+                    observed = snapshot["signals"]
                     check = {
                         "phase": snapshot["phase"],
                         "observed": observed,
@@ -763,12 +887,111 @@ def run_timeline_proof() -> TrialManifest:
                     }
                     manifest.data["checks"].append(check)
                     assert check["passed"]
+                hold_reset_batch = grader.timeline(
+                    [],
+                    cycles=2,
+                    sample_only=True,
+                    cycle_recipes=[
+                        [{"wait": 200}, {"wait": 200}],
+                        [
+                            {"control": "reset", "level": True},
+                            {"wait": 200},
+                            {"control": "reset", "level": False},
+                            {"wait": 200},
+                        ],
+                    ],
+                )
+                expected_sample = {
+                    "words": [0] * 48,
+                    "readout": [0] * 6,
+                    "address": [0] * 3,
+                }
+                hold_reset_check = {
+                    "fixture": "hold_and_reset_two_snapshots",
+                    "offsets": [item["offset"] for item in hold_reset_batch["snapshots"]],
+                    "signals_passed": all(
+                        item["signals"] == expected_sample for item in hold_reset_batch["snapshots"]
+                    ),
+                    "control_effects_verified": all(
+                        item["verified"] for item in hold_reset_batch["control_effects"]
+                    ),
+                }
+                manifest.data["checks"].append(hold_reset_check)
+                assert hold_reset_check["offsets"] == [400, 800]
+                assert hold_reset_check["signals_passed"]
+                assert hold_reset_check["control_effects_verified"]
+                mixed_batch = grader.timeline(
+                    [],
+                    cycles=3,
+                    cycle_recipes=[
+                        [],
+                        [{"wait": 200}, {"wait": 200}],
+                        [
+                            {"control": "reset", "level": True},
+                            {"wait": 200},
+                            {"control": "reset", "level": False},
+                            {"wait": 200},
+                        ],
+                    ],
+                    sample_cycles=[1, 2],
+                )
+                mixed_check = {
+                    "fixture": "mixed_step_hold_reset",
+                    "settled_offsets": [
+                        item["offset"]
+                        for item in mixed_batch["snapshots"]
+                        if item["phase"] == "settled"
+                    ],
+                    "pulse_offsets": [
+                        item["offset"]
+                        for item in mixed_batch["snapshots"]
+                        if item["phase"] == "pulse_end"
+                    ],
+                    "settled_signals_passed": all(
+                        item["signals"] == expected_sample
+                        for item in mixed_batch["snapshots"]
+                        if item["phase"] == "settled"
+                    ),
+                    "control_effects_verified": all(
+                        item["verified"] for item in mixed_batch["control_effects"]
+                    ),
+                }
+                manifest.data["checks"].append(mixed_check)
+                assert mixed_check["settled_offsets"] == [200, 600, 1000]
+                assert mixed_check["pulse_offsets"] == [2]
+                assert mixed_check["settled_signals_passed"]
+                assert mixed_check["control_effects_verified"]
+                sample_batch = grader.timeline(
+                    [],
+                    cycles=8,
+                    sample_only=True,
+                    cycle_recipes=[
+                        [
+                            {"control": "program", "level": bool(address & 1)},
+                            {"wait": 200},
+                        ]
+                        for address in range(8)
+                    ],
+                )
+                sample_checks = [
+                    snapshot["signals"] == expected_sample for snapshot in sample_batch["snapshots"]
+                ]
+                manifest.data["checks"].append(
+                    {
+                        "sample_cycle_count": len(sample_batch["snapshots"]),
+                        "sample_cycle_offsets": [
+                            snapshot["offset"] for snapshot in sample_batch["snapshots"]
+                        ],
+                        "sample_cycles_passed": len(sample_checks) == 8 and all(sample_checks),
+                    }
+                )
+                assert len(sample_checks) == 8 and all(sample_checks)
                 # Deliberately incorrect expectation retained as actual failure evidence.
                 manifest.data["checks"].append(
                     {
                         "fixture": "deliberate_wrong_expectation",
-                        "expected": [1, 1, 1, 1],
-                        "observed": result["snapshots"][-1]["signals"]["a"],
+                        "expected": {"words": [1] * 48, "readout": [1] * 6, "address": [1] * 3},
+                        "observed": result["snapshots"][-1]["signals"],
                         "passed": False,
                     }
                 )
