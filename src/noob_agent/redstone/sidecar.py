@@ -104,6 +104,12 @@ class Sidecar:
             self.process.stdin.write(payload)
             self.process.stdin.flush()
             reply = self._read(self.timeout)
+            if operation == "validate" and reply == {"ok": False, "error": "request_failed"}:
+                # This read-only registry query has a completed negative result.
+                # It cannot leave a world mutation uncertain or require bot teardown.
+                invalid_result = {"valid": False}
+                self.manifest.observed(sequence, invalid_result)
+                return invalid_result
             if reply.get("ok") is not True or not isinstance(reply.get("result"), dict):
                 raise SidecarError("Sidecar request failed; outcome unknown")
             result: dict[str, Any] = reply["result"]
