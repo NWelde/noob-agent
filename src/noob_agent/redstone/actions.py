@@ -25,6 +25,10 @@ class EffectMismatch(RuntimeError):
     pass
 
 
+class InvalidBlockState(ValueError):
+    """Completed registry validation rejected a proposed placement before mutation."""
+
+
 class Actions:
     def __init__(
         self,
@@ -143,7 +147,10 @@ class Actions:
             ):
                 raise ValueError("Invalid property syntax")
             if action == "place":
-                self.read({"op": "validate", "name": block, "properties": state})
+                validation = self.read({"op": "validate", "name": block, "properties": state})
+                if validation == {"valid": False}:
+                    self.manifest.observed(sequence, {"rejected": "invalid_block_state"})
+                    raise InvalidBlockState("Block state rejected by Minecraft registry")
             before = self.observe(position)
             if (
                 before["name"] != "minecraft:air"
