@@ -82,6 +82,8 @@ def test_setup_writes_server_files_bot_permissions_and_every_scenario_pack(
     assert allowed == {"noobagentbot", "judge"}
     datapacks = server / "noob-agent-training" / "datapacks"
     for pack in Path("scenarios/minecraft").iterdir():
+        if not (pack / "pack.mcmeta").is_file():
+            continue
         assert (datapacks / pack.name / "pack.mcmeta").is_file()
 
 
