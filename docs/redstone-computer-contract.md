@@ -198,29 +198,34 @@ world inspection in `redstone/modules.py`; see `docs/redstone-trials.md` for the
 exact schema, tests and live rejection evidence. All frozen behavioral
 requirements above remain in force. Inspection validates observations only,
 never drives declared controls, and always reports `behavioral_passed=false`.
-The four behavioral graders, bounded programming recipes, real two-tick STEP
-control path and successful live module checks remain unimplemented/pending.
-Per-cell structural identity now separates signal state from configuration;
-full-region same-hardware verification remains pending.
+The four public behavioral graders, bounded programming recipes, and real
+two-tick STEP control path are implemented. Provider-free timeline and control
+proofs passed on the dedicated server, and a negative register fixture verified
+fail-fast behavior. A recent live timeline proof also exercised distinct
+per-cycle recipes and storage-backed batched score readback with clean recovery.
+Positive module circuits remain unverified. Per-cell structural identity
+separates signal state from configuration; full-region same-hardware verification
+is milestone 5 work.
 
 ### Trusted timing/control implementation boundary (milestone 4 continuation)
 
 `GraderControl` in `src/noob_agent/redstone/grading.py` is harness-only. Its
 server predicates read declared wire/lamp signals anywhere in the loaded build
 prism; its lever controls validate declarations and preserve lever geometry.
-`pulse_step()` uses the small templates in `scenarios/minecraft/redstone-grader/`
-to drive only the declared STEP lever high then low two server ticks later.
-Game-time timestamps and both command success scores are retained. This trusted
-exception is strictly stimulus/timing evidence: no circuit computation, program
-storage, expected-output synthesis or tick acceleration. Runtime actions retain
-the existing reach-limited interaction and cannot invoke these functions.
+`timeline()` drives only declared controls, raises STEP for two server ticks,
+lowers it for 198 more, and records pulse-end and settled observations. The
+trusted timeline is strictly stimulus/timing evidence: it performs no circuit
+computation, program storage, expected-output synthesis or tick acceleration.
+Runtime actions retain the existing reach-limited interaction and cannot invoke
+these functions. Legacy `pulse_step()` and `wait_ticks()` methods are compatibility
+wrappers over this same journaled timeline and cleanup lifecycle.
 
 Live proof recorded 97338→97340, delta two, on/off success and near/far actual
 signal readbacks. See the exact command, manifests and limits in
 [redstone-trials.md](redstone-trials.md#milestone-4-trusted-control-continuation-2026-09-22).
 A separate 198-tick wait does not make a 200-tick cycle when transport/reload gaps
-intervene. Exact cycle/sampling scheduling, bounded programming recipes and all
-four behavioral graders remain pending. No contract artifact changed, no module
+intervene. That checkpoint predated the exact cycle/sampling scheduler, bounded
+programming recipes and four behavioral graders now in place. No positive module
 acceptance or live model-designed success is claimed.
 
 Milestone-4 timeline continuation: `GraderControl.timeline` now measures chained
@@ -228,8 +233,11 @@ Milestone-4 timeline continuation: `GraderControl.timeline` now measures chained
 server. Recipes accept declared boolean control levels and finite waits only;
 server functions never calculate circuit results. The frozen contract is unchanged.
 See `docs/redstone-trials.md` single-timeline checkpoint for actual evidence,
-cleanup/recovery commands and the remaining four behavioral graders. The current
-aggregate 1600-tick control allowance is not a complete module-test budget policy.
+cleanup/recovery commands and remaining integration gaps. Per-cycle distinct
+recipe batching and score aggregation into a journaled storage result have since
+been implemented and passed the timeline infrastructure proof; module-level
+use remains unverified. The current aggregate 1600-tick control allowance is
+not a complete module-test budget policy.
 
 Milestone-4 public behavioral implementation now compares register, arithmetic,
 storage and output snapshots against Python expectations. Optional declarations
@@ -245,5 +253,10 @@ selection for load/add values and storage addresses/words, without supplying
 wiring. See [trial continuation evidence](redstone-trials.md#milestone-4-bounded-continuation-compact-mappings-and-prompt-failure-feedback)
 for strict syntax, measured complete declaration sizes, fail-fast semantics and
 live cleanup evidence. Frozen behavioral requirements and timing are unchanged.
-Runtime acceptance remains blocked: current suites consume 3600.8 nominal seconds
-with fixture recipe waits, before overhead/construction/two final programs.
+The latest batched fixture estimate is 55,616 scheduled ticks across 63
+timelines. At the historical 2.994-second overhead fallback plus both
+program reserves, it projects to about 3,209 seconds. About 391 seconds remain
+for reset, construction, provider latency and cleanup. A 57-probe eight-sample
+timeline measured 2.270 seconds of overhead and verified batched readback and
+cleanup, but one infrastructure run is not a suite-wide timing bound. Positive
+model-designed module acceptance remains pending.
