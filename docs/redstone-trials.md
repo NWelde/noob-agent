@@ -373,7 +373,7 @@ it excludes the independent final-check list. It does not itself execute models,
 keep prior-trial designs, journal events, or enforce trial budgets. The
 `TrialWandbClient` reuses the existing W&B ModelClient completion path, with explicit
 product `ModelSettings`/`WandbSettings`, SDK `max_retries=0` and a finite timeout
-(up to 30 seconds). Development Astra settings are not consulted. The forthcoming
+(up to 60 seconds). Development Astra settings are not consulted. The forthcoming
 loop must also bound the whole await by remaining wall time; an SDK timeout alone
 is not a total trial deadline.
 
@@ -509,14 +509,15 @@ and fixture/provider option mixing fail before dispatch. Provider mode never
 falls back to a fixture:
 
 ```sh
-# Documented interface only; NOT executed in this continuation.
-.venv/bin/python scripts/run_redstone_trial.py --trial provider --planner-model MODEL_ID
+# Replace MODEL_ID with the configured W&B inference model.
+uv run --env-file .env python scripts/run_redstone_trial.py --trial provider --planner-model MODEL_ID
 ```
 
-Provider mode requires explicitly exported `WANDB_API_KEY` and
-`AI_GATEWAY_API_KEY` in the process environment, plus the explicit model ID;
-optional `--planner-project` sets the W&B inference project. Python does not load
-`.env` for this preflight. Missing credentials produce a unique incomplete
+Provider mode needs `WANDB_API_KEY` and `AI_GATEWAY_API_KEY` in the process
+environment, plus the explicit model ID; optional `--planner-project` sets the
+W&B inference project. Use `uv run --env-file .env` to load the project's
+credential file into Python. The Jev child also loads `.env` through Node's
+`--env-file-if-exists` option. Missing credentials produce a unique incomplete
 manifest before any Minecraft access. The W&B endpoint is fixed to
 `https://api.inference.wandb.ai/v1`; model/project identifiers accept a restricted
 character set. The immutable public selection records identity, endpoint,
@@ -524,9 +525,9 @@ project, token cap, temperature, reasoning setting, deadlines and zero retries,
 never key values or the environment. The contract hash and limits are frozen
 before connection. Providers use the existing TrialWandbClient and the unmodified
 shared `scripts/jev_handler.mjs` through JevSubprocess. Provider mode has no fixture
-layout or scripted checker; until public module graders are implemented, it runs
-to a declared limit and cannot establish module or machine success. Do not use
-it as an acceptance command yet.
+layout or scripted checker. Public module graders now run when the planner
+declares recipes; passing model-designed module evidence and a final full-machine
+grader remain pending, so this is not yet an acceptance command.
 
 The only new scripted layout is in `src/noob_agent/redstone/fixtures.py`, labeled
 as fixture-only and imported only by explicit fixture mode. Its planner uses
@@ -1089,3 +1090,742 @@ headroom, and consolidation/retirement of legacy `pulse_step`/`wait_ticks`/
 `_schedule` with migrated recoverable-cleanup proof remain unfinished. Public
 behavioral grading already uses recoverable timelines. Passing model-designed
 module evidence stays deferred. Full-machine identity auditing is milestone 5.
+
+### Milestone 4 schedule continuation (2026-09-23 UTC)
+
+Reviewed the frozen checks and removed three repeated reset timelines whose
+required state was already established by an immediately preceding checked
+reset or by the arithmetic case's explicit LOAD 9 and OUT sentinel setup:
+
+- Register: retain the initial reset before the first value and retain the
+  reset after every value; the previous value's checked reset initializes the
+  next value.
+- Arithmetic: retain the initial A=0/O=0 reset check. Each of the six cases
+  starts by loading 9 and issuing OUT, then checks LOAD/ADD and O=9 hold. This
+  also reestablishes the sentinel after the prior case.
+- Output: retain the initial O/strobe reset check and reset after every value;
+  the previous value's checked clear initializes the next one.
+
+The unchanged audit's 72,016 scheduled ticks / 266 timelines falls by 14,000
+ticks and 35 timelines to 58,016 ticks / 231 timelines: 2,900.8 nominal
+seconds at 20 TPS. This leaves 699.2 nominal seconds under the frozen 3,600
+second wall limit before tool/server overhead, construction, and the two
+program checks (up to 160 execution seconds). This hand calculation is not a
+production duration estimator and does not establish usable headroom; the
+known single four-probe timeline exceeded nominal time by 1.229 seconds.
+No contract limits or expected module cases changed. The code edits have not
+been run through tests or a passing circuit check.
+
+Read-only preflight attempt:
+`.noob-agent/redstone-trials/20260923T225555-c6fbb374e6d04b92905196b8dac00dd9/manifest.json`.
+It failed at RCON connect (`RconError`) before any probe, so no world state was
+read or changed. Provider configuration inspection found planner model
+`deepseek-ai/DeepSeek-V4-Flash-0731`, but `AI_GATEWAY_API_KEY` was absent from
+the process environment and local `.env`; the Jev live call was not attempted.
+The schedule continuation is unverified, with legacy lifecycle consolidation,
+production duration accounting, live environment access, and passing
+model-designed module evidence still pending.
+
+### Milestone 4 legacy lifecycle consolidation (2026-09-23 UTC)
+
+Removed the passive-pack `_schedule` path. `pulse_step()` and `wait_ticks()` are
+now compatibility wrappers over `timeline()`, so these calls use the same
+journaled pending/cleanup/recovery lifecycle. `pulse_step()` retains its exact
+two-tick pulse semantics through the timeline's pulse-only mode; `wait_ticks()`
+uses a sample-only timeline. The control proof uses both wrappers, while the
+separate timeline proof checks an exact 200-tick STEP and retirement cycle.
+Neither proof composes a two-tick pulse with a separately reloaded 198-tick
+wait. Removed the unused legacy start/finish datapack templates after confirming
+the runtime has no references to them.
+
+No test commands were run for this edit. Existing grader tests still describe
+the retired pulse/wait implementation and need review/migration. Initial live
+verification was blocked until the dedicated server was started; subsequent
+timeline and compatibility-wrapper evidence is recorded below. Passing live
+module evidence remains pending.
+
+### Milestone 4 schedule preflight (2026-09-23 UTC)
+
+`estimate_module_schedule()` now derives each module's exact scheduled ticks and
+timeline count from the validated required recipes and frozen grader sequence.
+Before a module timeline runs, `grade_module()` records the estimate in the
+check result and rejects the module before world access if it exceeds the
+remaining shared tick allowance. Timeline results now include nominal game
+seconds, measured wall seconds, and observed overhead. Later forecasts use the
+larger of the 1.23-second fallback from the single existing live proof or the
+largest overhead observed earlier in the same trial. The forecast reserves two
+120-second program windows and rejects a module that would consume them.
+
+This is a fail-closed preflight forecast, not a proof of remaining construction
+time or a wall-time guarantee: the overhead fallback comes from one four-probe
+fixture, and future module declarations/repairs are not known yet. It makes
+per-module schedule costs visible and prevents starting a module whose declared
+recipe suite cannot fit the aggregate tick budget or leaves no room for the two
+program deadlines. The live RCON blocker remains; provider credentials are in
+local `.env` and are loaded into Python with the documented `uv run --env-file`
+command. No test or provider call was run for this change.
+
+### Milestone 4 provider environment correction (2026-09-23 UTC)
+
+The prior credential check was wrong: `.env` writes the gateway variable as
+`export AI_GATEWAY_API_KEY=...`, and my simple parser treated `export ` as part
+of the variable name. Node's dotenv parser and `uv run --env-file .env` both
+load it successfully. The provider entry point itself does not read `.env`, so
+calling it as plain `uv run python ...` still fails the Python credential gate.
+The canonical provider command now uses `uv run --env-file .env`.
+
+Executed the provider-mode setup using the configured planner model and that
+command. It passed the credential stage, then stopped at RCON connection before
+any world probe or planner/Jev request. Evidence:
+`.noob-agent/redstone-trials/20260923T231547-d901fcd318dc4c05bccd7e3fae1f743b/manifest.json`;
+the manifest records `stage=connect`, `RconError`, and zero model calls. Jev is
+configured; live trial evidence remains blocked by the dedicated-server RCON
+connection. No key value was printed or saved in the manifest.
+
+### Milestone 4 arithmetic schedule reduction (2026-09-23 UTC)
+
+Removed the extra 400-tick arithmetic hold after each pair. The frozen public
+case requires checking all six `(A,n)` results and confirming O remains 9 after
+LOAD and ADD; both writes are already sampled after a full 200-tick retirement.
+The hold added no additional frozen condition. Register's 400-tick holds and
+output persistence holds remain intact.
+
+For the previously audited one-tick storage write recipes, the all-module plan
+now totals **55,616 ticks / 225 timelines**, or **2,780.8 nominal seconds**.
+At the 1.23-second fallback per timeline plus both 120-second program windows,
+the forecast is about **3,297.6 seconds**, leaving about **302.4 seconds** for
+all model construction, other provider/action latency, reset and cleanup. That
+is a forecast from one live timeline overhead sample, not a guaranteed reserve.
+The exact per-module estimator and preflight use each actual declaration's
+validated recipes; this aggregate figure is only for the recorded fixture
+recipes. This arithmetic reduction was not tested separately; subsequent
+provider-free live infrastructure checks are recorded below.
+
+### Milestone 4 live infrastructure follow-up (2026-09-23 UTC)
+
+The configured Jev key loaded successfully through `uv run --env-file .env`.
+The initial provider-mode attempt stopped at RCON before any planner call
+because the Minecraft server was not yet running. I started the local server
+and completed these provider-free checks:
+
+- Preflight: `.noob-agent/redstone-trials/20260923T232044-ca6f645820e84b07ac00b378f2461336/manifest.json`
+- Full owned-build reset check: `.noob-agent/redstone-trials/20260923T232138-d61fee53189f4be3baa209d23300ba88/manifest.json`
+- Timeline proof: `.noob-agent/redstone-trials/20260923T232236-d0388076799e46f7ae2b00f9af4c0951/manifest.json`; all four raw snapshot comparisons passed, including exact step pulses and two 200-tick cycles.
+- Control proof: `.noob-agent/redstone-trials/20260923T232414-94d589fb200b44f485b93fcb3b161193/manifest.json`; two-tick pulse compatibility and expected invalid-request/cap refusals passed, with cleanup clean.
+
+The timeline proof observed **2.994 seconds** overhead on a timeline with four
+probes (20.2 nominal seconds). This supersedes the earlier 1.23-second sample
+for planning, so the estimator fallback is now 2.994 seconds per timeline.
+That is still a single observed sample, not a statistical upper bound. At that
+fallback, the fixture suite projects to about **3,694.4 seconds** before the
+two program windows, reset, construction, or cleanup (3,454.5 seconds for the
+module suite plus the 240-second program reserve). That leaves only about
+145.5 seconds for everything else, so it cannot be admitted within the
+3,600-second trial wall budget while preserving a realistic operational margin.
+Further schedule/time reduction or a larger trial budget is needed before the
+full module sequence can fit.
+
+The subsequent live provider request was rejected by automatic review because
+it would transmit the planner prompt and project state to the external Jev
+provider and W&B. No provider request or model call was made. No key value was
+printed or stored. The module circuits and full milestone acceptance remain
+unverified.
+
+### Milestone 4 timeline batching continuation (2026-09-23 UTC)
+
+Added bounded per-cycle preparation to the trusted timeline. A timeline can now
+apply a different validated recipe before each of up to eight cycles and still
+capture raw pulse-end and settled signals after every cycle. Arithmetic pairs
+batch their four instruction steps, and output checks batch LOAD/OUT and the
+subsequent LOAD/ADD/OUT steps while preserving a separate 400-tick persistence
+check and reset. Storage programming now holds reset and performs a whole
+eight-word pattern in one sample-only timeline, with the same 200-tick wait
+before programming and after the final write. No required observation or
+scheduled wait was removed by batching. The harness-only flattened storage
+preparation is capped at 1,027 operations (eight validated recipes of at most
+128 operations, the reset level, and two waits); each public recipe remains
+capped at 128 operations.
+
+For the recorded fixture recipes, these changes reduce the forecast from 225
+to **141 timeline operations** without changing its 55,616 scheduled ticks
+(2,780.8 nominal seconds). Applying the latest single-sample 2.994-second
+overhead to every timeline and reserving both 120-second final programs gives
+about **3,443.0 seconds**, leaving roughly **157 seconds** for initial reset,
+construction, planning/provider latency and cleanup. This brings the fixture
+suite under the 3,600-second wall budget on that estimate, but the remaining
+margin is narrow and the overhead is still only one observed sample. No tests,
+provider requests, or module-circuit runs were made when this change was added;
+the storage-scale timeline proof recorded below subsequently exercised the
+batched path. Module behavior remains unverified.
+
+### Milestone 4 timeline readback consolidation (2026-09-23 UTC)
+
+The prior timing samples showed timeline overhead of 1.69–1.85 seconds on
+single-snapshot/control operations and 2.994 seconds on a four-probe, two-cycle
+timeline. A storage declaration can expose 57 probe positions, and the old
+reader fetched each recorded scoreboard value through a separate RCON exchange.
+That made the four-probe sample too weak to support a storage-suite duration
+forecast.
+
+Timeline functions now copy all recorded timing, control and raw-probe scores
+into unique per-timeline Minecraft storage at the end of the scheduled work.
+The grader reads that compound in one RCON exchange and requires its parsed
+score names to match the expected set exactly. The storage identifier is
+journaled with the pending timeline and removed during normal or recovery
+cleanup. Older manifests without the new field remain recoverable. Non-RCON
+transport fixtures retain individual score reads.
+
+Live provider-free proof passed on Minecraft 1.21.1:
+`.noob-agent/redstone-trials/20260923T235911-63a15e8e6c8a43bb8fb8b72dafe7d901/manifest.json`.
+The fixture declares the storage probe shape: 48 word bits, six readout bits and
+three address bits. It supplied two distinct cycle recipes in one timeline
+(408 scheduled ticks, 22.283 seconds elapsed); all four pulse-end/settled
+snapshots matched their independent expectations across all 57 probes. The
+manifest records two successful compound readbacks, two storage cleanup
+commands, `timeline_resources.state=clean`, a successful missing-probe
+rejection, and the aggregate tick-limit stop. The 57-probe timeline measured
+1.883 seconds overhead. The estimator retains the higher 2.994-second sample
+as its fallback. The command exits 2 by design, and its one recorded
+`ValueError` is the expected missing-probe negative check. Its deliberate wrong
+expectation is retained as a failing fixture assertion. This proves timeline
+infrastructure only: public module circuits and positive module grades remain
+unverified.
+
+### Milestone 4 storage address sample batching (2026-09-24 UTC)
+
+The eight storage address cases now run as eight sample-only checkpoints inside
+one timeline per word pattern. Each checkpoint applies its validated address
+recipe, waits 200 ticks, and captures the full raw interface without issuing
+STEP. This preserves the per-address checks and removes 14 timeline operations
+from the two-pattern fixture estimate: **127 timelines** at the same 55,616
+scheduled ticks. With the 2.994-second maximum-observed fallback and two
+120-second program reserves, the fixture estimate is now about **3,401.0
+seconds**, leaving roughly **199 seconds** for reset, construction, provider work
+and cleanup. The reserve remains narrow.
+
+The live storage-scale proof
+`.noob-agent/redstone-trials/20260924T000745-cb91152b38c24f559c192ee46c2f612e/manifest.json`
+also exercised this path with 57 probes and eight changing programming-control
+recipes. All eight sample snapshots passed, at offsets 200 through 1,600;
+the timeline took 82.270 seconds (2.270 seconds overhead). Together with the
+clocked two-recipe timeline, all three batched reads parsed, all three storage
+cleanup commands completed, the resource state ended clean, and all 120 fixture
+removal checks passed. Missing-probe rejection and aggregate tick exhaustion
+also passed. The harness exits 2 by design and retains one expected
+missing-probe `ValueError` and one deliberate false expectation. These are
+infrastructure proofs, not a passing storage module or other positive circuit.
+
+### Milestone 4 focused software verification (2026-09-24 UTC)
+
+The focused behavioral/control suite passed after the batching changes:
+
+```sh
+UV_CACHE_DIR=/tmp/noob-agent-uv-cache uv run pytest -q \
+  tests/test_redstone_behavior.py tests/test_redstone_grading.py \
+  tests/test_redstone_modules.py tests/test_redstone_loop.py \
+  tests/test_redstone_planner.py
+```
+
+Result: **117 passed, 199 deprecation warnings, 18.60 seconds**. The first run
+exposed that the injected sequential reader was bypassed by production batching;
+the grading adapter now keeps injected readers sequential while production uses
+one timeline. It also exposed an arithmetic sentinel expectation error: after
+the first pair O remains 9, so subsequent LOAD 9 checks now expect the carried
+sentinel instead of 0. Invalid compatibility `wait_ticks` attempts once again
+pass through the charged timeline operation path. The existing test fixture now
+asserts the reduced register-check count (49 records, 33 sample-only reader calls)
+and inspects the journaled timeline functions instead of the retired templates.
+
+These software results cover controlled readers and harness timing, not physical
+module circuits or planner-generated wiring. The storage-scale provider-free
+server proof above supplies independent runtime evidence for the latest timeline
+and cleanup path; external planner/repair behavior and positive module acceptance
+remain unverified.
+
+### Milestone 4 observed hardware failures return for repair (2026-09-24 UTC)
+
+Behavioral grading now distinguishes completed but negative world evidence from
+uncertain server outcomes. A missing/mismatched declared probe can be retained as
+a failed public check with its raw `-1` signal evidence, allowing the trial loop
+to return it to the planner for repair; standalone timeline calls still reject
+missing probes by default. A declared control that is read successfully but is
+not a lever, or a STEP lever already powered, is likewise recorded as a failed
+behavioral check and returned for repair. Transport ambiguity, incomplete score
+readback, budget exhaustion and timeline cleanup failures remain fatal/incomplete.
+No provider was called and no physical module was accepted by this change.
+
+### Milestone 4 first live provider attempts (2026-09-24 UTC)
+
+The owner approved live planner/project-state transfer to W&B and Jev and approved
+using the configured local key. The early planner responses exhausted their
+4,096/8,192-token caps or failed strict block-ID validation before any Jev or
+world action. The planner prompt now scopes each intention to one module, asks
+for compact recipe templates and exact module probe arrays, gives an explicit
+block-ID whitelist, disables reasoning, and allows 16,384 completion tokens.
+The credential-free public trial configuration records those same request values.
+Each intention now offers at most 32 Jev choices, and provider intentions must
+include behavioral module recipes before any choices are dispatched. Up to two
+strict repair retries are allowed for malformed output; the latest bounded run now includes
+the frozen build coordinates in out-of-bounds feedback.
+
+Retained provider manifests:
+
+- `20260924T025728-cb91152b38c24f559c192ee46c2f612e`: one W&B call hit the
+  4,096-token limit with empty content; no Jev call or action.
+- `20260924T030303-fe8fad58bcaf492fba3f5796db567e1a`: one-module prompt still
+  hit its 8,192-token limit; no Jev call or action.
+- `20260924T030444-6093d5837afb4d29833930e92d9cb32e`: valid JSON from
+  `deepseek-ai/DeepSeek-V4-Flash-0731`, but strict validation rejected a malformed
+  block ID before Jev or world actions.
+- `20260924T030627-aef4ccfe76ee4bc097c730d357a939f4`: one valid planner call,
+  four successful Jev choices and four bounded block placements. The fifth Jev
+  attempt failed as `JevError`; no module grading ran. The initial and final
+  387,072-block region snapshots are identical, and final trusted reset
+  verification passed. `model_success` remains false.
+- `20260924T031155-4450efcc0e784bd797ddd1781a1485e5`: a later W&B planner call
+  timed out before returning a response; no Jev call or action.
+- `20260924T031537-b183acd1582d4148b7797817e804dd04`: another W&B call hit the
+  configured 30-second per-call deadline; it returned no response, Jev call or
+  action. The bounded planner deadline is now 60 seconds for future trials, still
+  under the frozen 3,600-second trial budget; this change has not yet been exercised.
+- `20260924T032426-cb417f992c7446b0bd3faaca48372f0a`: the planner emitted 256
+  choices, producing a 70 KB Jev request rejected with HTTP 400 before any
+  action. This drove the 32-choice cap.
+- `20260924T032927-ded0dc053d6d4587ad9837298acb1baa`: after the cap, the first
+  response was incomplete and the repair omitted behavioral recipes; validation
+  stopped before Jev or world actions.
+- `20260924T033131-3badcdd8d2f8477ba8b0bf655277c136`: the planner supplied
+  register load templates and an output recipe, but all three bounded responses
+  had actions outside the frozen build volume. No Jev or world action occurred.
+- `20260924T033235-5a6e91c9f5204d22918292ad56af90b8`: the run with exact build
+  coordinates in repair feedback timed out at the 60-second planner deadline;
+  no response, Jev call or action was recorded.
+
+Jev failure details were sanitized away in the first live manifest. The handler
+and adapter now retain only provider error name, code and HTTP status when
+available; no response body, request headers or key is recorded. That diagnostic
+path was exercised by the HTTP 400 response and recorded only the safe status
+and error name. These runs establish provider connectivity and safe reset behavior,
+not a working module or milestone acceptance. Syntax and diff checks passed for
+the bounded repair changes; the test suite was not run.
+
+### Milestone 4 live repair continuation (2026-09-24 UTC)
+
+The next bounded provider attempts used `deepseek-ai/DeepSeek-V4-Flash-0731`
+against the dedicated server. Out-of-bounds validation now identifies the
+offending action ID and coordinates and the prompt states that ground y=63 and
+player z=98 are outside the build prism. A reply truncated at the output cap
+now receives a compact JSON repair instruction. Completed read-only Minecraft
+registry rejection is returned as `invalid_block_state` for planner repair;
+it does not make the sidecar or world outcome uncertain.
+
+- `20260924T034031-b2f9ee3dadda4985aaf67ab6ccb286f7`: one valid intention,
+  one verified lever placement, then Jev HTTP 503. No module check; final reset
+  verified.
+- `20260924T034127-671fdc08ee3e4316bb1e0e977dfd58c3`: missing behavioral
+  recipes, then two output-cap truncations. Three planner calls, no Jev call or
+  world action; final reset verified.
+- `20260924T034451-ef3f0b7572cf4edfa1a2cb4b95a6eb70`: compact feedback
+  yielded a complete intention, but invalid lever property `facing=up` made the
+  old sidecar report an unknown outcome and bot teardown before placement. Its
+  final reset could not verify player state. A separate trusted two-reset check,
+  `20260924T034635-298cde1acca24456b04bf74b21fe1b96`, restored and
+  verified the baseline and bot state twice with identical hashes.
+- `20260924T034909-7c7a9990999e411fa3f0a7c70b9eecd2`: after that repair,
+  the planner produced two valid intentions. Jev selected eight verified stone
+  placements and three verified lever placements. The first public register
+  check returned a completed negative control-interface result because the
+  declared reset lever had not yet been placed. The planner received it and
+  placed the reset, STEP, and first load lever. The next Jev call returned HTTP
+  503. Both initial and final resets verified the same 387,072-block baseline
+  hash. No register passed and `model_success` is false.
+
+Focused behavioral, control, module, loop, and planner tests passed after the
+bounds/prompt work (**118 passed**). Focused actions, sidecar, and loop tests
+passed after the registry-rejection repair (**40 passed**). The two observed
+Jev HTTP 503 failures each stopped their trial before another action. A later
+change permits exactly one charged, journaled retry for HTTP 503 on a Jev
+selection; no world action is dispatched until a valid choice returns. The
+handler still makes no hidden retry. This retry has offline coverage (37 loop
+and command tests pass), but no live 503 after the change has yet been observed.
+Further provider reliability and positive module behavior remain required for
+milestone 4 acceptance.
+
+The next provider trial,
+`20260924T035434-e68d129508f848b983621a8df666f30f`, ended before Jev:
+the first planner response hit the output cap and its repair timed out. Both
+resets verified the same baseline hash. The compact repair path now also narrows
+the response schema to eight actions, a 200-character summary, and 160-character
+criteria after an output-cap failure. That schema change has passed local tests
+and was then exercised live in
+`20260924T035821-4aeef1e13abb4b8ab741ffc4d271db8b`: after one truncated
+reply, the compact repair response stopped normally and contained eight actions.
+It failed strict validation because a declared interface coordinate was outside
+the build bounds. Another reply omitted behavioral recipes and the trial stopped
+before Jev or world placement. Both resets verified the baseline. Declaration
+validation now identifies which probe or control is out of bounds and gives its
+coordinates, with 63 focused module/planner/loop tests and Ruff/mypy passing;
+that feedback has not yet been exercised live. No module passed.
+
+### Milestone 4 register behavior reached (2026-09-24 UTC)
+
+Trial `20260924T040224-9c60a35b126541d4940d19961a2e1894` made 12
+verified block placements. The public register grader read real A probes after
+scheduled reset, LOAD 0 and a 400-tick hold; those zero-valued cases passed.
+LOAD 1 failed with observed A=0, expected A=1. The failure went back to the
+planner, which proposed a larger register repair. Jev HTTP 503 occurred twice
+on a later selection; the first was retried and a valid choice returned, while
+the later 503 plus retry stopped the trial. Both initial and final resets were
+verified with the same baseline hash. This is negative behavioral evidence,
+not a passing model-built register.
+
+The Jev selection path now allows up to three charged, journaled HTTP 503
+retries before dispatching any action. This remains within the frozen call,
+action and wall budgets; no other error is automatically retried. The increased
+allowance passed the focused loop/command tests (**37 passed**) but has not yet
+been exercised live.
+
+Trial `20260924T040705-516f67ea28f2492194a3db9984419ba3` ended before Jev:
+the first planner response omitted behavioral recipes, the next supplied a
+declaration that failed a completed control-interface check, and the following
+planner call timed out. Both resets verified the baseline. Provider mode now
+checks every recipe required by the declared module before dispatch, then
+returns a module-specific missing-recipe hint. This prevents partial recipes
+from spending Jev actions before grading discovers another missing recipe.
+Focused loop/planner tests pass; a new live response has not yet exercised this
+validation.
+
+The account's W&B model-list endpoint returned current model IDs, including
+`Qwen/Qwen3.6-35B-A3B` and `moonshotai/Kimi-K2.7-Code`. Automatic approval
+review rejected a planner-only comparison with Qwen because that call would
+send the project's detailed contract and initial-state context to a third-party
+W&B model endpoint. No comparison request was sent at this checkpoint; the
+user later authorized the comparison, recorded below.
+
+Provider response schemas now require a non-null `module_inspection`, limit
+normal intentions to 16 offered actions, and cap summary/criteria lengths.
+After output truncation the eight-action repair schema still applies. The
+fixture schema remains unchanged. This has local tests, but no live provider
+call with the new schema has completed yet.
+
+### Milestone 4 register timeline consolidation (2026-09-24 UTC)
+
+The register grader now records each value's 400-tick no-STEP hold and
+400-tick reset as two settled snapshots in one sample-only server timeline.
+It still checks each hold and reset separately and retains the same 16,400
+scheduled ticks for the register suite. The complete compact fixture forecast
+is now 55,616 ticks across 111 timelines (register 33, arithmetic 7,
+storage 6, output 65). At the historical 2.994-second overhead fallback and
+with both 120-second program reserves, this projects to about 3,353 seconds,
+leaving about 247 seconds in the 3,600-second trial. That fallback is not a
+guaranteed bound: the short live register failure included per-timeline
+overheads as high as 6.616 seconds. Controlled-reader checks and a generated
+two-snapshot timeline test pass; the full register suite has not run on a
+positive model-built circuit.
+
+### Milestone 4 mixed STEP and sample timelines (2026-09-24 UTC)
+
+The trusted timeline now accepts explicitly indexed sample-only cycles among
+clocked cycles. Sample cycles make no STEP edge and retain their declared waits;
+each settled snapshot is read from the server on its scheduled tick. The
+register uses one clocked LOAD, a 400-tick hold sample, and a 400-tick reset
+sample per value. Output uses one mixed timeline for LOAD, OUT and the 400-tick
+persistence sample, then another for LOAD, ADD, OUT and the 400-tick reset
+sample. Public expectations and all scheduled waits remain unchanged.
+
+The compact fixture schedule is now **55,616 ticks across 63 timelines**:
+register 17, arithmetic 7, storage 6, output 33. With the historical
+2.994-second overhead fallback and two 120-second program reserves, the
+projection is about **3,209 seconds**, leaving about **391 seconds** in the
+3,600-second trial. Actual per-timeline overhead is variable, so this is an
+advisory forecast rather than an acceptance claim.
+
+Provider-free Minecraft proof:
+`.noob-agent/redstone-trials/20260924T042707-56b2f854991448d48191448e18b7ac98/manifest.json`.
+The mixed fixture recorded one pulse-end snapshot at tick 2 and settled
+snapshots at ticks 200, 600 and 1000; observed signals and control effects
+matched independent Python checks. The earlier hold/reset batch again produced
+settled snapshots at ticks 400 and 800. All 60 fixture removal predicates
+passed, timeline resources ended clean, and deliberate missing-probe and
+aggregate-budget rejections remained effective. The proof intentionally exits
+2 and is not a passing model-built module.
+
+### Milestone 4 schema repair feedback (2026-09-24 UTC)
+
+Provider validation now returns the first safe Pydantic field path and error
+code to the planner, such as `actions.0.position.0` with `int_type`, instead of
+the generic strict-validation message. It never copies the rejected input
+value or third-party exception prose into the feedback. The correction stays
+within the existing two charged validation repairs. Local loop/planner tests
+pass; no new provider call has exercised this feedback yet. Model-built module
+acceptance remains pending.
+
+### Milestone 4 public-module checkpoint (2026-09-24 UTC)
+
+Provider trials now retain a separate milestone-4 public-module ledger. A
+completed passing grade records its module, grader event and construction
+epoch. Every subsequent offered build action invalidates earlier module passes
+before it is attempted; read-only observations do not. The planner receives
+the current passed and remaining module names so it can regrade after its last
+construction action. The loop stops only when register, arithmetic, storage
+and output have each completed passing public checks on one construction epoch.
+The trial marks milestone 4 `passed` only after a verified final reset with the
+same baseline hash as the initial reset. The independent full-machine grade and
+`model_success` remain separate and false. Offline tests exercise pass
+invalidation, four-module stop and the final-reset gate; no live circuit has
+reached this checkpoint.
+
+### Milestone 4 connected preflight and provider gate (2026-09-24 UTC)
+
+The focused redstone suite passed **167 tests**; Ruff, mypy, formatting and
+`git diff --check` passed for the checkpoint changes. A sandboxed read-only
+preflight could not connect to RCON, while the same preflight outside the
+sandbox recorded 13 observed probes with no errors in
+`.noob-agent/redstone-trials/20260924T044440-b13f7bfae17043b0905b5f26a8917449/manifest.json`.
+The dedicated world was locked by the running server, so no second server was
+started. This preflight confirms transport only; it does not verify a module.
+
+Automatic approval review rejected a new DeepSeek/Jev live trial because the
+request would send the redstone contract and world-state-derived data to those
+external services without sufficiently specific authorization. No model call
+or construction action was made by that rejected command. The user later
+authorized both transfers, with results recorded below. Milestone 4 acceptance
+is still unverified.
+
+### Milestone 4 exact-tick sprint continuation (2026-09-24 UTC)
+
+The trusted timeline runner now uses the dedicated server's `tick sprint` for
+its already scheduled game ticks. It journals sprint intent before delivery,
+checks the same raw game-time score gaps and control effects, and stops a
+possibly active sprint during trusted cleanup or explicit recovery. It does
+not change the frozen count or order of game ticks, STEP pulse length, sample
+points, public comparisons or one-hour trial limit.
+
+The provider-free live timeline proof at
+`.noob-agent/redstone-trials/20260924T044907-716ef69911b0427780d04cdfcf0ff19b/manifest.json`
+recorded exact game-time gaps for 408, 800, 1,000 and 1,600-tick timelines,
+verified every declared control effect, passed all four intended raw fixture
+comparisons, and cleaned up its datapacks and scoreboard. Those timelines
+took 1.16–1.35 wall seconds each. The proof's deliberate missing-probe and
+aggregate-budget negatives still failed, and a subsequent `tick query`
+confirmed the server was running normally at 20 TPS. The local focused suite
+passed **167 tests**, with Ruff, mypy, formatting and diff checks clean.
+
+For the 55,616-tick, 63-timeline fixture schedule, the advisory forecast now
+uses only 100 sprint ticks per wall second plus the prior 2.994-second
+per-timeline overhead fallback. That projects about **985 seconds** including
+the separate 240-second two-program reserve, leaving about **2,615 seconds**
+of the frozen one-hour trial for construction and provider latency. A larger
+model-built circuit may run slower; live deadlines and exact tick evidence
+remain authoritative. No model-built module has passed yet.
+
+The sprint-enabled public register negative proof at
+`.noob-agent/redstone-trials/20260924T045146-7c41efc9f3344a57a48be63b475a0341/manifest.json`
+read the deliberately wrong A=8 on initial reset, failed the public check
+against expected A=0, and stopped the incomplete grade. It recorded no errors,
+cleaned the timeline including sprint stop, and verified all seven fixture
+cells were removed. This is fail-closed evidence, not a passing register.
+
+### Milestone 4 authorized provider continuation (2026-09-24 UTC)
+
+The user authorized the bounded Qwen planner comparison and DeepSeek/Jev live
+trials with the redstone contract and world-derived state sent to the respective
+external endpoints. Three planner-only Qwen calls were journaled under
+`20260924T045812-1ad1b404780d40d08dccd5b5270911e1`,
+`20260924T045850-6f04583ae3724674a95d2ac7b0c50fe6`, and
+`20260924T050016-7ee0439564f54fe7afbd19c5fef66df7` in the trial root.
+The schema-constrained call returned `BadRequestError`; the unconstrained
+8,192-token call ended at length with no visible text. With thinking disabled
+and the normal cap, Qwen returned complete JSON with 16 offered actions, but
+its probes used `id`/`pos`/`type` instead of the required `position`/`block`,
+so strict validation rejected it. No Qwen world actions were dispatched.
+
+The connected DeepSeek/Jev trial at
+`.noob-agent/redstone-trials/20260924T050106-66d8f73bc30340e18d58e6aa6a90c4c7/manifest.json`
+ran 25 planner calls, 60 Jev selections and 45 build actions before exhausting
+the frozen 24 repair rounds. The register grader initially found missing
+probes and controls, then a stable but wrong A=2 on reset. No register passed.
+Prompt size grew from 4.8 KB to 92 KB as raw grade traces accumulated.
+The final reset was interrupted during a read-only weather predicate after the
+full world scan and player check had passed, so that trial's final reset stays
+unverified. A separate trusted two-reset check at
+`.noob-agent/redstone-trials/20260924T051243-eed26a372b284d5b863a3282740a1241/manifest.json`
+verified both full baseline scans, player/inventory and settings with matching
+hashes and no errors; the dedicated world is restored.
+
+Planner context now retains the six most recent feedback entries, while the
+manifest still records every attempt and raw grade trace. The system prompt
+asks for a physical repair before repeating a failed public grade and explains
+that levers require durable solid support. The focused local suite passes
+**168 tests**. A first fresh connected trial with these changes,
+`.noob-agent/redstone-trials/20260924T100713-3b09778448fb43e2afc4d2c07fa141de/manifest.json`,
+timed out on its first DeepSeek planner call before Jev or any world action.
+Both full baseline resets verified with matching hashes. The revised repair
+feedback has not yet been exercised live.
+
+A second fresh connected trial,
+`.noob-agent/redstone-trials/20260924T100902-6a1858362d794311839b4a8d63dffd76/manifest.json`,
+also timed out on its first structured DeepSeek planner call before Jev or
+world actions. Both baseline resets verified. A tiny endpoint diagnostic at
+`.noob-agent/redstone-trials/20260924T101040-7bf6547a5d63461c8ffb4c24d5c8b492/manifest.json`
+returned `OK` promptly, so the endpoint was reachable for a short prompt.
+
+Planner-only full-prompt diagnostics tested alternatives without world access:
+`20260924T140117-0e72362fee564907bb928b94737f82aa` returned quickly
+without structured-output enforcement but wrapped JSON in a Markdown fence;
+strict parsing rejected it. `20260924T140214-2446a3aa254e47a0a46a5a0263d651b0`
+and `20260924T140311-816b0a7268c54027a34947ab90d7868e` tried the
+provider's JSON-object mode at 4,096 and 8,192 output tokens. Both hit the
+output cap with incomplete JSON. These calls do not prove that the structured
+schema is the sole timeout cause; they show that simply dropping it does not
+yield a valid bounded intention under these tested settings. No model-built
+module passed.
+
+The provider now accepts construction-only intentions without a module
+inspection; public grades still require a complete declaration and all
+recipes. The first call uses a short eight-action schema containing only the
+construction offer. A planner-only diagnostic at
+`.noob-agent/redstone-trials/20260924T141253-af977a8a392f4d8ca945fefd3114d0ce/manifest.json`
+returned a strictly valid eight-action build intention with 334 output tokens
+and no module inspection. The connected trial at
+`.noob-agent/redstone-trials/20260924T141311-4fabc9f7cd0a42bf9cd3a496f61483ba/manifest.json`
+made 31 build actions across eight observed planner calls. A proposed
+declaration was rejected for aliased probe/control positions, and the ninth
+planner call timed out; no public grade was dispatched. Both baseline resets
+verified. This proves the compact first call unblocks initial construction,
+while later declaration quality and provider latency remain obstacles.
+
+### 2026-09-24 grading handoff and world stability
+
+Construction intentions now carry an explicit `request_grading` flag. The
+planner stays on the compact eight-action schema during construction and moves
+to the full module declaration schema when it asks to grade. This handoff has
+local coverage; it has not yielded a live module grade. The next connected
+attempt (`20260924T142344-53fa771d4eba440b82bab12dc5ed4856/manifest.json`)
+timed out on its first planner call. Its final reset scan found a changed grass
+cell. A separate two-reset run (`20260924T142536-83670f94749b43cdb47002127bcb19a2/manifest.json`)
+restored and verified the frozen baseline.
+
+An idle 65-second hold without construction reproduced the grass-layer drift
+(`20260924T142634-233f098b3f184d009defccd9590ab8d1/manifest.json`). A
+ground scan (`20260924T142914-3145a318da114d72887db1917786e603/manifest.json`)
+found grass at `(76,63,6)` and `(88,63,17)` had become dirt while four sheep
+were present and mob griefing was enabled. Trusted resets now set and read back
+`mobGriefing=false` and `doMobSpawning=false` before baseline restoration,
+recorded outside the frozen baseline hash. Two guarded resets passed at the
+original hash in `20260924T143303-0c43fe38349e444284922ad362407f08/manifest.json`.
+The guarded 65-second idle hold then retained every baseline layer and passed
+both resets in `20260924T143335-1a3ffe4901ac4290b48aa525419cb697/manifest.json`.
+
+A fresh DeepSeek/Jev connected trial at
+`20260924T143638-53cf0ef4dd9a44ce8ac68e0b0d7f4583/manifest.json` made
+12 construction actions, then stopped on a Jev gateway HTTP 500. No Jev
+selection or public module grade completed. Both guarded resets verified the
+original baseline hash. Offline checks after this change: 232 redstone tests
+passed when excluding nine local-socket RCON fixtures that this sandbox cannot
+run; Ruff and mypy passed. No module passed, so milestone 4 remains incomplete.
+
+One final bounded DeepSeek/Jev attempt at
+`20260924T212553-1ea3bd18402a4efd9c68a7723ebad615/manifest.json`
+made 45 construction actions across six planner intentions, then stopped on
+Jev gateway HTTP 429. No public module grade was dispatched. Initial and final
+guarded resets both verified the original baseline hash. The gateway limit
+prevents further useful connected trials at this checkpoint; all four public
+module passes remain pending.
+
+### 2026-09-24 construction progress guard
+
+The 45-action run above showed six successive planner intentions placing only
+stone rows. The provider loop now reports verified cumulative stone and signal
+or control placement counts in feedback. While no wire, torch, repeater,
+comparator, lever, button or lamp has been verified, any placement intention
+without one of these offered components is rejected before Jev dispatch and
+returned to the planner for correction. A static redstone power block alone
+does not satisfy the guard. The compact prompt also explains that the existing
+grass floor supports y=64 placements and that levers need valid face/facing
+properties. This rule supplies no circuit layout and confers no public pass.
+A bounded planner-only DeepSeek diagnostic saved its result in
+`.noob-agent/redstone-trials/development-m4-progress/revised-first-intention.json`;
+its reply was not parseable JSON, so it provides no evidence that the new
+prompt produces a better design.
+
+A bounded Qwen planner-only comparison with the compact schema returned a
+strictly valid eight-action intention containing eight stone placements and no
+register control or signal path. Evidence is in
+`.noob-agent/redstone-trials/development-m4-progress/qwen-compact-first.json`
+and its raw reply. A second proposed Qwen call with synthetic trial feedback
+was rejected by automatic approval review before dispatch because that
+feedback exceeded the earlier authorization's recognized scope. No connected
+Qwen trial was attempted.
+
+The next authorized DeepSeek/Jev connected trial at
+`.noob-agent/redstone-trials/20260924T213644-1fea7be9e48a409bbd5836fc4d209c24/manifest.json`
+made 38 construction actions, including four static redstone power blocks,
+26 stone blocks and seven glass blocks. Its lever action used invalid
+`facing=up` and was rejected by the block-state validator. Jev then returned
+HTTP 429. No public module grade ran; both resets verified the original
+baseline hash. The signal/control guard and lever prompt clarification above
+follow from this result and have not yet received a connected live trial.
+The focused redstone suite excluding local socket RCON fixtures passed **235
+tests** after the guard refinement; Ruff, mypy, formatting and diff checks
+passed.
+Milestone 4 remains incomplete.
+
+### 2026-09-24 DeepSeek V4-Pro planner and action budget
+
+W&B's current [DeepSeek V4-Pro-0813 model page](https://wandb.ai/site/inference-model/deepseek-v4-pro-0813/)
+lists the exact model ID `deepseek-ai/DeepSeek-V4-Pro-0813`. One bounded
+planner-only request in
+`.noob-agent/redstone-trials/development-m4-progress/deepseek-pro-first.json`
+returned a strictly valid eight-action intention with four stone supports,
+two levers and two redstone wires. This was a stronger first construction
+offer than the Flash and Qwen all-stone responses; it was not a module pass.
+
+The first connected V4-Pro/Jev run,
+`.noob-agent/redstone-trials/20260924T214239-8ec32e7bedda482abf394b31f5e4f34e/manifest.json`,
+made 26 bounded build attempts, including levers, wire and lamps, then stopped
+on an intention's `max_actions=16` after the planner offered 12 actions. Each
+placement consumes at least five primitive charges for validation, mutation,
+settling and readbacks. Both resets verified the original baseline hash. The
+provider loop now rejects an action cap that cannot cover all offers and
+readbacks before Jev dispatch; the prompt asks the planner to omit action/time
+caps and use their safe defaults. If a planner requests the full declaration
+schema but then continues construction without an inspection, the next turn
+returns to the compact build schema.
+
+The next connected V4-Pro/Jev run,
+`.noob-agent/redstone-trials/20260924T214550-5576b54b995042a2b5b4428dd8889996/manifest.json`,
+made 38 bounded build attempts across 22 planner intentions, including six
+lever, 18 wire, four lamp and ten stone placements. One undersized action cap
+was rejected and corrected before dispatch. Several placements produced
+recorded effect mismatches; Jev later returned HTTP 429. No public module
+grade ran, and both resets verified the original baseline hash. The focused
+redstone suite excluding sandbox-blocked local socket RCON fixtures passed
+**237 tests** after the budget and handoff changes; Ruff, formatting, mypy and
+diff checks passed.
+
+### 2026-09-24 Jev pacing, repeated placement and reset recovery
+
+Vercel's public [AI Gateway error reference](https://vercel.com/docs/ai-gateway/sdks-and-apis/openresponses)
+labels HTTP 429 as a rate-limit response; its [budget documentation](https://vercel.com/docs/ai-gateway/observability-and-spend/budgets)
+uses HTTP 402 for a spend cap. Provider-mode Jev calls now start at least four
+seconds apart, and full-schema provider intentions still offer at most eight
+actions. The connected V4-Pro/Jev trial at
+`.noob-agent/redstone-trials/20260924T215140-4d706b9040494bae92e6c5cd7f3b33ed/manifest.json`
+reached 135 charged Jev calls without a 429, but no public grade. It repeatedly
+re-placed the same A1 and A2 wires, with one cell verified eight times. The
+loop now rejects an identical placement at a cell already verified during that
+trial and asks for a circuit change or grading. That guard has local coverage;
+the interrupted live process had loaded the prior code and did not exercise it.
+
+The trial was interrupted after this no-progress pattern. Its in-process
+final reset failed with `BrokenPipeError` because the sidecar pipe was gone,
+so that manifest correctly records the final reset as unverified. A separate
+trusted two-reset run at
+`.noob-agent/redstone-trials/20260924T220128-a848e2673490489db57ae32c1b165e20/manifest.json`
+then verified the original baseline hash twice with no errors. Trial cleanup
+now makes one fresh RCON/sidecar connection and repeats full final-reset
+verification if the first final reset raises; it records both the first error
+and the recovery result. This recovery path is covered by an offline test and
+has not yet been exercised in a live interrupted trial. Milestone 4 remains
+incomplete.
