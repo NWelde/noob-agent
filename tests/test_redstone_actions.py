@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from noob_agent.redstone.actions import ActionLimit, Actions, EffectMismatch
+from noob_agent.redstone.actions import ActionLimit, Actions, EffectMismatch, InvalidBlockState
 from noob_agent.redstone.trial import TrialManifest
 
 
@@ -41,6 +41,25 @@ def test_invalid_attempts_and_observations_are_charged(tmp_path: Path) -> None:
         actions.observe([0, 64, 0])
     assert actions.used == 2
     assert transport.commands == []
+
+
+def test_completed_registry_rejection_is_recorded_without_world_command(tmp_path: Path) -> None:
+    class RejectingReader(Reader):
+        def request(self, request: dict) -> dict:
+            if request["op"] == "validate":
+                return {"valid": False}
+            return super().request(request)
+
+    manifest = TrialManifest(tmp_path)
+    transport = Transport()
+    actions = Actions(manifest, transport, RejectingReader())
+    with pytest.raises(InvalidBlockState):
+        actions.apply("place", [48, 64, 90], "minecraft:lever", {"facing": "up"})
+    assert transport.commands == []
+    assert not actions.stopped
+    action = next(event for event in manifest.data["events"] if event["kind"] == "bounded_action")
+    assert action["outcome"] == "observed"
+    assert action["result"] == {"rejected": "invalid_block_state"}
 
 
 def test_actual_failed_effect_is_not_inferred_from_command_success(tmp_path: Path) -> None:
