@@ -1,0 +1,6 @@
+"""Bounded per-call limits for the live redstone planner provider."""
+
+PLANNER_MAX_OUTPUT_TOKENS = 16_384
+PLANNER_TIMEOUT_SECONDS = 60
+JEV_HTTP_503_RETRIES_PER_SELECTION = 3
+JEV_MIN_INTERVAL_SECONDS = 4.0
