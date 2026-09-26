@@ -828,13 +828,31 @@ retained. This uses scripted fixtures, makes no external provider calls, prints
 a manifest path and exits **2** with `model_success=false`.
 
 Provider mode must be explicit: `--trial provider --planner-model MODEL_ID`,
-optionally `--planner-project PROJECT`. Export `WANDB_API_KEY` and
-`AI_GATEWAY_API_KEY` before that mode; Python's preflight does not load `.env`.
-Missing credentials leave an incomplete manifest before world access, with no
-fixture fallback. Public configuration is frozen without credentials. Provider
-mode reuses W&B and the shared Jev handler, has no scripted layout/checker, and
-currently runs to a declared limit; real-provider, full-machine and recording
-verification remain pending. No provider command was executed in this work.
+optionally `--planner-project PROJECT`. Run it through `uv run --env-file .env`
+so Python receives the `WANDB_API_KEY` and `AI_GATEWAY_API_KEY` values from the
+local environment file. Missing credentials leave an incomplete manifest before
+world access, with no fixture fallback. Public configuration is frozen without
+credentials. Provider mode reuses W&B and the shared Jev handler, has no scripted
+layout/checker, and runs public module graders when the planner submits module
+recipes. Positive model-designed module evidence, full-machine verification and
+recording remain pending. The Jev key loads with `uv run --env-file .env`. An
+initial provider-mode attempt failed because the local Minecraft server was down;
+after it was started, automatic review rejected the request to send planner prompt
+and project state to W&B/Jev. No external model request was made.
+
+Later approved provider runs reached W&B and Jev. The latest retained results,
+including the initial valid planner intention, bounded Jev selections and the
+subsequent Jev failure and a later planner timeout, are recorded in the
+[September 24 trial handoff](docs/redstone-trials.md#milestone-4-first-live-provider-attempts-2026-09-24-utc).
+No module passed and `model_success` remains false.
+
+To diagnose a missing-key launch without contacting either provider, check only
+whether both variables reach Python:
+
+```sh
+uv run --env-file .env python -c \
+  'import os; print("WANDB_API_KEY present:", bool(os.getenv("WANDB_API_KEY", "").strip())); print("AI_GATEWAY_API_KEY present:", bool(os.getenv("AI_GATEWAY_API_KEY", "").strip()))'
+```
 
 See [exact live evidence, checks and current handoff](docs/redstone-trials.md#canonical-connected-trial-continuation-2026-09-23-utc).
 Earlier milestone-3 “command/live proof pending” paragraphs are historical.
@@ -842,8 +860,9 @@ Earlier milestone-3 “command/live proof pending” paragraphs are historical.
 Milestone 4 also supports read-only planner-declared interface inspection:
 `uv run python scripts/run_redstone_trial.py --inspect-module declaration.json`.
 It records actual probe/control readings and detailed rejection evidence, returns
-exit 2, and cannot pass a module or machine. The four behavioral graders and
-trusted timed controls remain pending. See [trial coverage and continuation](docs/redstone-trials.md#milestone-4-interface-foundation-checkpoint-2026-09-22).
+exit 2, and cannot pass a module or machine. The four graders and trusted timed
+controls are implemented; positive module and model-designed success remain
+unverified. See [trial coverage and continuation](docs/redstone-trials.md#milestone-4-interface-foundation-checkpoint-2026-09-22).
 
 Milestone 4 trusted control proof (dedicated world only):
 
@@ -855,8 +874,9 @@ This temporary lever/dust fixture verifies declared near/far controls and probes
 actual two-server-tick STEP evidence, failure handling and grading budget stop.
 It prints a retained manifest and deliberately exits 2 (infrastructure only).
 See [verified results and continuation API](docs/redstone-trials.md#milestone-4-trusted-control-continuation-2026-09-22).
-Programming recipes, exact 200-tick cycle scheduling, all four behavioral graders
-and live model-designed module success remain pending.
+The four behavioral graders, bounded programming recipes, exact 200-tick cycle
+scheduling and legacy control wrappers are implemented. Positive model-designed
+module evidence remains pending.
 
 Milestone-4 exact timing fixture: `uv run python scripts/run_redstone_trial.py
 --timeline-proof` (run on one line; exit 2 denotes incomplete module/model evidence).
@@ -865,6 +885,13 @@ and missing-probe rejection, then cleans up its owned functions/fixtures. Interr
 timeline recovery: `uv run python scripts/run_redstone_trial.py --recover-timeline
 PATH/manifest.json`, after stopping its writer. See the single-timeline checkpoint
 in [trial docs](docs/redstone-trials.md) for retained evidence and remaining graders.
+
+The timeline now supports distinct bounded preparation recipes on successive
+cycles and aggregates recorded scoreboard evidence into per-timeline Minecraft
+storage for one RCON readback. A provider-free Minecraft 1.21.1 fixture passed
+the distinct-recipe, raw-snapshot, readback and cleanup checks; public module
+circuits remain unverified. See the latest timeline continuation in
+`docs/redstone-trials.md` for its manifest.
 
 Milestone-4 public module graders and restricted value-addressed recipes are now
 implemented; controlled reader fixtures cover all four modules. For retained
@@ -876,6 +903,13 @@ This does not demonstrate a passing model-designed circuit.
 Milestone 4 continuation: planner declarations support compact validated
 `recipe_templates`, and public behavioral checks return the first observed
 failure for repair without claiming unrun cases passed. Complete local declarations
-measure 434–1399 tokens (`o200k_base`, limit 4096). Runtime acceptance remains
-blocked by full-suite scheduling; passing model-designed circuits are deferred.
-See [exact results and next work](docs/redstone-trials.md#milestone-4-bounded-continuation-compact-mappings-and-prompt-failure-feedback).
+measure 434–1399 tokens (`o200k_base`, limit 4096). The latest fixture forecast is
+55,616 scheduled ticks across 63 timelines; applying the historical 2.994-second
+overhead fallback plus two final program reserves gives about 3,209
+seconds, leaving roughly 391 seconds for reset, construction, provider latency
+and cleanup. A 57-probe proof measured 2.270 seconds overhead on an eight-sample
+timeline, but this remains a narrow estimate rather than a suite-wide bound.
+Completed missing-probe/control evidence now returns as a failed public check for
+planner repair; ambiguous transport or cleanup failures still stop the trial.
+Passing model-designed circuits remain unverified. See
+[exact results and next work](docs/redstone-trials.md#milestone-4-bounded-continuation-compact-mappings-and-prompt-failure-feedback).
