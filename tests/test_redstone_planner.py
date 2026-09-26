@@ -54,6 +54,17 @@ def test_duplicate_ids_and_intention_limit():
         validate_intention(value, MachineContract())
 
 
+def test_out_of_bounds_feedback_identifies_the_action_and_coordinates():
+    value = intention()
+    value["actions"][0]["position"] = [48, 64, 98]
+    with pytest.raises(
+        ValueError,
+        match=r"Action support at x 48 y 64 z 98 outside build bounds",
+    ):
+        validate_intention(value, MachineContract())
+    assert "y=63 is protected ground" in PlannerContext(MachineContract()).request({}).system
+
+
 async def test_context_is_fresh_and_actual_feedback_reaches_next_request():
     class Client:
         async def complete(self, request):
@@ -74,6 +85,51 @@ async def test_context_is_fresh_and_actual_feedback_reaches_next_request():
     second = PlannerContext(MachineContract())
     assert '"passed": false' not in second.request({}).prompt
     assert "independent_final_checks" not in second.request({}).prompt
+
+
+def test_output_cap_repair_schema_limits_response_size():
+    context = PlannerContext(MachineContract())
+    ordinary = context.request({}).response_schema
+    assert ordinary["properties"]["actions"]["maxItems"] == 32
+    context.feedback(
+        {"intention_rejected": "Response reached its output token cap before complete JSON."}
+    )
+    compact = context.request({}).response_schema
+    assert compact["properties"]["actions"]["maxItems"] == 8
+    assert compact["properties"]["summary"]["maxLength"] == 200
+    assert compact["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] == 160
+    assert ordinary["properties"]["actions"]["maxItems"] == 32
+
+
+def test_provider_feedback_retains_recent_failures_without_unbounded_prompt_growth():
+    context = PlannerContext(MachineContract(), require_module_grading=True)
+    for index in range(9):
+        context.feedback({"failed_case": index})
+    feedback = json.loads(context.request({}).prompt)["feedback"]
+    assert [item["failed_case"] for item in feedback] == [3, 4, 5, 6, 7, 8]
+    context.grading_enabled = True
+    assert "physical repair before regrading" in context.request({}).system
+
+
+def test_provider_schema_allows_build_only_and_bounds_intention():
+    context = PlannerContext(MachineContract(), require_module_grading=True)
+    first = context.request({})
+    schema = first.response_schema
+    assert schema["properties"]["actions"]["maxItems"] == 8
+    assert schema["properties"]["summary"]["maxLength"] == 200
+    assert schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] == 160
+    assert "module_inspection" not in schema["properties"]
+    assert list(schema["$defs"]) == ["OfferedAction"]
+    assert "quoted string id" in first.system
+    assert "request_grading" in schema["properties"]
+    context.feedback(
+        {"intention_rejected": "Response reached its output token cap before complete JSON."}
+    )
+    assert "module_inspection" not in context.request({}).response_schema["properties"]
+    context.grading_enabled = True
+    later = context.request({}).response_schema
+    assert later["properties"]["actions"]["maxItems"] == 8
+    assert "module_inspection" in later["properties"]
 
 
 def test_wandb_sdk_disables_retries_and_sets_timeout(monkeypatch):
@@ -109,6 +165,6 @@ def test_complete_parameterized_declarations_are_planner_intentions(module):
     validated = validate_intention(json.loads(json.dumps(reply)), MachineContract())
     assert validated.module_inspection.recipe_templates
     request = PlannerContext(MachineContract()).request({})
-    assert request.max_output_tokens == 4096
+    assert request.max_output_tokens == 16_384
     assert "recipe_templates" in request.system
     assert "ParameterBit" in request.response_schema["$defs"]
