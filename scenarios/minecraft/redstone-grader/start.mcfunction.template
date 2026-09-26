@@ -1,5 +1,0 @@
-scoreboard players set done {objective} 0
-scoreboard players set off {objective} 0
-execute store success score on {objective} run execute if block {position} minecraft:lever[{geometry},powered=false] run setblock {position} minecraft:lever[{geometry},powered=true]
-execute store result score start {objective} run time query gametime
-execute if score on {objective} matches 1 run schedule function {namespace}:finish 2t replace
