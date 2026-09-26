@@ -117,13 +117,25 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
             resets.append(self.manifest.data["run_id"])
 
     class Loop:
-        def __init__(self, manifest, actions, model, evaluator, *, check):
+        def __init__(
+            self,
+            manifest,
+            actions,
+            model,
+            evaluator,
+            *,
+            check,
+            require_module_grading=False,
+            jev_min_interval_seconds=0,
+        ):
             assert type(model) is planner.TrialWandbClient
             assert type(evaluator) is jev.JevSubprocess
             assert evaluator.command[-1] == "scripts/jev_handler.mjs"
             assert model._model.inference_model == "open/model"
             assert model._wandb.api_key == "secret-planner"
             assert check is None
+            assert require_module_grading is True
+            assert jev_min_interval_seconds == 4
             instances.append((manifest, model, evaluator))
 
         async def run(self, observation):
@@ -140,6 +152,110 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
     assert resets == [first.data["run_id"]] * 2 + [second.data["run_id"]] * 2
     assert first.data["errors"] == [{"stage": "trial_loop", "type": "RuntimeError"}]
     assert "secret-" not in first.path.read_text()
+
+
+@pytest.mark.parametrize("final_verified", [True, False])
+def test_public_module_checkpoint_requires_verified_final_reset(
+    tmp_path, monkeypatch, final_verified
+):
+    from noob_agent.redstone import loop, reset, sidecar
+
+    monkeypatch.setenv("WANDB_API_KEY", "secret-planner")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "secret-jev")
+
+    class Resource:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class Reset:
+        def __init__(self, manifest, *args):
+            self.manifest = manifest
+
+        def restore(self):
+            records = self.manifest.data.setdefault("resets", [])
+            records.append(
+                {
+                    "verified": True if not records else final_verified,
+                    "baseline_sha256": "fixture-baseline",
+                }
+            )
+
+    class Loop:
+        def __init__(self, manifest, *args, **kwargs):
+            self.manifest = manifest
+
+        async def run(self, observation):
+            self.manifest.data["loop"] = {"status": "public_modules_passed"}
+            self.manifest.data["milestone_4"] = {
+                "status": "checks_passed",
+                "construction_epoch": 1,
+                "modules": {
+                    name: {"grader_event": index, "construction_epoch": 1}
+                    for index, name in enumerate(("register", "arithmetic", "storage", "output"))
+                },
+            }
+            self.manifest.save()
+
+    monkeypatch.setattr(trial.RconClient, "dedicated", Resource)
+    monkeypatch.setattr(sidecar, "Sidecar", Resource)
+    monkeypatch.setattr(reset, "TrustedReset", Reset)
+    monkeypatch.setattr(loop, "TrialLoop", Loop)
+    manifest = trial.run_trial(
+        trial.TrialConfiguration(mode="provider", planner_model="open/model"), tmp_path
+    )
+    milestone = manifest.data["milestone_4"]
+    assert milestone["status"] == ("passed" if final_verified else "checks_passed")
+    assert manifest.data["final_grade"]["model_success"] is False
+    assert manifest.data["completion"]["status"] == "incomplete"
+    assert "secret-" not in manifest.path.read_text()
+
+
+def test_failed_final_reset_recovers_with_fresh_sidecar_and_full_verification(
+    tmp_path, monkeypatch
+):
+    from noob_agent.redstone import loop, reset, sidecar
+
+    class Resource:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class Reset:
+        def __init__(self, manifest, *args):
+            self.manifest = manifest
+
+        def restore(self):
+            records = self.manifest.data.setdefault("resets", [])
+            records.append({"verified": len(records) != 1, "baseline_sha256": "fixture-baseline"})
+            if len(records) == 2:
+                raise BrokenPipeError("sidecar died")
+
+    class Loop:
+        def __init__(self, manifest, *args, **kwargs):
+            self.manifest = manifest
+
+        async def run(self, observation):
+            self.manifest.data["loop"] = {"status": "stopped"}
+
+    monkeypatch.setattr(trial.RconClient, "dedicated", Resource)
+    monkeypatch.setattr(sidecar, "Sidecar", Resource)
+    monkeypatch.setattr(reset, "TrustedReset", Reset)
+    monkeypatch.setattr(loop, "TrialLoop", Loop)
+    manifest = trial.run_trial(trial.TrialConfiguration(mode="fixture"), tmp_path)
+    assert [record["verified"] for record in manifest.data["resets"]] == [True, False, True]
+    assert manifest.data["final_reset_recovery"] == {"verified": True}
+    assert {"stage": "final_reset", "type": "BrokenPipeError"} in manifest.data["errors"]
 
 
 def test_canonical_module_inspection_dispatch(monkeypatch):
