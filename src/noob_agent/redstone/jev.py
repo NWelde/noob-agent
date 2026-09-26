@@ -14,8 +14,20 @@ from typing import Any
 MAX_BYTES = 262144
 
 
+class _ProviderFailure(Exception):
+    """Sanitized diagnostics emitted by the shared JavaScript handler."""
+
+    def __init__(self, diagnostic: dict[str, str | int]) -> None:
+        super().__init__()
+        self.diagnostic = diagnostic
+
+
 class JevError(RuntimeError):
     """Sanitized failure; callers must charge the attempt before dispatch."""
+
+    def __init__(self, message: str, *, diagnostic: dict[str, str | int] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 def action_request(state: dict[str, Any], criteria: dict[str, str]) -> dict[str, Any]:
@@ -101,8 +113,31 @@ class JevSubprocess:
                             output.extend(chunk)
                             if len(output) > MAX_BYTES:
                                 raise ValueError
-            if process.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
-                raise ValueError
+            return_code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            if return_code != 0:
+                diagnostic = json.loads(output)
+                if (
+                    not isinstance(diagnostic, dict)
+                    or diagnostic.get("error") != "jev_provider_failure"
+                ):
+                    raise ValueError
+                details: dict[str, str | int] = {}
+                name, code, status = (
+                    diagnostic.get("name"),
+                    diagnostic.get("code"),
+                    diagnostic.get("statusCode"),
+                )
+                if isinstance(name, str) and name.isascii() and name.replace("_", "").isalnum():
+                    details["name"] = name[:64]
+                if (
+                    isinstance(code, str)
+                    and len(code) <= 80
+                    and all(char.isascii() and (char.isalnum() or char in "_.-") for char in code)
+                ):
+                    details["code"] = code
+                if type(status) is int and 100 <= status <= 599:
+                    details["statusCode"] = status
+                raise _ProviderFailure(details)
             result = json.loads(output)
             if not isinstance(result, dict):
                 raise ValueError
@@ -118,6 +153,8 @@ class JevSubprocess:
                 "usage": result["usage"],
                 "response": {"modelId": identity, "timestamp": result["response"].get("timestamp")},
             }
+        except _ProviderFailure as error:
+            raise JevError("Jev provider request failed", diagnostic=error.diagnostic) from None
         except Exception:
             raise JevError("Jev subprocess failed or returned an invalid response") from None
         finally:
