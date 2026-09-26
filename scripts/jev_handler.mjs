@@ -65,8 +65,20 @@ async function main() {
       usage: result.usage,
       response: {modelId: result.response.modelId, timestamp: result.response.timestamp},
     }) + '\n');
-  } catch {
+  } catch (error) {
     // Provider errors may contain request headers or sensitive state.
+    const diagnostic = {error: 'jev_provider_failure'};
+    if (typeof error?.name === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(error.name)) {
+      diagnostic.name = error.name;
+    }
+    if (Number.isInteger(error?.statusCode) && error.statusCode >= 100
+      && error.statusCode <= 599) {
+      diagnostic.statusCode = error.statusCode;
+    }
+    if (typeof error?.code === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(error.code)) {
+      diagnostic.code = error.code;
+    }
+    process.stdout.write(JSON.stringify(diagnostic) + '\n');
     throw new Error('Jev evaluation failed. Check the request schema, Gateway key/credits '
       + 'and connectivity. No automatic retry was made.');
   }
