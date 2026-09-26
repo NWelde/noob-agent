@@ -5,6 +5,7 @@ import copy
 import pytest
 
 from noob_agent.redstone.actions import ActionLimit, Actions
+from noob_agent.redstone.contract import MachineContract
 from noob_agent.redstone.modules import inspect_module, structural_identity, validate_declaration
 from noob_agent.redstone.trial import TrialManifest
 
@@ -39,6 +40,30 @@ def declaration(module="register"):
             {"id": "program", "role": "programming", "position": [2, 64, 1]},
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("probe", "Declared a probe 0 at x 0 y 63 z 0 outside build bounds"),
+        ("control", "Declared control reset at x 0 y 64 z 98 outside build bounds"),
+    ],
+)
+def test_out_of_bounds_declaration_identifies_probe_or_control(target, expected):
+    value = declaration()
+    if target == "probe":
+        value["probes"]["a"][0]["position"] = [0, 63, 0]
+    else:
+        value["controls"][0]["position"] = [0, 64, 98]
+    with pytest.raises(ValueError, match=expected):
+        validate_declaration(value, MachineContract())
+
+
+def test_aliased_declaration_names_both_roles_and_coordinate():
+    value = declaration()
+    value["controls"][0]["position"] = [0, 64, 0]
+    with pytest.raises(ValueError, match="Aliased a probe 0 and control reset at x 0 y 64 z 0"):
+        validate_declaration(value, MachineContract())
 
 
 class World:
@@ -95,8 +120,6 @@ def test_actual_readbacks_charged_but_never_behavioral_success(tmp_path, module)
     ],
 )
 def test_invalid_declarations_rejected_before_world_access(mutation):
-    from noob_agent.redstone.contract import MachineContract
-
     value = declaration("output")
     if mutation == "alias":
         value["probes"]["o"][1] = copy.deepcopy(value["probes"]["o"][0])
