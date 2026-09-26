@@ -29,6 +29,25 @@ for line in sys.stdin:
     assert manifest.data["events"][-1]["outcome"] == "observed"
 
 
+def test_completed_registry_rejection_keeps_sidecar_available(tmp_path: Path) -> None:
+    manifest = TrialManifest(tmp_path)
+    body = """
+import sys
+print('{"ready":true,"version":"1.21.1"}')
+for line in sys.stdin:
+    if '"validate"' in line:
+        print('{"ok":false,"error":"request_failed"}')
+    else:
+        print('{"ok":true,"result":{"gameMode":"creative"}}')
+"""
+    with Sidecar(manifest, command=fixture_process(body)) as sidecar:
+        assert sidecar.request(
+            {"op": "validate", "name": "minecraft:lever", "properties": {"facing": "up"}}
+        ) == {"valid": False}
+        assert sidecar.request({"op": "player"}) == {"gameMode": "creative"}
+    assert all(event["outcome"] == "observed" for event in manifest.data["events"])
+
+
 @pytest.mark.parametrize(
     "response", ["", "not json", '{"ok":true}', '{"ok":false,"error":"secret"}']
 )
