@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+2026-09-25 | [CLEANED] | Narrowed the README and reproducibility/status docs to the active Minecraft redstone computer work. Removed tests for retired demo commands and corrected server setup coverage to check only actual data-pack directories. The old demo failures no longer define the current test baseline.
+
 2026-09-24 | [FIXED] | Provider-mode Jev calls now start at least four seconds apart after repeated HTTP 429s; a paced V4-Pro trial reached 135 charged Jev calls without rate limiting but repeated already placed wires and produced no public grade. The loop now rejects identical verified re-placements. After interrupting that unproductive trial, its final reset failed on a dead sidecar pipe; a separate trusted two-reset check verified the original baseline. Final-reset cleanup now reconnects once and repeats full verification after an error, with both outcomes recorded. Milestone 4 remains incomplete.
 
 2026-09-24 | [FIXED] | A bounded DeepSeek V4-Pro-0813 planner call proposed levers and wiring. Its first connected trial stopped when a 12-offer build intention declared `max_actions=16`; the loop now rejects caps too small for offers and readbacks and returns unfinished grading handoffs to compact construction. A second connected V4-Pro trial made 38 build attempts, then Jev returned HTTP 429. Both trials reset to the original baseline; no public module grade ran.
