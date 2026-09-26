@@ -103,7 +103,17 @@ class TimingServer(Server):
             )
         if command.startswith("scoreboard players get"):
             _, _, _, name, objective = command.split()
-            value = {"done": 1, "start": 100, "end": 100 + self.elapsed, "on": 1, "off": 1}[name]
+            if name == "done":
+                value = 1
+            elif name.startswith("s"):
+                offset = int(name[1:])
+                value = 100 + offset + (self.elapsed - 2 if offset >= 2 else 0)
+            elif name.startswith("x"):
+                value = 1
+            elif name.startswith("b"):
+                value = 0
+            else:
+                raise AssertionError(f"Unexpected timing score: {name}")
             return f"{name} has {value} [{objective}]"
         return "OK"
 
@@ -121,10 +131,12 @@ def test_step_uses_server_schedule_and_retains_actual_tick_evidence(tmp_path, mo
     grader, actions = timing_harness(tmp_path, monkeypatch)
     result = grader.pulse_step()
     assert result == {"start": 100, "end": 102, "elapsed_server_ticks": 2, "on": 1, "off": 1}
-    generated = list((tmp_path / "server").rglob("start.mcfunction"))[0].read_text()
-    assert f"schedule function {grader.namespace}:finish 2t replace" in generated
+    generated = list(actions.manifest.path.parent.rglob("t0.mcfunction"))[0].read_text()
+    assert f"schedule function {grader.namespace}:t2 2t replace" in generated
     assert "time query gametime" in generated
-    assert "if block 1 64 1 minecraft:lever[face=floor,facing=north,powered=false]" in generated
+    assert "minecraft:lever[face=floor,facing=north,powered=true]" in generated
+    pulse_end = list(actions.manifest.path.parent.rglob("t2.mcfunction"))[0].read_text()
+    assert "minecraft:lever[face=floor,facing=north,powered=false]" in pulse_end
     assert grader.ticks == 2
     assert actions.used == 1
 
@@ -149,7 +161,7 @@ def test_tick_budget_rejects_before_install_or_schedule(tmp_path, monkeypatch):
 
 def test_nonlever_control_rejected_without_world_mutation(tmp_path):
     grader, actions, server = harness(tmp_path)
-    with pytest.raises(ValueError, match="not a lever"):
+    with pytest.raises(ValueError, match="declared lever missing or mismatched"):
         grader.set_control("reset", True)
     assert all(command.startswith("execute if block") for command in server.commands)
     assert actions.used == 1
@@ -297,7 +309,7 @@ def test_timeline_execution_checks_evidence_and_cleans_on_failure(tmp_path, monk
     if fault:
         with pytest.raises((ValueError, RuntimeError)):
             grader.timeline([], cycles=1)
-        assert actions.stopped
+        assert actions.stopped is (fault != "probe")
     else:
         result = grader.timeline([], cycles=1)
         assert result["timestamps"] == {"s0": 100, "s2": 102, "s200": 300}
@@ -331,6 +343,7 @@ def test_interrupted_cleanup_can_be_recovered_without_replenishing_budget(tmp_pa
         "namespace": grader.namespace,
         "functions": ["t0", "t200", "abort"],
         "state": "pending",
+        "sprint_state": "starting",
     }
     actions.manifest.data["timeline_resources"] = resource
     before = dict(actions.manifest.data["grading_budget"])
@@ -343,6 +356,7 @@ def test_interrupted_cleanup_can_be_recovered_without_replenishing_budget(tmp_pa
     cleanup_timeline(actions.manifest, actions.transport)
     assert resource["state"] == "clean"
     assert actions.manifest.data["grading_budget"] == before
+    assert "tick sprint stop" in actions.transport.commands
     assert f"function {grader.namespace}:abort" in actions.transport.commands
     count = len(actions.transport.commands)
     cleanup_timeline(actions.manifest, actions.transport)
@@ -380,6 +394,85 @@ def test_sample_only_hold_has_no_step_and_uses_same_aggregate(tmp_path, monkeypa
     assert grader.ticks == 400
     second = GraderControl(actions, grader.declaration)
     assert second.ticks == 400
+
+
+def test_sample_only_hold_and_reset_share_timeline_with_two_snapshots(tmp_path, monkeypatch):
+    grader, actions = timing_harness(tmp_path, monkeypatch)
+    captured = {}
+
+    def execute(functions, duration, scores):
+        captured.update(functions=functions, duration=duration)
+        return {name: 1 if name.startswith("x") else 0 for name in scores}
+
+    monkeypatch.setattr(grader, "_execute_timeline", execute)
+    result = grader.timeline(
+        [],
+        cycles=2,
+        sample_only=True,
+        cycle_recipes=[
+            [{"wait": 200}, {"wait": 200}],
+            [
+                {"control": "reset", "level": True},
+                {"wait": 200},
+                {"control": "reset", "level": False},
+                {"wait": 200},
+            ],
+        ],
+    )
+    assert [sample["offset"] for sample in result["snapshots"]] == [400, 800]
+    assert captured["duration"] == 800
+    assert "powered=true" in captured["functions"]["t400"]
+    assert "powered=false" in captured["functions"]["t600"]
+    assert "powered=true" not in captured["functions"].get("t0", "")
+    assert grader.ticks == 800
+    assert actions.used == 1
+
+
+def test_mixed_timeline_keeps_clock_and_sample_checkpoints_distinct(tmp_path, monkeypatch):
+    grader, actions = timing_harness(tmp_path, monkeypatch)
+    captured = {}
+
+    def execute(functions, duration, scores):
+        captured.update(functions=functions, duration=duration)
+        return {name: 1 if name.startswith("x") else 0 for name in scores}
+
+    monkeypatch.setattr(grader, "_execute_timeline", execute)
+    result = grader.timeline(
+        [],
+        cycles=3,
+        cycle_recipes=[
+            [],
+            [{"wait": 200}, {"wait": 200}],
+            [
+                {"control": "reset", "level": True},
+                {"wait": 200},
+                {"control": "reset", "level": False},
+                {"wait": 200},
+            ],
+        ],
+        sample_cycles=[1, 2],
+    )
+    assert result["cycles"] == 1
+    assert result["duration"] == captured["duration"] == 1000
+    assert [item["offset"] for item in result["snapshots"] if item["phase"] == "settled"] == [
+        200,
+        600,
+        1000,
+    ]
+    assert [item["offset"] for item in result["snapshots"] if item["phase"] == "pulse_end"] == [2]
+    assert "powered=true" in captured["functions"]["t600"]
+    assert "powered=false" in captured["functions"]["t800"]
+    assert grader.ticks == 1000
+    assert actions.used == 1
+
+
+@pytest.mark.parametrize("indexes", [[0, 0], [3], [True], [-1]])
+def test_mixed_timeline_rejects_invalid_sample_indexes(tmp_path, monkeypatch, indexes):
+    grader, actions = timing_harness(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="Invalid mixed sample cycles"):
+        grader.timeline([], cycles=3, cycle_recipes=[[], [], []], sample_cycles=indexes)
+    assert actions.used == 1
+    assert not list(tmp_path.rglob("*.mcfunction"))
 
 
 def test_expired_program_rejected_before_world_access(tmp_path, monkeypatch):
