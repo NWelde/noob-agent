@@ -138,6 +138,10 @@ class TrustedReset:
             "gamerule doDaylightCycle false",
             "gamerule doWeatherCycle false",
             "gamerule randomTickSpeed 0",
+            # Peaceful passive sheep still graze and turn grass into dirt.
+            # These guards preserve the frozen block baseline during trials.
+            "gamerule mobGriefing false",
+            "gamerule doMobSpawning false",
             "time set 6000",
             "weather clear",
             "tick rate 20",
@@ -197,11 +201,25 @@ class TrustedReset:
             responses[key] = self.command(command)
             if responses[key] != expected:
                 raise ResetError("Effective setting differs: " + key)
+        guards = {}
+        for key, command in (
+            ("mob_griefing", "gamerule mobGriefing"),
+            ("mob_spawning", "gamerule doMobSpawning"),
+        ):
+            guards[key] = self.command(command)
+            if guards[key] != f"Gamerule {command.split()[-1]} is currently set to: false":
+                raise ResetError("Environment guard differs: " + key)
         tick = self.command("tick query")
         if not tick.startswith("The game is running normallyTarget tick rate: 20.0 per second."):
             raise ResetError("Tick setting differs")
         responses["tick"] = tick
-        record.update(verified=True, world=scan, player=player, settings=responses)
+        record.update(
+            verified=True,
+            world=scan,
+            player=player,
+            settings=responses,
+            environment_guards=guards,
+        )
         self.manifest.data["template"]["verified"] = True
         self.manifest.data["initial_conditions"] = {"verified": True, "player": player}
         self.manifest.save()
