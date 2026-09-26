@@ -15,6 +15,12 @@ from typing import Any, Literal, Protocol
 from pydantic import Field, model_validator
 
 from noob_agent.redstone.contract import FrozenModel, load_contract
+from noob_agent.redstone.provider_limits import (
+    JEV_HTTP_503_RETRIES_PER_SELECTION,
+    JEV_MIN_INTERVAL_SECONDS,
+    PLANNER_MAX_OUTPUT_TOKENS,
+    PLANNER_TIMEOUT_SECONDS,
+)
 from noob_agent.redstone.rcon import RconClient
 
 CONTRACT_PATH = Path("scenarios/minecraft/redstone-computer-v1/contract.json")
@@ -219,10 +225,10 @@ class TrialConfiguration(FrozenModel):
                 if self.mode == "provider"
                 else None,
                 "project": self.planner_project,
-                "max_output_tokens": 4096,
+                "max_output_tokens": PLANNER_MAX_OUTPUT_TOKENS,
                 "temperature": 0.0,
-                "thinking": None,
-                "timeout_seconds": 30,
+                "thinking": False,
+                "timeout_seconds": PLANNER_TIMEOUT_SECONDS,
                 "retries": 0,
             },
             "jev": {
@@ -230,6 +236,10 @@ class TrialConfiguration(FrozenModel):
                 "model": "typesafe-ai/jev" if self.mode == "provider" else "fixture/jev",
                 "timeout_seconds": 30,
                 "retries": 0,
+                "charged_http_503_retries_per_selection": JEV_HTTP_503_RETRIES_PER_SELECTION,
+                "min_call_interval_seconds": (
+                    JEV_MIN_INTERVAL_SECONDS if self.mode == "provider" else 0
+                ),
             },
         }
 
@@ -237,8 +247,9 @@ class TrialConfiguration(FrozenModel):
 def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialManifest:
     """Explicit fresh connected trial with trusted resets and honest partial evidence.
 
-    Provider mode has no scripted layout/checker or fixture fallback. Until module
-    graders exist it runs to a declared limit; it cannot establish machine success.
+    Provider mode has no scripted layout or fixture fallback. Public module
+    graders run when the planner declares recipes, but the trial has no final
+    full-machine grader and cannot establish machine success.
     Credentials are checked before touching Minecraft and never serialized.
     """
     import asyncio
@@ -296,7 +307,17 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
             try:
                 stage = "trial_loop"
                 actions = Actions(manifest, transport, sidecar)
-                loop = TrialLoop(manifest, actions, planner, jev, check=checker)
+                loop = TrialLoop(
+                    manifest,
+                    actions,
+                    planner,
+                    jev,
+                    check=checker,
+                    require_module_grading=config.mode == "provider",
+                    jev_min_interval_seconds=(
+                        JEV_MIN_INTERVAL_SECONDS if config.mode == "provider" else 0
+                    ),
+                )
                 asyncio.run(loop.run({"initial_conditions": manifest.data["initial_conditions"]}))
             except Exception as error:
                 manifest.data["errors"].append({"stage": stage, "type": type(error).__name__})
@@ -307,17 +328,57 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
                 stage = "final_reset"
                 reset.restore()
                 stage = prior_stage
+        milestone = manifest.data.get("milestone_4")
+        resets = manifest.data.get("resets", [])
+        if (
+            config.mode == "provider"
+            and isinstance(milestone, dict)
+            and milestone.get("status") == "checks_passed"
+            and manifest.data.get("loop", {}).get("status") == "public_modules_passed"
+            and len(resets) >= 2
+            and resets[0].get("verified") is True
+            and resets[-1].get("verified") is True
+            and resets[0].get("baseline_sha256") == resets[-1].get("baseline_sha256")
+            and not any(error.get("stage") == "trial_loop" for error in manifest.data["errors"])
+        ):
+            milestone["status"] = "passed"
+            milestone["final_reset_sha256"] = resets[-1]["baseline_sha256"]
+            manifest.save()
     except BaseException as error:
         manifest.data["errors"].append({"stage": stage, "type": type(error).__name__})
+        manifest.save()
+        if stage == "final_reset" and isinstance(error, Exception):
+            # A process-group interrupt can kill the sidecar before trusted
+            # cleanup finishes. Reconnect once and repeat the full verification.
+            try:
+                with (
+                    RconClient.dedicated() as recovery_transport,
+                    Sidecar(manifest) as recovery_sidecar,
+                ):
+                    TrustedReset(manifest, recovery_transport, recovery_sidecar).restore()
+                manifest.data["final_reset_recovery"] = {"verified": True}
+                manifest.save()
+            except BaseException as recovery_error:
+                manifest.data["errors"].append(
+                    {"stage": "final_reset_recovery", "type": type(recovery_error).__name__}
+                )
+                manifest.save()
+                if not isinstance(recovery_error, Exception):
+                    raise
         if not isinstance(error, Exception):
             raise
     finally:
+        milestone_passed = manifest.data.get("milestone_4", {}).get("status") == "passed"
         manifest.finish_incomplete(
             [
                 "Fixture evidence only"
                 if config.mode == "fixture"
+                else "Milestone 4 public modules passed; no final machine grader"
+                if milestone_passed
                 else "Provider trial; no final grader",
-                "Real-provider, full-machine and recording verification pending; "
+                "Full-machine independent grading and recording pending; model success false"
+                if milestone_passed
+                else "Real-provider, full-machine and recording verification pending; "
                 "no milestone acceptance",
             ]
         )
