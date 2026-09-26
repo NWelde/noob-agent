@@ -101,15 +101,15 @@ def validate_declaration(value: object, contract: MachineContract) -> ModuleDecl
     widths = WIDTHS[declaration.module]
     if set(declaration.probes) != set(widths):
         raise ValueError("Missing or unexpected probe roles")
-    positions = []
+    labelled_positions: list[tuple[str, list[int]]] = []
     for role, width in widths.items():
         probes = declaration.probes[role]
         if len(probes) != width:
             raise ValueError("Incorrect probe width")
-        for probe in probes:
+        for index, probe in enumerate(probes):
             if role == "o" and probe.block != "minecraft:redstone_lamp":
                 raise ValueError("Visible output requires lamps")
-            positions.append(probe.position)
+            labelled_positions.append((f"{role} probe {index}", probe.position))
     ids = [control.id for control in declaration.controls]
     if len(set(ids)) != len(ids):
         raise ValueError("Duplicate control IDs")
@@ -118,11 +118,32 @@ def validate_declaration(value: object, contract: MachineContract) -> ModuleDecl
         raise ValueError("Exactly one reset and STEP are required")
     if declaration.module == "storage" and "programming" not in roles:
         raise ValueError("Storage requires programming controls")
-    positions.extend(control.position for control in declaration.controls)
-    if len({tuple(p) for p in positions}) != len(positions):
-        raise ValueError("Aliased probes or controls")
-    for position in positions:
-        validate_build_action(contract, "break", (position[0], position[1], position[2]))
+    labelled_positions.extend(
+        (f"control {control.id}", control.position) for control in declaration.controls
+    )
+    seen_positions: dict[tuple[int, int, int], str] = {}
+    for label, position in labelled_positions:
+        position_key = (position[0], position[1], position[2])
+        prior = seen_positions.get(position_key)
+        if prior is not None:
+            raise ValueError(
+                f"Aliased {prior} and {label} at x {position_key[0]} "
+                f"y {position_key[1]} z {position_key[2]}"
+            )
+        seen_positions[position_key] = label
+    for label, position in labelled_positions:
+        try:
+            validate_build_action(contract, "break", (position[0], position[1], position[2]))
+        except ValueError as error:
+            if str(error) != "Target outside inclusive build bounds":
+                raise
+            x, y, z = position
+            lower, upper = contract.build_min, contract.build_max
+            raise ValueError(
+                f"Declared {label} at x {x} y {y} z {z} outside build bounds "
+                f"x {lower[0]}..{upper[0]} y {lower[1]}..{upper[1]} "
+                f"z {lower[2]}..{upper[2]}"
+            ) from error
     for key, recipe in declaration.recipes.items():
         if len(key) > 40:
             raise ValueError("Recipe key too long")
