@@ -105,8 +105,24 @@ def test_four_graders_compare_world_snapshots(tmp_path, module, broken):
     assert result["checks"]
     assert actions.manifest.data["checks"][-1] == result
     if module == "register":
-        assert len(result["checks"]) == 64
-        assert sum(sample for _, _, sample in reader.calls) == 48
+        assert len(result["checks"]) == 49
+        assert sum(sample for _, _, sample in reader.calls) == 33
+
+
+def test_register_batch_preserves_ticks_and_reduces_timeline_count():
+    from noob_agent.redstone.behavior import estimate_module_schedule
+    from noob_agent.redstone.contract import MachineContract
+
+    declaration = validate_declaration(compact_declared("register"), MachineContract())
+    schedule = estimate_module_schedule(declaration)
+    assert schedule["scheduled_ticks"] == 16_400
+    assert schedule["timeline_count"] == 17
+    schedules = [
+        estimate_module_schedule(validate_declaration(compact_declared(module), MachineContract()))
+        for module in ("register", "arithmetic", "storage", "output")
+    ]
+    assert sum(int(item["scheduled_ticks"]) for item in schedules) == 55_616
+    assert sum(int(item["timeline_count"]) for item in schedules) == 63
 
 
 def test_recipes_reject_commands_step_and_missing_cases(tmp_path):
