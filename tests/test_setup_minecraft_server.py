@@ -64,11 +64,23 @@ def test_setup_writes_server_files_bot_permissions_and_every_scenario_pack(
     assert (server / "server.jar").read_bytes() == jar
     assert "eula=true" in (server / "eula.txt").read_text()
     properties = (server / "server.properties").read_text()
-    assert "server-port=25566" in properties
+    assert "server-port=25567" in properties
     assert "online-mode=false" in properties
     assert "white-list=true" in properties
-    assert "server-ip=127.0.0.1" in properties
-    assert "level-name=noob-agent-training" in properties
+    assert "server-ip=" in properties
+    assert "enable-rcon=true" in properties
+    assert "rcon.port=25577" in properties
+    rcon_password = next(
+        line.removeprefix("rcon.password=")
+        for line in properties.splitlines()
+        if line.startswith("rcon.password=")
+    )
+    assert len(rcon_password) >= 40
+    assert "level-name=redstone-trials" in properties
+    assert r"level-type=minecraft\:flat" in properties
+    assert '"height"\\:124' in properties
+    assert '"block"\\:"minecraft\\:grass_block"' in properties
+    assert "generate-structures=false" in properties
     ops = json.loads((server / "ops.json").read_text())
     assert ops == [
         {
@@ -80,7 +92,7 @@ def test_setup_writes_server_files_bot_permissions_and_every_scenario_pack(
     ]
     allowed = {entry["name"] for entry in json.loads((server / "whitelist.json").read_text())}
     assert allowed == {"noobagentbot", "judge"}
-    datapacks = server / "noob-agent-training" / "datapacks"
+    datapacks = server / "redstone-trials" / "datapacks"
     for pack in Path("scenarios/minecraft").iterdir():
         if not (pack / "pack.mcmeta").is_file():
             continue

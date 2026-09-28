@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from noob_agent.redstone.rcon import RconError
-from noob_agent.redstone.trial import TrialManifest, run_preflight
+from noob_agent.redstone.trial import TrialManifest, can_auto_continue, run_preflight
 
 
 def test_unique_manifests_start_incomplete_and_journal_pending_attempt(tmp_path: Path) -> None:
@@ -19,6 +19,112 @@ def test_unique_manifests_start_incomplete_and_journal_pending_attempt(tmp_path:
     assert saved["events"][0]["outcome"] == "unknown"
     assert saved["events"][0]["result"] is None
     assert saved["recording"]["status"] == "missing"
+
+
+def test_manifest_can_be_reopened_as_a_new_session(tmp_path: Path) -> None:
+    first = TrialManifest(tmp_path)
+    first.data.update(kind="connected_trial", configuration={"task": "lamp_repair"})
+    first.data["continuation"] = {"ready": True, "state": {"history": []}}
+    first.save()
+
+    resumed = TrialManifest.reopen(first.path)
+
+    assert resumed.path == first.path
+    assert len(resumed.data["sessions"]) == 1
+    assert resumed.data["sessions"][0]["number"] == 1
+    assert resumed.data["continuation"]["state"] == {"history": []}
+    assert resumed.data["completion"]["status"] == "incomplete"
+
+
+def test_only_a_current_task_limit_triggers_automatic_continuation() -> None:
+    evidence = {
+        "continuation": {
+            "ready": True,
+            "session_number": 1,
+            "stop_reason": "LoopLimit",
+        },
+        "sessions": [{"number": 1}],
+        "loop": {"status": "stopped"},
+    }
+
+    assert can_auto_continue(evidence, "lamp_repair") is True
+    assert can_auto_continue(evidence, "computer") is True
+    stale = {**evidence, "continuation": {**evidence["continuation"], "session_number": 0}}
+    assert can_auto_continue(stale, "lamp_repair") is False
+    exhausted = {
+        **evidence,
+        "continuation": {**evidence["continuation"], "session_number": 4},
+        "sessions": [{"number": number} for number in range(1, 5)],
+    }
+    assert can_auto_continue(exhausted, "lamp_repair") is False
+
+
+def test_computer_continuation_rechecks_player_and_touched_blocks(tmp_path: Path) -> None:
+    from noob_agent.redstone.reset import BASELINE
+    from noob_agent.redstone.trial import verify_continuation
+
+    manifest = TrialManifest(tmp_path)
+    manifest.data["continuation"] = {"state": {}}
+    manifest.data["events"].append(
+        {
+            "kind": "bounded_action",
+            "outcome": "observed",
+            "request": {
+                "action": "place",
+                "position": [0, 64, 0],
+                "block": "minecraft:stone",
+                "properties": None,
+            },
+            "result": {
+                "after": {"name": "minecraft:stone", "properties": {}},
+                "effect_verified": True,
+            },
+        }
+    )
+
+    class Actions:
+        observed = []
+
+        def read(self, request):
+            assert request == {"op": "player"}
+            return {
+                "username": "noobagentbot",
+                "gameMode": "creative",
+                "dimension": "overworld",
+                "orientationUnits": "radians",
+                "position": [48.5, 64, 98.5],
+                "yaw": 0,
+                "pitch": 0,
+                "inventory": BASELINE["inventory"],
+            }
+
+        def observe(self, position):
+            self.observed.append(position)
+            return {"name": "minecraft:stone", "properties": {}, "position": position}
+
+    actions = Actions()
+    result = verify_continuation(manifest, "computer", actions=actions)
+
+    assert result["resume_check"]["blocks_checked"] == 1
+    assert actions.observed == [[0, 64, 0]]
+
+    actions.observed.clear()
+    actions.observe = lambda position: {
+        "name": "minecraft:air",
+        "properties": {},
+        "position": position,
+    }
+    result = verify_continuation(manifest, "computer", actions=actions)
+    assert result["resume_check"]["mismatches"] == [
+        {
+            "position": [0, 64, 0],
+            "expected_states": [{"name": "minecraft:stone", "properties": {}}],
+            "actual": {"name": "minecraft:air", "properties": {}, "position": [0, 64, 0]},
+        }
+    ]
+    assert manifest.data["continuation"]["state"]["world_states"] == [
+        {"name": "minecraft:air", "properties": {}, "position": [0, 64, 0]}
+    ]
 
 
 def test_failure_before_connection_leaves_explicit_incomplete_evidence(tmp_path: Path) -> None:

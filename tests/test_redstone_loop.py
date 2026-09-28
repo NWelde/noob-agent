@@ -101,6 +101,45 @@ async def test_sequence_observations_and_feedback_drive_same_trial_repair(tmp_pa
     assert "missing link" not in other[2].requests[0].prompt
 
 
+async def test_limit_checkpoint_restores_feedback_in_a_fresh_loop(tmp_path):
+    manifest = TrialManifest(tmp_path)
+    world = World()
+    first_time = [0.0]
+    first_actions = Actions(manifest, world, world, clock=lambda: first_time[0])
+    first_planner = Planner(manifest)
+    first = TrialLoop(
+        manifest,
+        first_actions,
+        first_planner,
+        Jev(manifest),
+        clock=lambda: first_time[0],
+        check=lambda _: (first_time.__setitem__(0, 1000.0) or {"passed": False}),
+    )
+    await first.run({"starting": True})
+
+    assert manifest.data["continuation"]["ready"] is True
+    saved_state = manifest.data["continuation"]["state"]
+    second_time = [0.0]
+    second_actions = Actions(manifest, world, world, clock=lambda: second_time[0])
+    second_planner = Planner(manifest)
+    second = TrialLoop(
+        manifest,
+        second_actions,
+        second_planner,
+        Jev(manifest),
+        task="computer",
+        resume_state=saved_state,
+        clock=lambda: second_time[0],
+        check=lambda _: {"passed": True, "complete": True},
+    )
+    await second.run({"rechecked": True})
+
+    request_body = json.loads(second_planner.requests[0].prompt)
+    assert request_body["observations"] == {"rechecked": True}
+    assert request_body["feedback"][0]["results"][0]["result"]["name"] == "minecraft:air"
+    assert manifest.data["loop"]["status"] == "checkpoint_complete"
+
+
 async def test_jev_calls_are_paced_without_charging_a_wait(tmp_path, monkeypatch):
     now = [0.0]
     delays = []
@@ -255,7 +294,124 @@ async def test_provider_rejects_replacing_verified_identical_cell(tmp_path, monk
     assert manifest.data["milestone_4"]["construction_epoch"] == 1
     rejected = [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
     assert len(rejected) == 3
-    assert "Block already verified at x 30 y 64 z 30" in rejected[0]["request"]["reason"]
+    assert "repeated block at x 30 y 64 z 30" in rejected[0]["request"]["reason"]
+
+
+async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_path, monkeypatch):
+    checks = iter([{"passed": False}, {"passed": True, "complete": True}])
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, require_module_grading=True, check=lambda _: next(checks)
+    )
+    replies = [
+        {
+            "summary": "Place support",
+            "actions": [
+                {
+                    "id": "support",
+                    "criteria": "Place support block",
+                    "action": "place",
+                    "position": [30, 64, 30],
+                    "block": "minecraft:stone",
+                },
+                {
+                    "id": "initial_lever",
+                    "criteria": "Place a lever above the support",
+                    "action": "place",
+                    "position": [30, 65, 30],
+                    "block": "minecraft:lever",
+                },
+            ],
+        },
+        {
+            "summary": "Repair the lever and retain its support",
+            "actions": [
+                {
+                    "id": "repeat_support",
+                    "criteria": "Confirm the support block",
+                    "action": "place",
+                    "position": [30, 64, 30],
+                    "block": "minecraft:stone",
+                },
+                {
+                    "id": "repair_lever",
+                    "criteria": "Restore the missing lever",
+                    "action": "place",
+                    "position": [30, 65, 30],
+                    "block": "minecraft:lever",
+                },
+            ],
+        },
+    ]
+    requests = []
+
+    async def complete(request):
+        requests.append(request)
+        reply = replies[len(requests) - 1]
+        return ModelResponse(
+            text=json.dumps(reply), input_tokens=3, output_tokens=4, model_id="fixture"
+        )
+
+    planner.complete = complete
+    selections = iter(["support", "__finish__", "repair_lever"])
+    jev.requests = []
+
+    def evaluate(request, *, timeout):
+        jev.requests.append(json.loads(json.dumps(request)))
+        return {
+            "answers": {"action": {"choice": next(selections)}},
+            "usage": {"totalTokens": 5},
+            "response": {"modelId": "fixture/jev"},
+        }
+
+    jev.evaluate = evaluate
+    applied = []
+
+    def apply(action, position, block, properties):
+        applied.append((action, position, block))
+        return {"effect_verified": True}
+
+    monkeypatch.setattr(actions, "apply", apply)
+
+    await loop.run({})
+
+    assert applied == [
+        ("place", [30, 64, 30], "minecraft:stone"),
+        ("place", [30, 65, 30], "minecraft:lever"),
+    ]
+    assert len(jev.requests) == 3
+    second = jev.requests[2]
+    assert "repeat_support" not in second["questions"]["action"]["criteria"]
+    assert "repair_lever" in second["questions"]["action"]["criteria"]
+    assert second["state"]["results"][0] == {
+        "id": "repeat_support",
+        "skipped": "identical_verified_placement",
+        "position": [30, 64, 30],
+    }
+    assert any(event["kind"] == "action_offer_skipped" for event in manifest.data["events"])
+    assert manifest.data["loop"]["status"] == "checkpoint_complete"
+
+
+async def test_lamp_repair_task_rejects_actions_outside_seeded_fixture(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path, task="lamp_repair")
+    planner.value = {
+        "summary": "Place wire outside the repair fixture",
+        "actions": [
+            {
+                "id": "wire",
+                "criteria": "Place wire",
+                "action": "place",
+                "position": [51, 64, 95],
+                "block": "minecraft:redstone_wire",
+            }
+        ],
+    }
+
+    await loop.run({})
+
+    assert not jev.requests
+    assert actions.used == 0
+    rejected = [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
+    assert rejected[0]["request"]["reason"].startswith("Lamp repair demo permits")
 
 
 async def test_unfinished_grading_handoff_returns_to_compact_build_schema(tmp_path, monkeypatch):
@@ -382,6 +538,71 @@ async def test_provider_grading_handoff_requests_full_schema_only_when_ready(tmp
     assert "module_inspection" not in requests[1].response_schema["properties"]
     assert "module_inspection" in requests[2].response_schema["properties"]
     assert manifest.data["milestone_4"]["modules"]["register"]["construction_epoch"] == 1
+
+
+async def test_provider_forces_public_grade_after_three_construction_intentions(
+    tmp_path, monkeypatch
+):
+    from test_redstone_behavior import compact_declared
+
+    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    builds = [
+        {
+            "summary": f"Build register piece {index}",
+            "actions": [
+                {
+                    "id": f"control-{index}",
+                    "criteria": "Place supported register control",
+                    "action": "place",
+                    "position": [80, 64, index],
+                    "block": "minecraft:lever",
+                }
+            ],
+        }
+        for index in range(3)
+    ]
+    replies = [
+        *builds,
+        {
+            "summary": "Grade current register module",
+            "actions": [],
+            "module_inspection": compact_declared("register"),
+        },
+    ]
+    requests = []
+
+    async def complete(request):
+        requests.append(request)
+        if len(requests) > len(replies):
+            raise RuntimeError("stop after forced grade")
+        return ModelResponse(
+            text=json.dumps(replies[len(requests) - 1]),
+            input_tokens=3,
+            output_tokens=4,
+            model_id="fixture",
+        )
+
+    planner.complete = complete
+    monkeypatch.setattr(actions, "apply", lambda *args: {"effect_verified": True})
+    monkeypatch.setattr(
+        "noob_agent.redstone.loop.grade_module",
+        lambda runtime, declaration, *, fail_fast: {
+            "module": declaration.module,
+            "scope": "public_module_behavior",
+            "complete": True,
+            "behavioral_passed": True,
+            "checks": [{"passed": True}],
+            "failed_checks": [],
+        },
+    )
+
+    await loop.run({})
+
+    assert len(jev.requests) == 3
+    assert "module_inspection" not in requests[0].response_schema["properties"]
+    assert "module_inspection" in requests[3].response_schema["properties"]
+    assert "construction limit was reached" in requests[3].system.lower()
+    assert manifest.data["milestone_4"]["modules"]["register"]["construction_epoch"] == 3
 
 
 @pytest.mark.parametrize("provider", ["planner", "jev"])
@@ -714,6 +935,7 @@ async def test_rejected_block_state_returns_to_planner_without_stopping_world(tm
     await loop.run({})
     assert len(planner.requests) == 2
     assert "invalid_block_state" in planner.requests[1].prompt
+    assert "Boolean properties require JSON true/false" in planner.requests[1].prompt
     assert manifest.data["loop"]["status"] == "checkpoint_complete"
     assert not [event for event in manifest.data["events"] if event["kind"] == "bounded_command"]
 

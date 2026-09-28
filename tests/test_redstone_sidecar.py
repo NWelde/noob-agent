@@ -1,6 +1,7 @@
 """Transport behavioral checks with local processes, no Minecraft needed."""
 
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -95,3 +96,25 @@ def test_raw_command_is_not_sent_or_recorded(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             sidecar.request({"op": "command", "command": "stop"})
     assert manifest.data["events"] == []
+
+
+def test_persistent_connection_supports_requests_and_close_only_detaches_controller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = TrialManifest(tmp_path)
+    controller, daemon = socket.socketpair()
+
+    def attach(self: Sidecar) -> dict[str, object]:
+        self.connection = controller
+        return {"ready": True, "version": "1.21.1"}
+
+    monkeypatch.setattr(Sidecar, "_connect_persistent", attach)
+
+    with Sidecar(manifest, keep_connected=True) as sidecar:
+        daemon.sendall(b'{"ok":true,"result":{"gameMode":"creative"}}\n')
+        assert sidecar.request({"op": "player"}) == {"gameMode": "creative"}
+
+    assert daemon.recv(100) == b'{"op": "player"}\n'
+    assert daemon.fileno() >= 0
+    assert daemon.recv(100) == b""
+    daemon.close()

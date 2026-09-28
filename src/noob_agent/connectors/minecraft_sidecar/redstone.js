@@ -2,8 +2,11 @@
 
 // Dedicated milestone-2 transport. Never imports or alters the legacy sidecar.
 const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const net = require('node:net');
 const readline = require('node:readline');
 const { once } = require('node:events');
+const path = require('node:path');
 const { Vec3 } = require('vec3');
 const contract = require('../../../../scenarios/minecraft/redstone-computer-v1/contract.json');
 
@@ -123,5 +126,78 @@ async function main() {
   }
   bot.quit();
 }
+
+async function persistentMain(socketPath) {
+  const resolvedSocket = path.resolve(socketPath);
+  if (!resolvedSocket.endsWith(path.join('.noob-agent', 'redstone-sidecar.sock')))
+    throw Error('invalid_socket_path');
+  const bot = createDedicatedBot();
+  let server;
+  let activeClient = null;
+  let stopping = false;
+  const pidPath = path.join(path.dirname(resolvedSocket), 'redstone-sidecar.pid');
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    if (server) server.close();
+    if (activeClient) activeClient.end();
+    bot.quit();
+    setTimeout(() => {
+      try { fs.unlinkSync(resolvedSocket); } catch {}
+      try { fs.unlinkSync(pidPath); } catch {}
+      process.exit(0);
+    }, 1000).unref();
+  };
+  bot.on('error', () => {});
+  bot.on('kicked', () => { if (!stopping) process.exit(2); });
+  bot.on('end', () => { if (!stopping) process.exit(2); });
+  const startup = setTimeout(() => process.exit(2), 20000);
+  await once(bot, 'spawn');
+  await bot.waitForChunksToLoad();
+  clearTimeout(startup);
+
+  fs.mkdirSync(path.dirname(resolvedSocket), { recursive: true });
+  try { fs.unlinkSync(resolvedSocket); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  server = net.createServer(socket => {
+    if (activeClient) { socket.destroy(); return; }
+    activeClient = socket;
+    socket.write(JSON.stringify({ ready: true, version: bot.version }) + '\n');
+    const lines = readline.createInterface({ input: socket, crlfDelay: Infinity });
+    (async () => {
+      for await (const line of lines) {
+        if (Buffer.byteLength(line) > 8192) { socket.destroy(); return; }
+        let request;
+        try { request = JSON.parse(line); } catch { socket.destroy(); return; }
+        if (request && request.control === 'shutdown' && Object.keys(request).length === 1) {
+          socket.write(JSON.stringify({ ok: true, stopping: true }) + '\n');
+          shutdown();
+          return;
+        }
+        try {
+          const result = await dispatch(bot, request);
+          socket.write(JSON.stringify({ ok: true, result }) + '\n');
+        } catch {
+          socket.write(JSON.stringify({ ok: false, error: 'request_failed' }) + '\n');
+        }
+      }
+    })().catch(() => socket.destroy());
+    socket.on('close', () => { if (activeClient === socket) activeClient = null; });
+    socket.on('error', () => {});
+  });
+  server.listen(resolvedSocket);
+  await once(server, 'listening');
+  fs.chmodSync(resolvedSocket, 0o600);
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  process.stdout.write(JSON.stringify({ ready: true, persistent: true }) + '\n');
+}
 module.exports = { createDedicatedBot, dispatch, validateBlock };
-if (require.main === module) main().catch(() => process.exit(2));
+if (require.main === module) {
+  if (process.argv[2] === '--persistent') {
+    persistentMain(process.argv[3]).catch(() => process.exit(2));
+  } else {
+    main().catch(() => process.exit(2));
+  }
+}

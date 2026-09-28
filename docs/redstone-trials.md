@@ -1829,3 +1829,185 @@ verification if the first final reset raises; it records both the first error
 and the recovery result. This recovery path is covered by an offline test and
 has not yet been exercised in a live interrupted trial. Milestone 4 remains
 incomplete.
+
+### 2026-09-26 production-demo checkpoint
+
+The dedicated trial server was started from `.noob-agent/redstone-server` and
+the bounded lever/dust/lamp smoke completed without errors in
+`.noob-agent/redstone-trials/20260926T003055-2c0b5a47bb2645d0b78e89853107b777/manifest.json`.
+This is infrastructure evidence only.
+
+The authorized DeepSeek V4-Pro provider attempt at
+`.noob-agent/redstone-trials/20260926T005540-406a2d55933f42a1a9e6ba480e10afc1/manifest.json`
+completed three construction intentions and 24 bounded placements, all with
+verified effects. It then stopped at the grading handoff: three module
+declarations failed validation (missing exactly one reset and STEP control,
+and aliased control positions). No public module inspection or behavioral
+grade ran. Initial and final resets both verified the same baseline hash;
+`model_success` remains false and recording is missing.
+
+The grading threshold now forces the full declaration schema after three
+construction intentions. Validation repair feedback also gives targeted
+instructions for missing reset/STEP roles and aliased positions. The planner
+and loop suites pass 57 tests; Ruff, formatting and mypy checks pass. A further
+provider trial is needed to establish whether the grading handoff now works.
+
+### 2026-09-26 declaration-repair follow-up
+
+Reviewing the provider manifest above showed the alias repair at planner
+validation sequence 368 was followed by another declaration that removed the
+required STEP control, so sequence 370 stopped before any grading or world
+actions. The alias feedback now names both conflicting declarations and their
+shared coordinate, and explicitly tells the planner to retain both declarations
+and move one. Focused planner/loop validation passes (57 tests); Ruff,
+formatting, mypy and `git diff --check` pass. This offline evidence does not
+establish that a provider will follow the more specific repair.
+
+Read-only preflight manifest
+`.noob-agent/redstone-trials/20260926T011136-730adb3695164cd49def49e301f56a92/manifest.json`
+records an RCON connection failure. This execution environment denies local
+loopback and `tmux` socket access. A direct Java server start exited because
+the trial world's `session.lock` was already held; the lock was left untouched.
+No provider retry or live module grade was attempted.
+
+### 2026-09-26 live repair-loop follow-up
+
+With the dedicated server reachable, preflight
+`.noob-agent/redstone-trials/20260926T011808-fabb932978f0494f85d206351cdadbac/manifest.json`
+received all 13 raw probes with no transport errors. The provider trial
+`.noob-agent/redstone-trials/20260926T011858-052a37fde9c64729a6d247e00d1f649e/manifest.json`
+reached six intentions, skipped two duplicate placements, then stopped on a
+repeated validation failure. Initial and final resets matched the same baseline
+hash.
+
+The loop now skips an identical verified placement when other useful offers
+remain, records the skipped offer, and gives Jev only actionable choices. It
+continues to reject intentions containing only identical placements. The
+following trial
+`.noob-agent/redstone-trials/20260926T013121-0003763abe6447cbb5108a32390cf92c/manifest.json`
+exercised the skip path 30 times. Targeted prompt and feedback also cover
+block-state fields on non-placement actions and JSON boolean types. This run
+recorded no `Unexpected block state` validation or `invalid_block_state`
+rejections, but several bounded placements mismatched and repeated behavioral
+grades still found missing controls or probes. It stopped at the frozen limit
+of 24 repair rounds after 39 planner calls, 88 Jev calls and 271 primitive
+actions. Both resets verified the same baseline hash; no public module passed
+and `model_success` remains false.
+
+The focused planner/loop suite passes 59 tests; Ruff, formatting, mypy and diff
+checks pass. The current blocker is model-built register hardware and control
+placement, not trial reset or repair dispatch.
+
+### 2026-09-26 seeded lamp-repair demo slice
+
+To get a reliable end-to-end demo while the 4-bit computer remains incomplete,
+the provider trial now has a separate `lamp-repair` task. After the verified
+world reset, the harness seeds a lever and lamp with one missing wire. The
+planner is constrained to that local repair; Jev executes its actions, and an
+independent Minecraft-state checker requires the lamp to read off, on, then off
+as the lever is toggled. The endpoints are harness-built (`model_built=false`),
+so this is evidence for a seeded repair task only, not a model-designed circuit
+or a computer module pass.
+
+Live provider evidence:
+`.noob-agent/redstone-trials/20260926T015628-ee7c642fd36f44009e177d1f6b5589a4/manifest.json`
+records `demo_task.status=passed`, all three state checks passed, a verified
+initial and final world reset with the same baseline hash, and no errors. The
+recording field is `missing`; this run was not captured as a video. The run
+contains three planner intentions and reaches `checkpoint_complete`; the
+computer `final_grade.model_success` correctly remains false/not evaluated.
+
+Launch instructions and the explicit fixture disclosure are in the README.
+The recording utility can capture a visible Minecraft Java window when one is
+open; recording is managed separately from the provider trial.
+
+### Recorded seeded lamp-repair demo
+
+After opening the Minecraft Java client, OBS capture setup succeeded with the
+`Minecraft Demo` scene and `Minecraft Window` source. A fresh provider run
+`.noob-agent/redstone-trials/20260926T020354-f035c5c011e94bffaacd7b83e2873d50/manifest.json`
+passed all three independent state checks, reached `checkpoint_complete`, had
+no errors, and verified both world resets. It remains explicitly scoped to the
+harness-seeded lamp repair; the full computer grade did not pass.
+
+OBS recording `.noob-agent/recordings/20260926-lamp-repair-demo/recording.mp4`
+is a 25-second 1280×720 H.264/AAC video; the original MKV is beside it. OBS
+capture setup, start, stop, and MP4 remux all completed successfully. The trial
+manifest's own recording field is still `missing` because recording is managed
+by the separate OBS utility, not wired into the trial runner.
+
+That earlier clip showed the desktop client before it was connected to the
+trial server. The final connected capture is
+`.noob-agent/recordings/20260926-north-view-demo/recording.mp4`. The Windows
+Minecraft client joined the dedicated server as `nathanbeyene`; OBS captured
+the in-world client while the agent repaired the fixture. The 118-second
+1280×720 H.264/AAC video visibly shows the lamp off, lit, then off, with the
+agent in frame. Its matching live provider manifest is
+`.noob-agent/redstone-trials/20260926T023418-021882dd4513493dbcb4460e2758d870/manifest.json`:
+all state checks passed, both resets verified, no errors, and the task remains
+explicitly labeled as a harness-seeded lamp repair.
+
+### Persistent computer-task demo, 2026-09-26
+
+Provider demos now use persistent connection by default; `--keep-agent-connected`
+is accepted explicitly, while `--disconnect-after-trial` opts out. The runner starts one local
+Mineflayer daemon, and each trial attaches a short-lived controller to that
+daemon. Ending a stalled trial closes only the controller: the bot stays on the
+server and the partial build stays in the owned region. A subsequent trial
+restores and verifies the baseline in place through the same bot connection.
+`--stop-agent` is the explicit disconnect command. Infrastructure-only commands
+retain their existing short-lived sidecar behavior.
+
+Recorded provider attempt:
+`.noob-agent/redstone-trials/20260926T181730-a0f49c99828d4680a38a806d42eef649/manifest.json`.
+The initial reset verified the full baseline. The model then made bounded
+register-module placements, including a lever, wire, torch and lamp, with
+independent effect readbacks. It stopped after Jev returned HTTP 429; no module
+grade ran. The run is incomplete and `model_success` remains false. There was no
+final reset, and `persistent_agent.status` is `connected_after_trial`. A fresh
+socket read after the run returned player `noobagentbot` still connected at its
+baseline position with its inventory intact. This confirms persistence and
+world preservation behavior, not computer completion.
+
+OBS recording:
+`.noob-agent/recordings/20260926-persistent-computer-register/recording.mp4`
+(with the original MKV alongside it). It was opened in VLC after recording.
+An earlier startup attempt during this capture exposed a persistent transport
+guard bug before any model call; the retry reused the already connected daemon
+within the same recording. Focused sidecar, trial and CLI checks pass, including
+a local-socket test that controller close does not close the daemon peer.
+
+### Session continuation implementation, 2026-09-28
+
+The lamp and computer tasks save planner feedback at each completed intention.
+Computer continuations also save construction counts and module grading state.
+A resource limit starts a new provider session automatically, keeping the same
+world. Before continuing, the harness checks the player and the blocks touched
+by the prior session. Automatic continuation runs up to four sessions. An
+interrupted process or a campaign that reaches that limit can be continued with
+`--resume <manifest>`. A completed lamp task performs the final verified
+baseline restore.
+
+The lamp continuation was tested live with `--session-action-limit 25` to force
+short sessions:
+`.noob-agent/redstone-trials/20260928T214942-8f076b49c5e7400fb3358ab398123522/manifest.json`.
+The manifest records three `ActionLimit` stops and four sessions. The final
+session completed all three independent lamp checks, and the initial and final
+world resets matched the same baseline hash. The final status is
+`demo_task.status=passed`. This confirms lamp-task session restart behavior.
+
+A live computer trial with `--session-action-limit 100` continued across four
+sessions and preserved its partial build, but it did not complete a module. Its
+journal is
+`.noob-agent/redstone-trials/20260928T215715-a5a097c3d45a4a37b05bdeff505ccd28/manifest.json`.
+That run exposed unsupported wire disappearing between sessions. Computer
+continuation now reports mismatched or missing touched blocks to the planner and
+filters those blocks from the saved placement map so it can rebuild them. This
+repair behavior has offline test coverage; another live computer run is still
+needed to verify it end to end.
+
+The Replay Mod client log lists version `1.21-2.6.27`. A read-only Minecraft
+observation at
+`.noob-agent/redstone-trials/20260928T214452-b2d572eeb7234168b1366fde995e3ec8/manifest.json`
+confirmed `noobagentbot` connected to the dedicated world. This trial did not
+record a Replay Mod video.

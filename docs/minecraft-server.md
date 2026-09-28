@@ -1,8 +1,10 @@
 # Local Minecraft Server
 
-This is the dedicated Java Edition server for the noob-agent Minecraft BDP. It
-is separate from TLauncher client data and from the Git repository so worlds,
-logs, allowlist state, and generated scenario data are never committed.
+This is the dedicated Java Edition server for the active redstone-computer demo.
+It is separate from TLauncher client data and is ignored by Git so worlds, logs,
+allowlist state, and generated scenario data are never committed. The old
+`minecraft-server` / `noob-agent-training` world on port 25566 is a retired
+Resonator training environment; do not use it for the computer demo.
 
 ## Frozen baseline
 
@@ -11,17 +13,18 @@ logs, allowlist state, and generated scenario data are never committed.
 | Server implementation | Official vanilla Minecraft Java server |
 | Minecraft version | 1.21.1 |
 | Java runtime | OpenJDK 21.0.12 |
-| Server directory | `/home/nathan/.local/share/noob-agent/minecraft-server` |
-| World directory | `/home/nathan/.local/share/noob-agent/minecraft-server/noob-agent-training` |
-| Server jar | `server-1.21.1.jar` |
+| Server directory | `.noob-agent/redstone-server` |
+| World directory | `.noob-agent/redstone-server/redstone-trials` |
+| Server jar | `server.jar` |
 | SHA-1 | `59353fb40c36d304f2035d51e7d6e6baa98dc05c` |
-| Host | WSL2 local host; `127.0.0.1` from WSL |
-| Port | `25566` |
-| Client address | `<current-WSL-IP>:25566` from Windows; see Client profile below |
+| Host | WSL2 host; `127.0.0.1` from WSL and current WSL IP from Windows |
+| Port | `25567` |
+| Client address | `<current-WSL-IP>:25567` from Windows |
 | Authentication | Offline mode; no Microsoft or TLauncher credentials |
 | Agent player name | `noobagentbot` |
 | Verified human player name | `nathanbeyene` |
-| World name | `noob-agent-training` |
+| World name | `redstone-trials` |
+| World type | Flat; build surface at y=60..64 |
 | tmux session | `noob-agent-minecraft` |
 
 The official download source was Mojang's version manifest and the official
@@ -38,40 +41,53 @@ Important non-default `server.properties` values:
 
 ```properties
 server-ip=
-server-port=25566
+server-port=25567
 online-mode=false
 enforce-secure-profile=false
 white-list=true
 enforce-whitelist=true
 enable-command-block=true
+enable-rcon=true
+rcon.port=25577
 spawn-protection=0
-level-name=noob-agent-training
+level-name=redstone-trials
+level-type=minecraft\:flat
+generator-settings={"layers"\:[{"block"\:"minecraft\:air","height"\:124},{"block"\:"minecraft\:bedrock","height"\:1},{"block"\:"minecraft\:dirt","height"\:2},{"block"\:"minecraft\:grass_block","height"\:1}],"biome"\:"minecraft\:plains"}
+generate-structures=false
 motd=noob-agent local evaluation server
 ```
 
-`server-ip` is deliberately blank so the Java server binds to its available
-interfaces. The server runs under WSL2. On the verified machine setup, Windows
-could reach the WSL address but not `localhost:25566`; do not change the
-connector's port to compensate.
+The default blank `server-ip` binds the game server so TLauncher on Windows can
+reach the WSL address. The RCON password is generated locally and the trial
+connector connects to `127.0.0.1:25577`. Keep this offline-mode server and its
+RCON port on a trusted private machine; do not expose them to a public network.
 
-The world spawn is fixed at `0 100 -5` with `spawnRadius=0`, directly inside
-the Resonator room. This prevents a human client from first appearing at the
-natural world spawn's powder snow. The scenario reset also teleports all
-connected players to `0.5 100 -5.5`, sets Adventure mode, and reconstructs the
-room.
+The dedicated redstone trial world is a flat creative build surface. The
+connected trial harness resets and grades its declared area through the trusted
+RCON path; use `scripts/run_redstone_trial.py` for the demo rather than the
+retired Resonator scenario reset described in the historical connector notes
+below.
 
 ## Operations
+
+Create or refresh the default flatworld setup (after accepting the EULA). The
+default bind allows Windows TLauncher to reach the WSL address. RCON remains
+password protected and the agent connects to its loopback address.
+
+```sh
+uv run python scripts/setup_minecraft_server.py --accept-eula --player nathanbeyene
+```
 
 Start the server in its named tmux session:
 
 ```sh
 tmux new-session -d -s noob-agent-minecraft \
-  'cd /home/nathan/.local/share/noob-agent/minecraft-server && ./start-server.sh'
+  'cd /home/nathan/noob-agent/.noob-agent/redstone-server && java -Xms1G -Xmx2G -jar server.jar nogui'
 ```
 
 Attach to its console with `tmux attach -t noob-agent-minecraft`. Detach
 without stopping it with `Ctrl-b d`. Before starting another copy, check
-`tmux has-session -t noob-agent-minecraft` or `ss -ltnp | rg ':25566\b'`;
+`tmux has-session -t noob-agent-minecraft` or `ss -ltnp | rg ':25567\b'`;
 another process using the same world will correctly fail on `session.lock`.
 
 At the Minecraft server console, add the human client and connector bot:
@@ -128,9 +144,9 @@ Get the current WSL address immediately before connecting:
 hostname -I
 ```
 
-Use the first address followed by `:25566` in Multiplayer -> Direct Connection.
+Use the first address followed by `:25567` in Multiplayer -> Direct Connection.
 For example, the address observed on 2026-09-12 was
-`172.17.247.132:25566`; WSL may assign a different address after a restart.
+`172.17.247.132:25567`; WSL may assign a different address after a restart.
 Enter the address with no leading spaces, protocol prefix, or trailing text.
 
 ## Verification
@@ -151,9 +167,9 @@ sidecar was unavailable; it is not equivalent to a passing integration check.
 Useful independent checks are:
 
 ```sh
-ss -ltnp | rg ':25566\b'
+ss -ltnp | rg ':25567\b'
 powershell.exe -NoProfile -Command \
-  'Test-NetConnection -ComputerName <current-WSL-IP> -Port 25566'
+  'Test-NetConnection -ComputerName <current-WSL-IP> -Port 25567'
 ```
 
 The PowerShell result must show `TcpTestSucceeded : True`.
@@ -192,11 +208,11 @@ such as `[Server: ...]` are never added to observations.
 
 | Client symptom | Verified cause | Fix |
 | --- | --- | --- |
-| `Connection refused` for `localhost` | Windows-to-WSL localhost forwarding is unavailable | Use the first WSL IP from `hostname -I` with port `25566` |
+| `Connection refused` for `localhost` | Windows-to-WSL localhost forwarding is unavailable | Use the first WSL IP from `hostname -I` with port `25567` |
 | `Unknown host` for a numeric IP | Leading spaces were saved before the address | Select the whole address and type the IP with the first digit as the first character |
 | `Failed to encode packet serverbound/minecraft:hello` | Player name exceeds Minecraft's 16-character limit | Use an allowlisted name of at most 16 characters, currently `nathanbeyene` |
 | Client joins in powder snow | Natural world spawn was used instead of the scenario room | Run `setworldspawn 0 100 -5 0`, set `spawnRadius 0`, then run `function noob_agent:reset` |
-| Client can join but connector tests skip | Mineflayer dependency or server process is unavailable | Run `npm ci` in the sidecar directory and confirm port `25566` is listening |
+| Client can join but connector tests skip | Mineflayer dependency or server process is unavailable | Run `npm ci` in the sidecar directory and confirm port `25567` is listening |
 
 ## Current scenario state
 

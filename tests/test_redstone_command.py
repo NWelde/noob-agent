@@ -50,6 +50,32 @@ def test_explicit_fixture_dispatch(monkeypatch, capsys):
     assert "fixture/manifest.json" in capsys.readouterr().out
 
 
+def test_explicit_lamp_repair_provider_dispatch(monkeypatch, capsys):
+    module = command()
+    seen = []
+
+    def run(config):
+        seen.append(config)
+        return type("Saved", (), {"path": Path("demo/manifest.json")})()
+
+    monkeypatch.setattr(module, "run_trial", run)
+    assert (
+        module.main(
+            [
+                "--trial",
+                "provider",
+                "--task",
+                "lamp-repair",
+                "--planner-model",
+                "open/model",
+            ]
+        )
+        == 2
+    )
+    assert seen[0].task == "lamp_repair"
+    assert "demo/manifest.json" in capsys.readouterr().out
+
+
 def test_provider_configuration_is_frozen_public_and_separate():
     config = trial.TrialConfiguration(mode="provider", planner_model="open/model")
     assert config.public()["planner"]["model"] == "open/model"
@@ -61,8 +87,25 @@ def test_provider_configuration_is_frozen_public_and_separate():
     assert config.public()["planner"]["model"] == "open/model"
     with pytest.raises(ValueError):
         trial.TrialConfiguration(mode="provider", planner_model="https://user:secret@host")
+    with pytest.raises(ValueError):
+        trial.TrialConfiguration(mode="fixture", task="lamp_repair")
+    assert (
+        trial.TrialConfiguration(
+            mode="provider", task="lamp_repair", planner_model="open/model"
+        ).public()["task"]
+        == "lamp_repair"
+    )
 
 
+def test_session_action_limit_is_a_positive_lower_cap():
+    config = trial.TrialConfiguration(
+        mode="provider", planner_model="open/model", session_action_limit=25
+    )
+    assert config.public()["session_action_limit"] == 25
+    with pytest.raises(ValueError):
+        trial.TrialConfiguration(
+            mode="provider", planner_model="open/model", session_action_limit=20_001
+        )
 def test_missing_provider_credentials_retained_without_fixture_fallback(tmp_path, monkeypatch):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
@@ -100,7 +143,7 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
     resets = []
 
     class Resource:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         def __enter__(self):
@@ -125,8 +168,10 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
             evaluator,
             *,
             check,
-            require_module_grading=False,
-            jev_min_interval_seconds=0,
+                require_module_grading=False,
+                task="computer",
+                resume_state=None,
+                jev_min_interval_seconds=0,
         ):
             assert type(model) is planner.TrialWandbClient
             assert type(evaluator) is jev.JevSubprocess
@@ -135,6 +180,7 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
             assert model._wandb.api_key == "secret-planner"
             assert check is None
             assert require_module_grading is True
+            assert task == "computer"
             assert jev_min_interval_seconds == 4
             instances.append((manifest, model, evaluator))
 
@@ -164,7 +210,7 @@ def test_public_module_checkpoint_requires_verified_final_reset(
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "secret-jev")
 
     class Resource:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         def __enter__(self):
@@ -222,7 +268,7 @@ def test_failed_final_reset_recovers_with_fresh_sidecar_and_full_verification(
     from noob_agent.redstone import loop, reset, sidecar
 
     class Resource:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         def __enter__(self):

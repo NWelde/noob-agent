@@ -7,7 +7,12 @@ import pytest
 
 from noob_agent.models.client import ModelResponse
 from noob_agent.redstone.contract import MachineContract
-from noob_agent.redstone.planner import PlannerContext, TrialWandbClient, validate_intention
+from noob_agent.redstone.planner import (
+    PlannerContext,
+    TrialWandbClient,
+    planner_validation_instruction,
+    validate_intention,
+)
 from noob_agent.settings import ModelSettings, WandbSettings
 
 
@@ -130,6 +135,66 @@ def test_provider_schema_allows_build_only_and_bounds_intention():
     later = context.request({}).response_schema
     assert later["properties"]["actions"]["maxItems"] == 8
     assert "module_inspection" in later["properties"]
+
+
+def test_forced_grade_switches_to_declaration_schema_and_prompt():
+    context = PlannerContext(MachineContract(), require_module_grading=True)
+    context.force_grading = True
+
+    request = context.request({})
+
+    assert "module_inspection" in request.response_schema["properties"]
+    assert "construction limit was reached" in request.system.lower()
+
+
+def test_lamp_repair_planner_gets_small_task_schema_and_seeded_fixture():
+    request = PlannerContext(MachineContract(), task="lamp_repair").request({})
+
+    assert "module_inspection" not in request.response_schema["properties"]
+    assert "repair the seeded" in request.system.lower()
+    assert request.response_schema["properties"]["actions"]["maxItems"] == 1
+    assert "minecraft:redstone_wire" in request.system
+    assert json.loads(request.prompt)["fixture"]["agent_created"] is False
+    assert "open_connection" in json.loads(request.prompt)["fixture"]
+
+
+def test_grading_validation_feedback_repairs_missing_roles_and_aliased_positions():
+    missing_roles = planner_validation_instruction(
+        "Exactly one reset and STEP are required", "stop"
+    )
+    assert "exactly one" in missing_roles.lower()
+    assert "role `reset`" in missing_roles
+    assert "role `step`" in missing_roles
+
+    aliased_positions = planner_validation_instruction(
+        "Aliased control step and control load at x 14 y 65 z 10", "stop"
+    )
+    assert "distinct" in aliased_positions.lower()
+    assert "position" in aliased_positions.lower()
+    assert "`control step`" in aliased_positions
+    assert "`control load`" in aliased_positions
+    assert "[14, 65, 10]" in aliased_positions
+    assert "keep both" in aliased_positions.lower()
+    assert "do not" in aliased_positions.lower()
+
+
+def test_grading_validation_feedback_preserves_output_cap_repair():
+    instruction = planner_validation_instruction("schema error", "length")
+    assert "compact JSON" in instruction
+
+
+def test_validation_feedback_removes_block_state_from_nonplacement_actions():
+    instruction = planner_validation_instruction("Unexpected block state", "stop")
+    assert "break" in instruction
+    assert "interact" in instruction
+    assert "observe" in instruction
+    assert "only a `place`" in instruction.lower()
+
+
+def test_validation_feedback_uses_namespaced_block_ids():
+    instruction = planner_validation_instruction("Block is not permitted", "stop")
+    assert "minecraft:redstone_wire" in instruction
+    assert "namespaced" in instruction
 
 
 def test_wandb_sdk_disables_retries_and_sets_timeout(monkeypatch):

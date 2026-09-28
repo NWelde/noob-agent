@@ -25,10 +25,133 @@ from noob_agent.redstone.rcon import RconClient
 
 CONTRACT_PATH = Path("scenarios/minecraft/redstone-computer-v1/contract.json")
 RUN_DIRECTORY = Path(".noob-agent/redstone-trials")
+LAMP_MAX_SESSIONS = 4
 
 
 def timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def can_auto_continue(data: dict[str, Any], task: str) -> bool:
+    continuation = data.get("continuation", {})
+    sessions = data.get("sessions", [])
+    return (
+        task in {"lamp_repair", "computer"}
+        and continuation.get("ready") is True
+        and continuation.get("session_number") == len(sessions)
+        and continuation.get("stop_reason") in {"LoopLimit", "ActionLimit"}
+        and data.get("loop", {}).get("status") == "stopped"
+        and len(sessions) < LAMP_MAX_SESSIONS
+    )
+
+
+def verify_continuation(manifest: TrialManifest, task: str, *, actions: Any) -> dict[str, Any]:
+    """Compare the retained build with its last journaled state before resuming."""
+    if task == "lamp_repair":
+        from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
+
+        lever, wire, lamp = (
+            actions.observe(position)
+            for position in (LEVER_POSITION, WIRE_POSITION, LAMP_POSITION)
+        )
+        if lever.get("name") != "minecraft:lever" or lamp.get("name") != "minecraft:redstone_lamp":
+            raise ValueError("Saved lamp fixture no longer matches the continuation record")
+        if wire.get("name") not in {"minecraft:air", "minecraft:redstone_wire"}:
+            raise ValueError("Saved lamp connection no longer matches the continuation record")
+        return {"resume_check": {"lever": lever, "wire": wire, "lamp": lamp}}
+
+    if task != "computer":
+        raise ValueError("Safe continuation verification is not available for this task")
+    from noob_agent.redstone.reset import verify_player
+
+    player = actions.read({"op": "player"})
+    verify_player(player)
+    states: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
+    dynamic = {
+        "powered",
+        "lit",
+        "power",
+        "signal_strength",
+        "north",
+        "south",
+        "east",
+        "west",
+    }
+    for event in manifest.data.get("events", []):
+        if event.get("kind") != "bounded_action":
+            continue
+        request = event.get("request", {})
+        raw_position = request.get("position")
+        action = request.get("action")
+        if (
+            not isinstance(raw_position, list)
+            or len(raw_position) != 3
+            or action not in {"place", "break", "interact"}
+        ):
+            continue
+        position = tuple(raw_position)
+        if not (0 <= position[0] <= 95 and 64 <= position[1] <= 95 and 0 <= position[2] <= 95):
+            continue
+        prior = states.setdefault(position, [{"name": "minecraft:air", "properties": {}}])
+        result = event.get("result")
+        after = result.get("after") if isinstance(result, dict) else None
+        if event.get("outcome") == "observed" and isinstance(after, dict):
+            props = after.get("properties", {})
+            states[position] = [
+                {
+                    "name": after.get("name"),
+                    "properties": {k: v for k, v in props.items() if k not in dynamic},
+                }
+            ]
+        elif event.get("outcome") == "unknown":
+            target = (
+                {"name": request.get("block"), "properties": request.get("properties") or {}}
+                if action == "place"
+                else {"name": "minecraft:air", "properties": {}}
+                if action == "break"
+                else None
+            )
+            if target is not None:
+                prior.append(target)
+    observations = []
+    mismatches = []
+    for position, expected_states in sorted(states.items()):
+        actual = actions.observe(list(position))
+        matched = any(
+            actual.get("name") == expected.get("name")
+            and all(
+                actual.get("properties", {}).get(k) == v
+                for k, v in expected["properties"].items()
+            )
+            for expected in expected_states
+        )
+        if not matched:
+            mismatches.append(
+                {
+                    "position": list(position),
+                    "expected_states": expected_states,
+                    "actual": actual,
+                }
+            )
+        observations.append(actual)
+    verification = {
+        "player_verified": True,
+        "blocks_checked": len(observations),
+        "mismatches": mismatches,
+        "observed_cells": observations,
+    }
+    manifest.data["continuation"]["verification"] = verification
+    state = manifest.data["continuation"].get("state", {})
+    state["world_states"] = observations
+    manifest.data["continuation"]["state"] = state
+    manifest.save()
+    return {
+        "resume_check": {
+            "player": player,
+            "blocks_checked": len(observations),
+            "mismatches": mismatches,
+        }
+    }
 
 
 class CommandTransport(Protocol):
@@ -80,6 +203,23 @@ class TrialManifest:
         }
         self.save()
 
+    @classmethod
+    def reopen(cls, path: Path) -> TrialManifest:
+        """Open an existing campaign journal for a fresh bounded session."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            raise ValueError("Unsupported continuation record")
+        manifest = object.__new__(cls)
+        manifest.started = time.monotonic()
+        manifest.path = path
+        manifest.data = data
+        manifest.data.setdefault("sessions", []).append(
+            {"started_at": timestamp(), "number": len(manifest.data.get("sessions", [])) + 1}
+        )
+        manifest.data["completion"] = {"status": "incomplete", "ended_at": None}
+        manifest.save()
+        return manifest
+
     def save(self) -> None:
         temporary = self.path.with_suffix(".tmp")
         with temporary.open("w", encoding="utf-8") as stream:
@@ -116,6 +256,9 @@ class TrialManifest:
         self.save()
 
     def finish_incomplete(self, reasons: list[str]) -> None:
+        sessions = self.data.get("sessions", [])
+        if sessions:
+            sessions[-1]["ended_at"] = timestamp()
         self.data["completion"] = {
             "status": "incomplete",
             "ended_at": timestamp(),
@@ -204,20 +347,32 @@ def run_preflight(
 # Keep credentials out of this immutable public selection and its serialization.
 class TrialConfiguration(FrozenModel):
     mode: Literal["fixture", "provider"]
+    task: Literal["computer", "lamp_repair"] = "computer"
+    keep_agent_connected: bool = False
+    session_action_limit: int | None = Field(default=None, gt=0)
     planner_model: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_./-]{1,160}$")
     planner_project: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_./-]{1,160}$")
 
     @model_validator(mode="after")
     def explicit_selection(self) -> TrialConfiguration:
+        if self.session_action_limit is not None and (
+            self.session_action_limit > load_contract(CONTRACT_PATH).budgets.primitive_actions
+        ):
+            raise ValueError("Per-session action limit exceeds the frozen contract")
         if self.mode == "provider" and not self.planner_model:
             raise ValueError("Provider mode requires an explicit planner model")
         if self.mode == "fixture" and (self.planner_model or self.planner_project):
             raise ValueError("Fixture mode cannot accept provider configuration")
+        if self.mode == "fixture" and self.task != "computer":
+            raise ValueError("Lamp repair demo requires an explicit provider")
         return self
 
     def public(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
+            "task": self.task,
+            "keep_agent_connected": self.keep_agent_connected,
+            "session_action_limit": self.session_action_limit,
             "planner": {
                 "provider": "wandb-inference" if self.mode == "provider" else "fixture",
                 "model": self.planner_model if self.mode == "provider" else "fixture/missing-dust",
@@ -244,12 +399,17 @@ class TrialConfiguration(FrozenModel):
         }
 
 
-def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialManifest:
+def run_trial(
+    config: TrialConfiguration,
+    root: Path = RUN_DIRECTORY,
+    *,
+    resume: Path | None = None,
+) -> TrialManifest:
     """Explicit fresh connected trial with trusted resets and honest partial evidence.
 
-    Provider mode has no scripted layout or fixture fallback. Public module
-    graders run when the planner declares recipes, but the trial has no final
-    full-machine grader and cannot establish machine success.
+    Provider/computer mode has no scripted layout or fixture fallback. The
+    lamp_repair task explicitly seeds a small incomplete circuit and is graded
+    separately; it cannot establish full-machine success.
     Credentials are checked before touching Minecraft and never serialized.
     """
     import asyncio
@@ -264,7 +424,20 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
     from noob_agent.redstone.sidecar import Sidecar
     from noob_agent.settings import ModelSettings, WandbSettings
 
-    manifest = TrialManifest(root)
+    if resume is not None:
+        saved = json.loads(resume.read_text(encoding="utf-8"))
+        current_contract_hash = hashlib.sha256(CONTRACT_PATH.read_bytes()).hexdigest()
+        if not isinstance(saved, dict) or saved.get("kind") != "connected_trial":
+            raise ValueError("Only a connected trial can be continued")
+        if saved.get("configuration") != config.public():
+            raise ValueError("Continuation settings must match the saved trial")
+        if saved.get("contract", {}).get("sha256") != current_contract_hash:
+            raise ValueError("The saved trial uses a different computer contract")
+        if saved.get("continuation", {}).get("ready") is not True:
+            raise ValueError("The saved trial has no safe continuation point")
+    manifest = TrialManifest.reopen(resume) if resume is not None else TrialManifest(root)
+    if resume is None:
+        manifest.data["sessions"] = [{"started_at": timestamp(), "number": 1}]
     manifest.data.update(kind="connected_trial", configuration=config.public())
     contract = load_contract(CONTRACT_PATH)
     manifest.data.update(
@@ -277,9 +450,10 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
     )
     manifest.save()
     stage = "configuration"
+    persistent_connected = False
     try:
         planner: ModelClient
-        checker = None
+        checker: Callable[[Any], dict[str, Any]] | None = None
         if config.mode == "fixture":
             from noob_agent.redstone.fixtures import MissingDustCheck, MissingDustPlanner
 
@@ -287,6 +461,10 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
             checker = MissingDustCheck()
             jev = JevSubprocess(command=[sys.executable, "-m", "noob_agent.redstone.fixtures"])
         else:
+            if config.task == "lamp_repair":
+                from noob_agent.redstone.demo import LampRepairCheck
+
+                checker = LampRepairCheck()
             key = os.environ.get("WANDB_API_KEY", "").strip()
             if not key or not os.environ.get("AI_GATEWAY_API_KEY", "").strip():
                 raise ValueError("Provider credentials unavailable")
@@ -300,34 +478,90 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
             )
             jev = JevSubprocess()
         stage = "connect"
-        with RconClient.dedicated() as transport, Sidecar(manifest) as sidecar:
+        with RconClient.dedicated() as transport, Sidecar(
+            manifest, keep_connected=config.keep_agent_connected
+        ) as sidecar:
+            persistent_connected = config.keep_agent_connected
             reset = TrustedReset(manifest, transport, sidecar)
-            stage = "initial_reset"
-            reset.restore()
             try:
+                actions = Actions(
+                    manifest,
+                    transport,
+                    sidecar,
+                    max_actions=config.session_action_limit,
+                )
+                stage = "continuation_check" if resume is not None else "initial_reset"
+                if resume is None:
+                    reset.restore()
+                    observation = {"initial_conditions": manifest.data["initial_conditions"]}
+                else:
+                    observation = verify_continuation(manifest, config.task, actions=actions)
                 stage = "trial_loop"
-                actions = Actions(manifest, transport, sidecar)
+                if config.task == "lamp_repair" and resume is None:
+                    from noob_agent.redstone.demo import prepare_lamp_repair
+
+                    stage = "fixture_setup"
+                    manifest.data["demo_task"] = {
+                        **prepare_lamp_repair(actions),
+                        "status": "running",
+                    }
+                    manifest.save()
+                    stage = "trial_loop"
+                announce = None
+                if config.task == "lamp_repair":
+                    from noob_agent.redstone.demo import ActionPing
+
+                    announce = ActionPing(manifest, transport).show
+                loop_options: dict[str, Any] = {}
+                if announce is not None:
+                    loop_options["announce"] = announce
                 loop = TrialLoop(
                     manifest,
                     actions,
                     planner,
                     jev,
                     check=checker,
-                    require_module_grading=config.mode == "provider",
+                    require_module_grading=(
+                        config.mode == "provider" and config.task == "computer"
+                    ),
+                    task=config.task,
+                    resume_state=manifest.data.get("continuation", {}).get("state")
+                    if resume is not None
+                    else None,
                     jev_min_interval_seconds=(
                         JEV_MIN_INTERVAL_SECONDS if config.mode == "provider" else 0
                     ),
+                    **loop_options,
                 )
-                asyncio.run(loop.run({"initial_conditions": manifest.data["initial_conditions"]}))
+                asyncio.run(loop.run(observation))
             except Exception as error:
                 manifest.data["errors"].append({"stage": stage, "type": type(error).__name__})
                 manifest.save()
             finally:
-                # Restoration is trusted cleanup, independent of exhausted model/action budgets.
-                prior_stage = stage
-                stage = "final_reset"
-                reset.restore()
-                stage = prior_stage
+                lamp_task_complete = (
+                    config.task == "lamp_repair"
+                    and manifest.data.get("loop", {}).get("status") == "checkpoint_complete"
+                )
+                if persistent_connected and not lamp_task_complete:
+                    # Keep the bot and its current build visible. The next run's
+                    # trusted initial reset starts clean without disconnecting it.
+                    manifest.data["persistent_agent"] = {
+                        "status": "connected_after_trial",
+                        "world_state": "preserved_until_next_trial_reset",
+                    }
+                    manifest.save()
+                else:
+                    # Standard runs restore the baseline before disconnecting.
+                    prior_stage = stage
+                    stage = "final_reset"
+                    reset.restore()
+                    stage = prior_stage
+                    if persistent_connected:
+                        manifest.data["persistent_agent"] = {
+                            "status": "connected_after_trial",
+                            "world_state": "baseline_restored_after_success",
+                        }
+                        manifest.save()
         milestone = manifest.data.get("milestone_4")
         resets = manifest.data.get("resets", [])
         if (
@@ -343,6 +577,32 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
         ):
             milestone["status"] = "passed"
             milestone["final_reset_sha256"] = resets[-1]["baseline_sha256"]
+            manifest.save()
+        if config.task == "lamp_repair":
+            demo = manifest.data.setdefault(
+                "demo_task",
+                {"kind": "seeded_lamp_repair", "fixture_created_by_harness": True},
+            )
+            checks = manifest.data.get("checks", [])
+            final_reset_verified = bool(resets) and resets[-1].get("verified") is True
+            same_baseline = (
+                len(resets) >= 2
+                and resets[0].get("verified") is True
+                and resets[-1].get("baseline_sha256") == resets[0].get("baseline_sha256")
+            )
+            if (
+                manifest.data.get("loop", {}).get("status") == "checkpoint_complete"
+                and checks
+                and checks[-1].get("passed") is True
+                and checks[-1].get("complete") is True
+                and final_reset_verified
+                and same_baseline
+            ):
+                demo["status"] = "passed"
+                demo["final_reset_sha256"] = resets[-1]["baseline_sha256"]
+            else:
+                demo["status"] = "incomplete"
+                demo["final_reset_verified"] = final_reset_verified
             manifest.save()
     except BaseException as error:
         manifest.data["errors"].append({"stage": stage, "type": type(error).__name__})
@@ -369,17 +629,27 @@ def run_trial(config: TrialConfiguration, root: Path = RUN_DIRECTORY) -> TrialMa
             raise
     finally:
         milestone_passed = manifest.data.get("milestone_4", {}).get("status") == "passed"
+        demo_passed = manifest.data.get("demo_task", {}).get("status") == "passed"
         manifest.finish_incomplete(
             [
-                "Fixture evidence only"
+                "Seeded lamp repair demo passed; full computer success not established"
+                if demo_passed
+                else "Fixture evidence only"
                 if config.mode == "fixture"
                 else "Milestone 4 public modules passed; no final machine grader"
                 if milestone_passed
                 else "Provider trial; no final grader",
-                "Full-machine independent grading and recording pending; model success false"
+                "Recording pending; model_success applies only to the full computer"
+                if demo_passed
+                else "Full-machine independent grading and recording pending; model success false"
                 if milestone_passed
                 else "Real-provider, full-machine and recording verification pending; "
                 "no milestone acceptance",
+                "Persistent agent remains connected; the next trial resets the same session"
+                if persistent_connected
+                else "Agent disconnected after trial",
             ]
         )
+    if can_auto_continue(manifest.data, config.task):
+        return run_trial(config, root, resume=manifest.path)
     return manifest

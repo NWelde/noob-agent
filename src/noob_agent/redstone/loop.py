@@ -8,17 +8,20 @@ import json
 import math
 import time
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
 from noob_agent.models.client import ModelClient
-from noob_agent.redstone.actions import Actions, EffectMismatch, InvalidBlockState
+from noob_agent.redstone.actions import ActionLimit, Actions, EffectMismatch, InvalidBlockState
 from noob_agent.redstone.behavior import grade_module, required_recipes
+from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
 from noob_agent.redstone.jev import JevError, action_request, selected_action
 from noob_agent.redstone.modules import inspect_module, resolve_recipe
 from noob_agent.redstone.planner import (
+    MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE,
     PlannerContext,
+    planner_validation_instruction,
     validate_intention,
 )
 from noob_agent.redstone.provider_limits import (
@@ -98,29 +101,78 @@ class TrialLoop:
         *,
         check: Callable[[Actions], dict[str, Any]] | None = None,
         require_module_grading: bool = False,
+        task: Literal["computer", "lamp_repair"] = "computer",
+        resume_state: dict[str, Any] | None = None,
         jev_min_interval_seconds: float = 0,
+        announce: Callable[[str, str | None], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if "loop" in manifest.data or actions.used or actions.stopped:
-            raise ValueError("Loop requires a fresh runtime; resumption is not supported")
+        if ("loop" in manifest.data and resume_state is None) or actions.stopped:
+            raise ValueError("Loop requires a fresh session or a saved continuation")
         self.manifest, self.actions, self.planner, self.jev = manifest, actions, planner, jev
         self.contract = actions.contract
-        self.context = PlannerContext(self.contract, require_module_grading=require_module_grading)
+        if task == "lamp_repair" and require_module_grading:
+            raise ValueError("Lamp repair demo does not use computer module grading")
+        self.context = PlannerContext(
+            self.contract,
+            require_module_grading=require_module_grading,
+            task=task,
+            history=None if resume_state is None else resume_state.get("history", []),
+        )
+        if resume_state is not None:
+            self.context.grading_enabled = resume_state.get("grading_enabled") is True
+            self.context.force_grading = resume_state.get("force_grading") is True
         self.clock, self.started = clock, clock()
         self.deadline = self.started + self.contract.budgets.wall_seconds
         self.intention_deadline: float | None = None
         self.intention_start = 0
         self.intention_max = self.contract.budgets.intention_actions
         self.checker = check
+        if (
+            resume_state is not None
+            and self.checker is not None
+            and hasattr(self.checker, "load_state")
+        ):
+            self.checker.load_state(resume_state.get("checker", {}))
         self.require_module_grading = require_module_grading
+        self.task = task
+        self.announce = announce
         if not math.isfinite(jev_min_interval_seconds) or not 0 <= jev_min_interval_seconds <= 30:
             raise ValueError("Invalid Jev call interval")
         self.jev_min_interval_seconds = jev_min_interval_seconds
         self.last_jev_started: float | None = None
         self.used = {"planner_calls": 0, "jev_calls": 0, "repair_rounds": 0}
-        self.stone_placements = 0
-        self.signal_control_placements = 0
+        self.stone_placements = int((resume_state or {}).get("stone_placements", 0))
+        self.signal_control_placements = int(
+            (resume_state or {}).get("signal_control_placements", 0)
+        )
+        self.construction_intentions_since_grade = int(
+            (resume_state or {}).get("construction_intentions_since_grade", 0)
+        )
         self.placed_cells: dict[tuple[int, ...], tuple[str, tuple[tuple[str, Any], ...]]] = {}
+        for item in (resume_state or {}).get("placed_cells", []):
+            position = tuple(item["position"])
+            observed = next(
+                (
+                    cell
+                    for cell in (resume_state or {}).get("world_states", [])
+                    if tuple(cell.get("position", ())) == position
+                ),
+                None,
+            )
+            # Keep only cells still present in the world. Unsupported wire and
+            # other changed blocks must be rebuilt by the planner after resume.
+            if observed is None or observed.get("name") != item["block"]:
+                continue
+            actual_properties = observed.get("properties", {})
+            if all(
+                actual_properties.get(key) == value
+                for key, value in item.get("properties", {}).items()
+            ):
+                self.placed_cells[position] = (
+                    item["block"],
+                    tuple(sorted(item.get("properties", {}).items())),
+                )
         self.running = False
         self.manifest.data.update(
             contract={
@@ -132,7 +184,7 @@ class TrialLoop:
             loop_budget=self.used,
             loop={"status": "ready"},
         )
-        if require_module_grading:
+        if require_module_grading and resume_state is None:
             self.manifest.data["milestone_4"] = {
                 "status": "pending",
                 "construction_epoch": 0,
@@ -169,11 +221,19 @@ class TrialLoop:
         self.running = True
         repair = False
         validation_retries = 0
+        limit_reached = False
         try:
             while True:
                 self.intention_deadline = None
                 if repair:
                     self.charge("repair_rounds")
+                if (
+                    self.require_module_grading
+                    and self.construction_intentions_since_grade
+                    >= MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE
+                ):
+                    self.context.force_grading = True
+                    self.context.grading_enabled = True
                 request = self.context.request(observation)
                 self.charge("planner_calls")
                 event = self.manifest.attempt("planner_call", request.model_dump(mode="json"))
@@ -184,8 +244,41 @@ class TrialLoop:
                     event, response.model_dump(mode="json", exclude={"reasoning"})
                 )
                 self.remaining()
+                duplicate_placement_ids: set[str] = set()
                 try:
                     intention = validate_intention(json.loads(response.text), self.contract)
+                    if self.task == "lamp_repair":
+                        if len(intention.actions) != 1:
+                            raise ValueError(
+                                "Lamp repair demo requires exactly one action per intention"
+                            )
+                        if intention.module_inspection is not None or intention.request_grading:
+                            raise ValueError("Lamp repair demo does not accept module grading")
+                        positions = {
+                            tuple(LEVER_POSITION),
+                            tuple(WIRE_POSITION),
+                            tuple(LAMP_POSITION),
+                        }
+                        for offer in intention.actions:
+                            position = tuple(offer.position)
+                            allowed = (
+                                (offer.action == "observe" and position in positions)
+                                or (
+                                    offer.action == "interact" and position == tuple(LEVER_POSITION)
+                                )
+                                or (
+                                    offer.action == "place"
+                                    and position == tuple(WIRE_POSITION)
+                                    and offer.block == "minecraft:redstone_wire"
+                                    and not offer.properties
+                                )
+                            )
+                            if not allowed:
+                                raise ValueError(
+                                    "Lamp repair demo permits observations of the three "
+                                    "fixture cells, lever interaction, and redstone wire "
+                                    "placement at the open connection only."
+                                )
                     if self.require_module_grading:
                         for offer in intention.actions:
                             if offer.action != "place" or offer.block is None:
@@ -193,11 +286,24 @@ class TrialLoop:
                             cell = tuple(offer.position)
                             state = (offer.block, tuple(sorted((offer.properties or {}).items())))
                             if self.placed_cells.get(cell) == state:
-                                raise ValueError(
-                                    "Block already verified at x "
-                                    f"{cell[0]} y {cell[1]} z {cell[2]}; "
-                                    "change the circuit or request grading."
-                                )
+                                duplicate_placement_ids.add(offer.id)
+                        if (
+                            duplicate_placement_ids
+                            and len(duplicate_placement_ids) == len(intention.actions)
+                            and intention.module_inspection is None
+                            and not intention.request_grading
+                        ):
+                            offer = next(
+                                action
+                                for action in intention.actions
+                                if action.id in duplicate_placement_ids
+                            )
+                            cell = tuple(offer.position)
+                            raise ValueError(
+                                "All offered placements are already verified; repeated "
+                                f"block at x {cell[0]} y {cell[1]} z {cell[2]}. "
+                                "Change the circuit or request grading."
+                            )
                         minimum_actions = sum(
                             {"place": 5, "break": 4, "interact": 4, "observe": 1}[offer.action]
                             for offer in intention.actions
@@ -221,6 +327,13 @@ class TrialLoop:
                                 "wire, torch, repeater, comparator, or lamp with support."
                             )
                         declaration = intention.module_inspection
+                        if self.context.force_grading and (
+                            declaration is None or intention.actions
+                        ):
+                            raise ValueError(
+                                "Construction limit reached; return a complete behavioral "
+                                "module_inspection with empty actions now."
+                            )
                         if declaration is not None:
                             recipe_help = {
                                 "register": "recipe_templates.load for load:0..15",
@@ -284,13 +397,7 @@ class TrialLoop:
                     if not retry_scheduled:
                         raise ValueError("Repeated planner validation failure")
                     validation_retries += 1
-                    instruction = (
-                        "Return a complete compact JSON intention with at most 8 actions, "
-                        "one short summary, brief criteria, compact recipe_templates, "
-                        "and no explanatory prose. No actions were dispatched."
-                        if response.finish_reason == "length"
-                        else "Return a corrected complete intention. No actions were dispatched."
-                    )
+                    instruction = planner_validation_instruction(reason, response.finish_reason)
                     self.context.feedback(
                         {
                             "intention_rejected": reason,
@@ -306,8 +413,23 @@ class TrialLoop:
                     self.context.grading_enabled = True
                 self.intention_deadline = self.clock() + intention.max_seconds
                 self.intention_start, self.intention_max = self.actions.used, intention.max_actions
-                offers = {action.id: action for action in intention.actions}
+                offers = {
+                    action.id: action
+                    for action in intention.actions
+                    if action.id not in duplicate_placement_ids
+                }
                 results: list[dict[str, Any]] = []
+                for offer in intention.actions:
+                    if offer.id not in duplicate_placement_ids:
+                        continue
+                    skipped = {
+                        "id": offer.id,
+                        "skipped": "identical_verified_placement",
+                        "position": offer.position,
+                    }
+                    skipped_event = self.manifest.attempt("action_offer_skipped", skipped)
+                    self.manifest.observed(skipped_event, skipped)
+                    results.append(skipped)
                 repair = False
                 while offers:
                     criteria = {key: offer.criteria for key, offer in offers.items()}
@@ -359,6 +481,8 @@ class TrialLoop:
                     if choice == "__finish__":
                         break
                     offer = offers.pop(choice)
+                    if self.announce is not None:
+                        self.announce(offer.action, offer.block)
                     if self.require_module_grading and offer.action != "observe":
                         milestone = self.manifest.data["milestone_4"]
                         prior_modules = sorted(milestone["modules"])
@@ -409,7 +533,15 @@ class TrialLoop:
                         }
                         repair = True
                     except InvalidBlockState:
-                        result = {"id": choice, "rejected": "invalid_block_state"}
+                        result = {
+                            "id": choice,
+                            "rejected": "invalid_block_state",
+                            "guidance": (
+                                "Check exact block property names and JSON value types. "
+                                "Boolean properties require JSON true/false, not quoted "
+                                "strings; omit properties unless required."
+                            ),
+                        }
                         repair = True
                     results.append(result)
                     event = self.manifest.attempt("action_feedback", result)
@@ -443,6 +575,8 @@ class TrialLoop:
                     )
                     self.manifest.observed(event, inspection)
                     if self.require_module_grading:
+                        self.construction_intentions_since_grade = 0
+                        self.context.force_grading = False
                         milestone = self.manifest.data["milestone_4"]
                         module = intention.module_inspection.module
                         milestone["modules"].pop(module, None)
@@ -476,6 +610,17 @@ class TrialLoop:
                     # The planner asked for the full declaration schema but chose
                     # another build turn; return to the bounded build schema.
                     self.context.grading_enabled = False
+                if (
+                    self.require_module_grading
+                    and intention.module_inspection is None
+                    and not intention.request_grading
+                ):
+                    self.construction_intentions_since_grade += 1
+                    if (
+                        self.construction_intentions_since_grade
+                        >= MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE
+                    ):
+                        self.context.force_grading = True
                 observation = {"results": results, "check": public, "module_inspection": inspection}
                 if self.require_module_grading:
                     milestone = self.manifest.data["milestone_4"]
@@ -489,6 +634,31 @@ class TrialLoop:
                         "signal_control_placements": self.signal_control_placements,
                     }
                 self.context.feedback(observation)
+                continuation_state: dict[str, Any] = {"history": self.context.history}
+                continuation_state.update(
+                    grading_enabled=self.context.grading_enabled,
+                    force_grading=self.context.force_grading,
+                    construction_intentions_since_grade=self.construction_intentions_since_grade,
+                    stone_placements=self.stone_placements,
+                    signal_control_placements=self.signal_control_placements,
+                    placed_cells=[
+                        {
+                            "position": list(position),
+                            "block": block,
+                            "properties": dict(properties),
+                        }
+                        for position, (block, properties) in self.placed_cells.items()
+                    ],
+                )
+                if self.checker is not None and hasattr(self.checker, "save_state"):
+                    continuation_state["checker"] = self.checker.save_state()
+                self.manifest.data["continuation"] = {
+                    "ready": True,
+                    "task": self.task,
+                    "state": continuation_state,
+                    "saved_at": time.time(),
+                }
+                self.manifest.save()
                 repair = repair or public.get("passed") is False
                 if (
                     self.require_module_grading
@@ -507,6 +677,7 @@ class TrialLoop:
                     self.manifest.data["loop"] = {"status": "checkpoint_complete"}
                     break
         except BaseException as error:
+            limit_reached = isinstance(error, (LoopLimit, ActionLimit))
             recorded_error: dict[str, Any] = {
                 "stage": "trial_loop",
                 "type": type(error).__name__,
@@ -525,6 +696,14 @@ class TrialLoop:
                 "stopped": True,
                 "reason": self.manifest.data["loop"]["status"],
             }
+            continuation = self.manifest.data.get("continuation", {})
+            if isinstance(continuation, dict):
+                continuation["ready"] = bool(
+                    limit_reached and continuation.get("state") is not None
+                )
+                continuation["stop_reason"] = self.manifest.data["loop"].get("reason")
+                continuation["session_number"] = len(self.manifest.data.get("sessions", [])) or 1
+                self.manifest.save()
             reasons = (
                 [
                     "All four public modules passed on one construction epoch; "

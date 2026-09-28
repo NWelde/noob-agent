@@ -12,6 +12,7 @@ from pydantic import Field
 
 from noob_agent.models.client import ModelRequest, WandbInferenceClient
 from noob_agent.redstone.contract import FrozenModel, MachineContract, validate_build_action
+from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
 from noob_agent.redstone.modules import ModuleDeclaration, validate_declaration
 from noob_agent.redstone.provider_limits import (
     PLANNER_MAX_OUTPUT_TOKENS,
@@ -20,6 +21,52 @@ from noob_agent.redstone.provider_limits import (
 from noob_agent.settings import ModelSettings, WandbSettings
 
 MAX_FEEDBACK_ENTRIES = 6
+MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE = 3
+
+
+def planner_validation_instruction(reason: str, finish_reason: str | None) -> str:
+    if finish_reason == "length":
+        return (
+            "Return a complete compact JSON intention with at most 8 actions, "
+            "one short summary, brief criteria, compact recipe_templates, "
+            "and no explanatory prose. No actions were dispatched."
+        )
+    if reason == "Unexpected block state":
+        return (
+            "Remove `block` and `properties` from every `break`, `interact`, and "
+            "`observe` action. Only a `place` action may include block state. "
+            "No actions were dispatched."
+        )
+    if reason == "Block is not permitted":
+        return (
+            "Use the exact namespaced block ID from the frozen permitted-block list, "
+            "including the `minecraft:` prefix; for redstone wire use "
+            "`minecraft:redstone_wire`. No actions were dispatched."
+        )
+    if reason == "Exactly one reset and STEP are required":
+        return (
+            "In module_inspection.controls, include exactly one control with role `reset` "
+            "and exactly one with role `step`. Give them distinct IDs and positions. "
+            "No actions were dispatched."
+        )
+    if reason.startswith("Aliased "):
+        match = re.fullmatch(r"Aliased (.+) and (.+) at x (-?\d+) y (-?\d+) z (-?\d+)", reason)
+        if match is not None:
+            first, second, x, y, z = match.groups()
+            return (
+                f"`{first}` and `{second}` both use [{x}, {y}, {z}]. Keep both "
+                "declarations and move one to a distinct in-bounds position; do not "
+                "remove a required control. Keep exactly one control with role `reset` "
+                "and exactly one with role `step`, plus all required programming "
+                "controls. No actions were dispatched."
+            )
+        return (
+            "Keep every declared probe and control, and give each a distinct "
+            "three-integer position. Move one declaration instead of deleting a "
+            "required control. Keep exactly one `reset` and one `step` role, plus "
+            "all required programming controls. No actions were dispatched."
+        )
+    return "Return a corrected complete intention. No actions were dispatched."
 
 
 class OfferedAction(FrozenModel):
@@ -97,11 +144,24 @@ class PlannerContext:
     and charge before dispatch. The independent final check list is never prompted.
     """
 
-    def __init__(self, contract: MachineContract, *, require_module_grading: bool = False) -> None:
+    def __init__(
+        self,
+        contract: MachineContract,
+        *,
+        require_module_grading: bool = False,
+        task: Literal["computer", "lamp_repair"] = "computer",
+        history: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.contract = contract
         self.require_module_grading = require_module_grading
+        self.task = task
         self.grading_enabled = False
-        self.history: list[dict[str, Any]] = []
+        self.force_grading = False
+        self.history: list[dict[str, Any]] = (
+            json.loads(json.dumps(history[-MAX_FEEDBACK_ENTRIES:], allow_nan=False))
+            if history is not None
+            else []
+        )
         self.public = contract.model_dump(mode="json", exclude={"independent_final_checks"})
         self.public["module_grading_limits"] = {
             "aggregate_ticks": 96000,
@@ -115,7 +175,50 @@ class PlannerContext:
 
     def request(self, observation: dict[str, Any]) -> ModelRequest:
         schema = Intention.model_json_schema()
-        if self.require_module_grading and not self.grading_enabled:
+        if self.task == "lamp_repair":
+            schema["properties"].pop("module_inspection")
+            schema["$defs"] = {"OfferedAction": schema["$defs"]["OfferedAction"]}
+            schema["properties"]["actions"]["maxItems"] = 1
+            schema["properties"]["summary"]["maxLength"] = 200
+            schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
+            return ModelRequest(
+                system=(
+                    "Repair the seeded, deliberately incomplete lever-to-lamp circuit. "
+                    "The harness placed a lever and lamp; you must place the missing "
+                    "connection and verify the result by operating the lever yourself. "
+                    "Use only bounded actions, inspect actual observations, and work "
+                    "through off, on, then off again. Offer exactly one action per "
+                    "intention so the independent checker can observe each state. "
+                    "The lever is at x=48 y=64 z=95, the missing wire position is "
+                    "x=49 y=64 z=95, and the lamp is at x=50 y=64 z=95. Never replace "
+                    "the lever or lamp. Use the exact ID minecraft:redstone_wire. "
+                    "Only place that wire at the missing wire "
+                    "position, interact with the lever, or observe these three cells. "
+                    "Only place actions may specify block or properties. Return one "
+                    "compact JSON intention with a short summary and exactly one "
+                    "action. Do not claim success; the independent checker reads "
+                    "Minecraft block states after each intention."
+                ),
+                prompt=json.dumps(
+                    {
+                        "task": "Repair and verify the seeded lamp circuit.",
+                        "fixture": {
+                            "harness_created": True,
+                            "agent_created": False,
+                            "lever": LEVER_POSITION,
+                            "open_connection": WIRE_POSITION,
+                            "lamp": LAMP_POSITION,
+                        },
+                        "observation": observation,
+                        "feedback": self.history,
+                    },
+                    allow_nan=False,
+                ),
+                max_output_tokens=PLANNER_MAX_OUTPUT_TOKENS,
+                thinking=False,
+                response_schema=schema,
+            )
+        if self.require_module_grading and not (self.grading_enabled or self.force_grading):
             # Construction stays compact until the model explicitly requests
             # grading. Do not compile the probe/recipe schema for build offers.
             schema["properties"].pop("module_inspection")
@@ -144,7 +247,10 @@ class PlannerContext:
                 "floor, wall or ceiling and facing is horizontal. Use exact "
                 "permitted Minecraft block IDs "
                 "from the requirements. Each action needs a quoted string id, "
-                "criteria, action and position, plus block for placement. Return "
+                "criteria, action and position. Only place may include block or "
+                "properties; omit both for break, interact and observe. For boolean "
+                "block properties such as powered, use JSON true/false, not quoted "
+                "strings. Omit properties unless needed. Return "
                 "one compact JSON object with summary and actions; no raw commands. "
                 "Omit max_actions and max_seconds to use safe defaults: placement "
                 "uses at least five primitive actions including readbacks.",
@@ -168,8 +274,8 @@ class PlannerContext:
             schema["properties"]["actions"]["maxItems"] = 8
             schema["properties"]["summary"]["maxLength"] = 200
             schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
-        return ModelRequest(
-            system="Design within the frozen public requirements. Work on one public "
+        system = (
+            "Design within the frozen public requirements. Work on one public "
             "module at a time in this order: register, arithmetic, storage, output. "
             "Build targets, including observations, must use x=0..95, y=64..95, "
             "z=0..95. The grass at y=63 is protected ground, and the player's "
@@ -201,7 +307,9 @@ class PlannerContext:
             "(including internal validation/readbacks/settling) and max_seconds within "
             "the frozen intention limits; omit them to use defaults of 256 and 60. "
             "Each placement needs at least five primitive actions. Criteria must "
-            "explain ordering and dependencies. "
+            "explain ordering and dependencies. Only place actions may include block "
+            "or properties; omit both for break, interact and observe. Boolean block "
+            "properties must be JSON booleans, not quoted strings. "
             "Use actual feedback to revise failed work. No raw commands. "
             "Every place action's block must be exactly one permitted ID: "
             "minecraft:stone, minecraft:glass, minecraft:redstone_wire, "
@@ -240,7 +348,17 @@ class PlannerContext:
             "and write:address:word for two word arrays [0,63,21,42,15,48,32,16] and "
             "[63,0,42,21,48,15,31,47]; writes run while reset is held. "
             "All controls and waits are declared, no layouts are supplied. "
-            "Actions may be empty when requesting inspection or grading.",
+            "Actions may be empty when requesting inspection or grading."
+        )
+        if self.force_grading:
+            system += (
+                " A construction limit was reached. Stop building now and return a "
+                "complete behavioral module_inspection with empty actions. Include all "
+                "required probes, controls, and recipes or recipe_templates so the "
+                "independent public grader can test the current hardware."
+            )
+        return ModelRequest(
+            system=system,
             prompt=json.dumps(
                 {
                     "requirements": self.public,

@@ -321,7 +321,7 @@ class MinecraftSettings:
     """
 
     host: str = "127.0.0.1"
-    port: int = 25566
+    port: int = 25567
     # Offline-mode UUIDs are case-sensitive. Keep this byte-for-byte identical
     # to the name recorded by the setup guide's whitelist command.
     username: str = "noobagentbot"

@@ -15,6 +15,55 @@ place. **No model-designed module has passed yet**, so the full computer demo is
 not complete. Current evidence and the next live checkpoint are in
 [`docs/redstone-trials.md`](docs/redstone-trials.md).
 
+### Working demo slice
+
+For a live, judgeable result today, run the bounded seeded lamp repair:
+
+```sh
+set -a; source .env; set +a
+.venv/bin/python scripts/run_redstone_trial.py --trial provider --task lamp-repair \
+  --keep-agent-connected \
+  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
+  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
+```
+
+The harness places a lever and lamp with one wire gap; the agent must place the
+wire and operate the lever. The independent checker reads Minecraft state and
+requires the lamp to transition off → on → off. This demonstrates repair of a
+small seeded circuit only. The harness builds the endpoints, so this is not a
+model-built circuit and does not complete the 4-bit computer. A successful live
+run is recorded under `.noob-agent/redstone-trials/`.
+
+Provider demos start or reuse one persistent Minecraft bot session by default.
+If a run stalls, the bot and partial build stay in the world; the next trial
+resets that same connection in place. Use `--disconnect-after-trial` only when
+you want the old disconnect behavior. Stop a persistent session deliberately
+with `.venv/bin/python scripts/run_redstone_trial.py --stop-agent`.
+
+To continue the model-built register/computer attempt while keeping that same
+bot session alive between retries, run the provider task with `--task computer
+--keep-agent-connected`. A normal new trial resets the owned build area through
+the existing bot session; `--resume` continues a stopped build after checking
+the bot and all cells the previous session touched.
+
+Both tasks automatically start a fresh session after a harness action or time
+limit, keeping the same world and saved feedback. Automatic continuation runs
+up to four sessions. If the limit is reached again, or the process itself is
+interrupted, use the manifest path printed by the run to continue it:
+
+```sh
+.venv/bin/python scripts/run_redstone_trial.py --trial provider --task lamp-repair \
+  --resume .noob-agent/redstone-trials/<run-id>/manifest.json \
+  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
+  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
+```
+
+The new session restores the saved planner feedback and checks the current build
+in Minecraft before continuing. For the computer task, it tells the planner
+which touched blocks changed or disappeared, so it can repair them. The optional
+`--session-action-limit` sets a smaller per-session cap, which is useful for
+checking that restart works.
+
 ## Run checks
 
 Install the development environment and run the Python suite:
@@ -45,7 +94,9 @@ uv run mypy src
 ## Minecraft environment
 
 Read the Minecraft EULA before accepting it. The setup command installs a local
-vanilla server and the versioned Minecraft data packs:
+vanilla server and the versioned Minecraft data packs. By default it targets
+`.noob-agent/redstone-server`, creates the flat `redstone-trials` world, and
+listens on port `25567` for the active redstone-computer demo:
 
 ```sh
 uv run python scripts/setup_minecraft_server.py --accept-eula --player <minecraft-name>

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import secrets
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCENARIOS = REPO_ROOT / "scenarios" / "minecraft"
 SIDECAR = REPO_ROOT / "src" / "noob_agent" / "connectors" / "minecraft_sidecar"
-DEFAULT_DIRECTORY = REPO_ROOT / ".noob-agent" / "minecraft-server"
+DEFAULT_DIRECTORY = REPO_ROOT / ".noob-agent" / "redstone-server"
 
 # Official Mojang server jar for 1.21.1. The URL path is the jar's SHA-1.
 SERVER_JAR_SHA1 = "59353fb40c36d304f2035d51e7d6e6baa98dc05c"
@@ -37,8 +38,17 @@ EULA_URL = "https://aka.ms/MinecraftEULA"
 
 # Must match `MinecraftSettings` in src/noob_agent/connectors/minecraft.py.
 BOT_NAME = "noobagentbot"
-PORT = 25566
-WORLD = "noob-agent-training"
+PORT = 25567
+WORLD = "redstone-trials"
+# This layer stack leaves the build surface at y=60..64, matching the
+# dedicated flatworld used by the redstone trial reset and region checks.
+FLAT_GENERATOR_SETTINGS = (
+    '{"layers"\\:[{"block"\\:"minecraft\\:air","height"\\:124},'
+    '{"block"\\:"minecraft\\:bedrock","height"\\:1},'
+    '{"block"\\:"minecraft\\:dirt","height"\\:2},'
+    '{"block"\\:"minecraft\\:grass_block","height"\\:1}],'
+    '"biome"\\:"minecraft\\:plains"}'
+)
 
 
 def offline_uuid(name: str) -> str:
@@ -82,8 +92,14 @@ def _properties(server_ip: str) -> str:
             "white-list=true",
             "enforce-whitelist=true",
             "enable-command-block=true",
+            "enable-rcon=true",
+            "rcon.port=25577",
+            f"rcon.password={secrets.token_urlsafe(32)}",
             "spawn-protection=0",
             f"level-name={WORLD}",
+            r"level-type=minecraft\:flat",
+            f"generator-settings={FLAT_GENERATOR_SETTINGS}",
+            "generate-structures=false",
             "motd=noob-agent local evaluation server",
             "",
         ]
@@ -150,8 +166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--server-ip",
-        default="127.0.0.1",
-        help="Interface to bind. Use 0.0.0.0 only to watch from Windows into WSL.",
+        default="",
+        help="Interface to bind (default: all interfaces, so Windows TLauncher can reach WSL).",
     )
     parser.add_argument("--skip-npm", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -168,7 +184,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not _server_jar(directory):
         return 1
     (directory / "eula.txt").write_text("eula=true\n")
-    (directory / "server.properties").write_text(_properties(args.server_ip))
+    properties_file = directory / "server.properties"
+    properties_file.write_text(_properties(args.server_ip))
+    properties_file.chmod(0o600)
     _players(directory, args.player)
     packs = _datapacks(directory)
     if not args.skip_npm and not _npm_install():

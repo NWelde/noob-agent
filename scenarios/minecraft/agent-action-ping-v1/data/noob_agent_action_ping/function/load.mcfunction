@@ -1,0 +1,1 @@
+scoreboard objectives add noob_agent_action_ping_age dummy
