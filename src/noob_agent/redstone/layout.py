@@ -143,7 +143,7 @@ def validate_declaration_layout(
                 probe = probe.model_dump(mode="json")
             if not isinstance(probe, Mapping):
                 raise ValueError("Declared probe must be an object")
-            check(f"probe {role}[{index}]", probe.get("position"), probe.get("block"))
+            check(f"probe {role}[{index}]", probe.get("position"), str(probe.get("block")))
     for control in controls:
         if hasattr(control, "model_dump"):
             control = control.model_dump(mode="json")

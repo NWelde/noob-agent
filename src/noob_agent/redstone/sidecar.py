@@ -35,7 +35,7 @@ class Sidecar:
         command: list[str] | None = None,
         timeout: float = 12,
         keep_connected: bool = False,
-        recovery_charge: Callable[[str, dict[str, Any]], None] | None = None,
+        recovery_charge: Callable[[str, dict[str, Any]], object] | None = None,
     ) -> None:
         if not math.isfinite(timeout) or not 0 < timeout <= 30:
             raise ValueError("Invalid sidecar deadline")
@@ -274,7 +274,7 @@ class Sidecar:
             reply = self._read_connection(self.timeout)
             if reply.get("ok") is not True or not isinstance(reply.get("result"), dict):
                 raise SidecarError("Sidecar reconciliation request failed")
-            result = reply["result"]
+            result: dict[str, Any] = reply["result"]
             self.manifest.observed(sequence, result)
             return result
         except Exception:

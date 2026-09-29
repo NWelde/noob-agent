@@ -787,7 +787,9 @@ def recover_timeline(path: Path) -> TrialManifest:
     """Explicit recovery of a stopped run; never call concurrently with its writer."""
     manifest = object.__new__(TrialManifest)
     manifest.path = path
-    manifest.data = json.loads(path.read_text())
+    manifest.journal_path = path.with_name("events.jsonl")
+    manifest._journal_records = TrialManifest._count_journal_records(manifest.journal_path)
+    manifest.data = TrialManifest.load_data(path)
     manifest.started = time.monotonic()
     with RconClient.dedicated() as transport:
         cleanup_timeline(manifest, transport)

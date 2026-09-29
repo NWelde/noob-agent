@@ -483,3 +483,28 @@ def test_expired_program_rejected_before_world_access(tmp_path, monkeypatch):
     with pytest.raises(ActionLimit, match="Program deadline"):
         grader.timeline([], program_id="expired")
     assert not server.commands
+
+
+def test_timeline_recovery_preserves_and_extends_event_journal(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    from noob_agent.redstone import grading
+
+    manifest = TrialManifest(tmp_path)
+    attempt = manifest.attempt("pending_before_recovery", {})
+    manifest.observed(attempt, {"verified": True})
+    monkeypatch.setattr(grading.RconClient, "dedicated", lambda: nullcontext(object()))
+
+    def cleanup(recovered, transport):
+        recovery = recovered.attempt("recovery_cleanup", {})
+        recovered.observed(recovery, {"clean": True})
+        recovered.save()
+
+    monkeypatch.setattr(grading, "cleanup_timeline", cleanup)
+    recovered = grading.recover_timeline(manifest.path)
+    loaded = TrialManifest.load_data(recovered.path)
+    assert [event["kind"] for event in loaded["events"]] == [
+        "pending_before_recovery",
+        "recovery_cleanup",
+    ]
+    assert loaded["events"][-1]["result"] == {"clean": True}

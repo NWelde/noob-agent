@@ -64,6 +64,30 @@ which touched blocks changed or disappeared, so it can repair them. The optional
 `--session-action-limit` sets a smaller per-session cap, which is useful for
 checking that restart works.
 
+### Register submission checkpoint
+
+To preserve an agent-built register after its independent load/hold/reset suite passes:
+
+```sh
+set -a; source .env; set +a
+.venv/bin/python scripts/run_redstone_trial.py --trial provider --task computer \
+  --keep-agent-connected --stop-after-module register \
+  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
+  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
+```
+
+A passed `module_checkpoint` is register evidence only; the full computer grade remains
+unevaluated. Construction now continues past three intentions, with readiness reminders
+every twelve. Invalid recipe feedback identifies missing controls; exhausted validation
+records the last reason as `planner_validation_exhausted`. The bot preserves the build.
+
+The same `--resume <manifest.json>` command can manually recover a stopped Jev call
+or interrupted model inference, including interruption after a completed action readback. Recovery requires every unknown event to be a model
+call, a clean timeline, and a fresh player/build verification. Inference-error recovery
+rejects unknown world actions. Existing budget-limit continuations still reverify and
+reconcile the observed world before continuing. Historical inspection failures and the current verified
+layout stay in planner feedback until a new inspection resolves them.
+
 ## Run checks
 
 Install the development environment and run the Python suite:
@@ -118,6 +142,11 @@ provider trials require explicit provider configuration; their latest status
 and limitations are recorded in [`docs/redstone-trials.md`](docs/redstone-trials.md).
 
 ## Project map
+
+The recording-ready redstone memory demo and replay instructions are in
+[`docs/memory-demo.md`](docs/memory-demo.md). It demonstrates
+physical four-bit storage, a powered display, and Jev-selected wire repair using
+a tested circuit plan. It is separate from the full-computer acceptance trial.
 
 - [`hackathon_plan.md`](hackathon_plan.md): approved scope and milestone order
 - [`docs/redstone-computer-contract.md`](docs/redstone-computer-contract.md):

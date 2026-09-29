@@ -39,6 +39,9 @@ def test_subprocess_failures_are_bounded_and_sanitized(mode):
     with pytest.raises(JevError) as caught:
         adapter.evaluate(action_request({}, {"place-1": "Place"}), timeout=0.2)
     assert "secret-fixture" not in str(caught.value)
+    if mode == "timeout":
+        assert caught.value.diagnostic == {"name": "SelectionTimeout"}
+        assert "timed out" in str(caught.value)
 
 
 def test_real_subprocess_fixture_retains_identity_and_usage():

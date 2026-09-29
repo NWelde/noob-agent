@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from noob_agent.models.client import ModelRequest, WandbInferenceClient
+from noob_agent.redstone.circuit_plan import CircuitPlan
 from noob_agent.redstone.contract import FrozenModel, MachineContract, validate_build_action
 from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
 from noob_agent.redstone.modules import ModuleDeclaration, validate_declaration
@@ -21,10 +22,32 @@ from noob_agent.redstone.provider_limits import (
 from noob_agent.settings import ModelSettings, WandbSettings
 
 MAX_FEEDBACK_ENTRIES = 6
-MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE = 3
+MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE = 12
 
 
 def planner_validation_instruction(reason: str, finish_reason: str | None) -> str:
+    if reason.startswith("Missing register recipe load:"):
+        return (
+            "Declare recipe_templates.load covering load:0 through load:15. "
+            "Use one test_input or programming control for each data bit in the "
+            "recipe template, with parameter=value, zero-based bit indexes. "
+            "Those controls must name the actual built data levers. Do not include "
+            "reset or STEP in the load recipe. Return the complete register "
+            "declaration; no world actions were dispatched."
+        )
+    if (
+        reason.startswith("Recipe control ")
+        or reason == "Recipe requires declared input/programming levels"
+    ):
+        return (
+            "Every recipe control must appear in module_inspection.controls with role "
+            "test_input or programming and the distinct position of an actual built lever. "
+            "Reset and STEP cannot be used in recipes. Do not invent a lever that is not built. "
+            "Concrete recipe levels must be JSON booleans. "
+            "If input hardware is missing, return construction actions to build it first. "
+            "Otherwise correct the control declaration and return the complete intention. "
+            "No actions were dispatched."
+        )
     if finish_reason == "length":
         return (
             "Return a complete compact JSON intention with at most 8 actions, "
@@ -76,13 +99,16 @@ class OfferedAction(FrozenModel):
     position: list[int] = Field(min_length=3, max_length=3)
     block: str | None = None
     properties: dict[str, str | int | bool] | None = None
+    depends_on: list[str] = Field(default_factory=list, max_length=32)
 
 
 class Intention(FrozenModel):
     summary: str = Field(min_length=1, max_length=2000)
     actions: list[OfferedAction] = Field(max_length=32)
     module_inspection: ModuleDeclaration | None = None
+    circuit_plan: CircuitPlan | None = None
     request_grading: bool = False
+    register_bit_check: int | None = Field(default=None, ge=0, le=3, strict=True)
     max_actions: int = Field(default=256, ge=1, le=256)
     max_seconds: int = Field(default=60, ge=1, le=60)
 
@@ -93,10 +119,20 @@ def validate_intention(value: object, contract: MachineContract) -> Intention:
         not intention.actions
         and intention.module_inspection is None
         and not intention.request_grading
+        and intention.register_bit_check is None
     ):
         raise ValueError("Intention requires actions, module inspection or grading request")
     if intention.module_inspection is not None:
         validate_declaration(intention.module_inspection.model_dump(), contract)
+    if intention.register_bit_check is not None and (
+        intention.actions
+        or intention.request_grading
+        or intention.module_inspection is None
+        or intention.module_inspection.module != "register"
+    ):
+        raise ValueError(
+            "Register bit diagnostics require a register declaration and no actions or grading request"
+        )
     if len(intention.actions) > contract.budgets.intention_actions:
         raise ValueError("Intention action limit exceeded")
     if (
@@ -109,6 +145,11 @@ def validate_intention(value: object, contract: MachineContract) -> Intention:
         raise ValueError("Reserved termination ID")
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate action IDs")
+    for action in intention.actions:
+        if len(action.depends_on) != len(set(action.depends_on)):
+            raise ValueError(f"Duplicate dependencies for action {action.id}")
+        if action.id in action.depends_on or any(dep not in ids for dep in action.depends_on):
+            raise ValueError(f"Invalid dependencies for action {action.id}")
     for action in intention.actions:
         try:
             validate_build_action(
@@ -151,10 +192,14 @@ class PlannerContext:
         require_module_grading: bool = False,
         task: Literal["computer", "lamp_repair"] = "computer",
         history: list[dict[str, Any]] | None = None,
+        circuit_plan: dict[str, Any] | CircuitPlan | None = None,
+        latest_verified_layout: list[dict[str, Any]] | None = None,
+        register_workshop: bool = False,
     ) -> None:
         self.contract = contract
         self.require_module_grading = require_module_grading
         self.task = task
+        self.register_workshop = register_workshop
         self.grading_enabled = False
         self.force_grading = False
         self.history: list[dict[str, Any]] = (
@@ -162,6 +207,18 @@ class PlannerContext:
             if history is not None
             else []
         )
+        self.circuit_plan = (
+            CircuitPlan.model_validate(circuit_plan) if circuit_plan is not None else None
+        )
+        self.latest_verified_layout = json.loads(
+            json.dumps(latest_verified_layout or [], allow_nan=False)
+        )
+        if not self.latest_verified_layout:
+            for entry in reversed(self.history):
+                layout = _find_verified_layout(entry)
+                if layout is not None:
+                    self.latest_verified_layout = layout
+                    break
         self.public = contract.model_dump(mode="json", exclude={"independent_final_checks"})
         self.public["module_grading_limits"] = {
             "aggregate_ticks": 96000,
@@ -170,14 +227,41 @@ class PlannerContext:
         }
 
     def feedback(self, actual: dict[str, Any]) -> None:
-        self.history.append(json.loads(json.dumps(actual, allow_nan=False)))
+        copied = json.loads(json.dumps(actual, allow_nan=False))
+        layout = _find_verified_layout(copied)
+        if layout is not None:
+            self.latest_verified_layout = layout
+        self.history.append(copied)
         self.history = self.history[-MAX_FEEDBACK_ENTRIES:]
+
+    def update_circuit_plan(self, plan: dict[str, Any] | CircuitPlan | None) -> None:
+        """Save a planner-authored design note independently of trimmed feedback."""
+        self.circuit_plan = CircuitPlan.model_validate(plan) if plan is not None else None
+
+    def saved_state(self) -> dict[str, Any]:
+        """Return compact planner state for the trial continuation checkpoint."""
+        return {
+            "history": self.history,
+            "circuit_plan": (
+                self.circuit_plan.model_dump(mode="json") if self.circuit_plan is not None else None
+            ),
+            "latest_verified_layout": self.latest_verified_layout,
+        }
 
     def request(self, observation: dict[str, Any]) -> ModelRequest:
         schema = Intention.model_json_schema()
+        if not self.register_workshop:
+            schema["properties"].pop("register_bit_check", None)
+        found_layout = _find_verified_layout(observation)
+        if found_layout is not None:
+            self.latest_verified_layout = found_layout
+        compact_observation = _without_layout(observation)
+        plan = self.circuit_plan.model_dump(mode="json") if self.circuit_plan else None
+        feedback = _compact_feedback(self.history)
+        payload_feedback = feedback
         if self.task == "lamp_repair":
             schema["properties"].pop("module_inspection")
-            schema["$defs"] = {"OfferedAction": schema["$defs"]["OfferedAction"]}
+            _prune_compact_defs(schema)
             schema["properties"]["actions"]["maxItems"] = 1
             schema["properties"]["summary"]["maxLength"] = 200
             schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
@@ -209,8 +293,12 @@ class PlannerContext:
                             "open_connection": WIRE_POSITION,
                             "lamp": LAMP_POSITION,
                         },
-                        "observation": observation,
-                        "feedback": self.history,
+                        "observation": compact_observation,
+                        "feedback": payload_feedback,
+                        "circuit_plan": plan,
+                        "latest_verified_layout": _compact_layout(self.latest_verified_layout)
+                        if self.latest_verified_layout
+                        else None,
                     },
                     allow_nan=False,
                 ),
@@ -222,12 +310,12 @@ class PlannerContext:
             # Construction stays compact until the model explicitly requests
             # grading. Do not compile the probe/recipe schema for build offers.
             schema["properties"].pop("module_inspection")
-            schema["$defs"] = {"OfferedAction": schema["$defs"]["OfferedAction"]}
+            _prune_compact_defs(schema)
             schema["properties"]["actions"]["maxItems"] = 8
             schema["properties"]["summary"]["maxLength"] = 200
             schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
             return ModelRequest(
-                system="Design within the frozen public requirements. Start with the "
+                system=("Design within the frozen public requirements. Start with the "
                 "register, then arithmetic, storage and output; use recent feedback "
                 "to continue the current module. "
                 "Offer at most eight supported construction actions and no "
@@ -236,8 +324,10 @@ class PlannerContext:
                 "public checks, return request_grading true to request the full "
                 "declaration schema on the next turn. Recent feedback reports cumulative "
                 "stone and signal or control placements. The existing grass floor at y=63 can "
-                "support blocks placed at y=64. Every early construction intention must "
-                "include a lever, wire, torch, repeater, comparator or lamp; stone, "
+                "support blocks placed at y=64. Before any functional block exists, include "
+                "a lever, wire, torch, repeater, comparator or lamp. Later support-only "
+                "batches are allowed. Supports must be built in a previous batch before "
+                "offering wire or attached components; Jev can choose offers in any order. Stone, "
                 "glass and redstone blocks alone cannot pass a module. Place controls, "
                 "wiring, memory or probes with only the supports "
                 "they need. Use x=0..95, "
@@ -247,18 +337,28 @@ class PlannerContext:
                 "floor, wall or ceiling and facing is horizontal. Use exact "
                 "permitted Minecraft block IDs "
                 "from the requirements. Each action needs a quoted string id, "
-                "criteria, action and position. Only place may include block or "
+                "criteria, action and position. Optional depends_on lists earlier action IDs "
+                "that must succeed first; select only dependency-ready actions. Optionally "
+                "return circuit_plan as your own durable design notes, never as evidence. "
+                "Only place may include block or "
                 "properties; omit both for break, interact and observe. For boolean "
                 "block properties such as powered, use JSON true/false, not quoted "
                 "strings. Omit properties unless needed. Return "
                 "one compact JSON object with summary and actions; no raw commands. "
                 "Omit max_actions and max_seconds to use safe defaults: placement "
-                "uses at least five primitive actions including readbacks.",
+                "uses at least five primitive actions including readbacks."
+                + (" Register workshop pad: stone at x=40..48, y=64, z=40..48; "
+                   "glass marker at x=40,y=65,z=40. Build above this pad yourself; it "
+                   "contains no circuit or preplaced controls." if self.register_workshop else "")),
                 prompt=json.dumps(
                     {
                         "requirements": self.public,
-                        "observations": observation,
-                        "feedback": self.history,
+                        "observations": compact_observation,
+                        "feedback": payload_feedback,
+                        "circuit_plan": plan,
+                        "latest_verified_layout": _compact_layout(self.latest_verified_layout)
+                        if self.latest_verified_layout
+                        else None,
                     },
                     allow_nan=False,
                 ),
@@ -273,9 +373,7 @@ class PlannerContext:
         if self.force_grading:
             schema["properties"]["actions"]["minItems"] = 0
             schema["properties"]["actions"]["maxItems"] = 0
-            schema["properties"]["module_inspection"] = {
-                "$ref": "#/$defs/ModuleDeclaration"
-            }
+            schema["properties"]["module_inspection"] = {"$ref": "#/$defs/ModuleDeclaration"}
             if "module_inspection" not in schema["required"]:
                 schema["required"].append("module_inspection")
             schema["properties"]["request_grading"] = {
@@ -326,8 +424,14 @@ class PlannerContext:
             "on unchanged hardware cannot fix a missing lever, missing probe, or "
             "wrong reset signal. Return one JSON intention "
             "with summary and bounded actions, each with id, criteria, action, position, "
-            "and optional block/properties. Jev selects a sequence from these offers, each "
-            "at most once, observing after each, and may finish early. Specify max_actions "
+            "and optional block/properties and depends_on. Jev may select an action only "
+            "after every ID in its depends_on list has succeeded; otherwise that offer is "
+            "not ready. Each offer may be selected at most once, with readback after each, "
+            "and Jev may finish early. Optionally include circuit_plan as your own durable "
+            "design notes: input/control positions, storage nodes, intended signal paths, "
+            "expected polarity, and unfinished connections. This plan is design intent only; "
+            "world readbacks are the sole evidence of built hardware and the independent "
+            "grader alone establishes behavior. Specify max_actions "
             "(including internal validation/readbacks/settling) and max_seconds within "
             "the frozen intention limits; omit them to use defaults of 256 and 60. "
             "Each placement needs at least five primitive actions. Criteria must "
@@ -374,6 +478,19 @@ class PlannerContext:
             "All controls and waits are declared, no layouts are supplied. "
             "Actions may be empty when requesting inspection or grading."
         )
+        if self.register_workshop:
+            system += (
+                " This is the optional register_workshop profile. Its stone pad is at "
+                "x=40..48, y=64, z=40..48, with a glass marker at x=40,y=65,z=40. "
+                "The pad has no controls, wiring, probes, circuit or blueprint. You must "
+                "design and build the register yourself. "
+                "After a single bit is ready, you may return register_bit_check as an "
+                "integer 0..3 with no construction actions or module_inspection. This "
+                "runs a diagnostic of load zero, load one, hold while input changes, "
+                "and reset for that bit. Its result is diagnostic evidence only; it "
+                "never passes the four-bit register checkpoint. Continue building and "
+                "request the unchanged all-16 register behavior suite when ready."
+            )
         if self.force_grading:
             system = (
                 "A construction limit was reached. Stop building now. First return "
@@ -381,9 +498,7 @@ class PlannerContext:
                 "request_grading false, and one complete module_inspection. Do not "
                 "include any build, break, interact, or observe action. The schema "
                 "forbids actions and requires module_inspection. Then follow these "
-                "declaration requirements: "
-                + system
-                + " Return a "
+                "declaration requirements: " + system + " Return a "
                 "complete behavioral module_inspection with empty actions. Include all "
                 "required probes, controls, and recipes or recipe_templates so the "
                 "independent public grader can test the current hardware."
@@ -393,8 +508,12 @@ class PlannerContext:
             prompt=json.dumps(
                 {
                     "requirements": self.public,
-                    "observations": observation,
-                    "feedback": self.history,
+                    "observations": compact_observation,
+                    "feedback": payload_feedback,
+                    "circuit_plan": plan,
+                    "latest_verified_layout": _compact_layout(self.latest_verified_layout)
+                    if self.latest_verified_layout
+                    else None,
                 },
                 allow_nan=False,
             ),
@@ -402,6 +521,94 @@ class PlannerContext:
             thinking=False,
             response_schema=schema,
         )
+
+
+def _find_verified_layout(value: Any) -> list[dict[str, Any]] | None:
+    if isinstance(value, dict):
+        candidate = value.get("verified_layout")
+        if isinstance(candidate, list):
+            copied: list[dict[str, Any]] = json.loads(json.dumps(candidate, allow_nan=False))
+            return copied
+        for item in value.values():
+            found = _find_verified_layout(item)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_verified_layout(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _without_layout(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_layout(item)
+            for key, item in value.items()
+            if key not in {"verified_layout", "latest_verified_layout"}
+        }
+    if isinstance(value, list):
+        return [_without_layout(item) for item in value]
+    return value
+
+
+def _compact_feedback(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep outcomes and checks; replace old full layout snapshots with deltas."""
+    previous: set[str] | None = None
+    compact: list[dict[str, Any]] = []
+    for entry in history:
+        item = _without_layout(entry)
+        layout = _find_verified_layout(entry)
+        if layout is not None:
+            current = set(_compact_layout(layout)["cells"])
+            if previous is not None:
+                added, removed = sorted(current - previous), sorted(previous - current)
+                if added or removed:
+                    item["observed_layout_delta"] = {"added": added, "removed": removed}
+            previous = current
+        compact.append(item)
+    return compact
+
+
+def _compact_layout(layout: list[dict[str, Any]]) -> dict[str, Any]:
+    """Render actual readbacks as a small coordinate index and layer map."""
+    cells: list[tuple[int, int, int, str]] = []
+    for cell in layout:
+        pos = cell.get("position")
+        if isinstance(pos, list) and len(pos) == 3:
+            x, y, z = pos
+            name = str(cell.get("name", "unknown"))
+            cells.append((int(x), int(y), int(z), name.removeprefix("minecraft:")))
+    layers: dict[str, list[str]] = {}
+    vertical: dict[str, list[str]] = {}
+    for y in sorted({cell[1] for cell in cells}):
+        layers[str(y)] = [f"{x},{z}:{name}" for x, cy, z, name in cells if cy == y]
+    for x in sorted({cell[0] for cell in cells}):
+        vertical[str(x)] = [f"{y},{z}:{name}" for cx, y, z, name in cells if cx == x]
+    return {
+        "source": "verified world readbacks; design intent is not evidence",
+        "cells": [f"{x},{y},{z}:{name}" for x, y, z, name in sorted(cells)],
+        "properties_by_cell": {
+            ",".join(map(str, cell["position"])): cell.get("properties", {})
+            for cell in layout
+            if cell.get("properties")
+        },
+        "top_down_by_y": layers,
+        "vertical_slices_by_x": vertical,
+    }
+
+
+def _prune_compact_defs(schema: dict[str, Any]) -> None:
+    keep = {
+        "OfferedAction",
+        "CircuitPlan",
+        "PlannedInput",
+        "PlannedStorageNode",
+        "PlannedSignalPath",
+        "PlannedConnection",
+    }
+    schema["$defs"] = {key: value for key, value in schema["$defs"].items() if key in keep}
 
 
 class TrialWandbClient(WandbInferenceClient):

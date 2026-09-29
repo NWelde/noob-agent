@@ -52,15 +52,13 @@ class ActionPing:
         )
         # The label is assembled only from the validated action schema and block ID.
         text = label.replace("\\", "").replace("'", "")
-        self.transport.command(
-            f"kill @e[type=minecraft:text_display,tag={self.TAG}]"
-        )
+        self.transport.command(f"kill @e[type=minecraft:text_display,tag={self.TAG}]")
         self.transport.command(
             "execute at noobagentbot run summon minecraft:text_display ~ ~2.45 ~ "
-            "{Tags:[\"noob_agent_action_ping\"],billboard:\"center\","
-            "alignment:\"center\",background:805306368,shadow:1b,see_through:1b,"
+            '{Tags:["noob_agent_action_ping"],billboard:"center",'
+            'alignment:"center",background:805306368,shadow:1b,see_through:1b,'
             "view_range:1.0f,transformation:{scale:[1.25f,1.25f,1.25f]},"
-            f"text:'{{\"text\":\"{text}\",\"color\":\"#55ff55\",\"bold\":true}}'}}"
+            f'text:\'{{"text":"{text}","color":"#55ff55","bold":true}}\'}}'
         )
         self.manifest.observed(event, {"shown": True, "duration_ticks": 40})
 

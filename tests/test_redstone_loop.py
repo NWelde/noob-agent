@@ -40,7 +40,7 @@ class Planner:
         self.requests = []
 
     async def complete(self, request):
-        disk = json.loads(self.manifest.path.read_text())
+        disk = TrialManifest.load_data(self.manifest.path)
         assert disk["loop_budget"]["planner_calls"] == len(self.requests) + 1
         assert disk["events"][-1]["outcome"] == "unknown"
         self.requests.append(request)
@@ -57,7 +57,7 @@ class Jev:
         self.requests = []
 
     def evaluate(self, request, *, timeout):
-        disk = json.loads(self.manifest.path.read_text())
+        disk = TrialManifest.load_data(self.manifest.path)
         assert disk["loop_budget"]["jev_calls"] == len(self.requests) + 1
         assert disk["events"][-1]["outcome"] == "unknown"
         assert 0 < timeout <= 30
@@ -276,6 +276,8 @@ async def test_provider_rejects_stone_only_building_before_circuit_progress(tmp_
     assert len(rejected) == 2
     assert "No signal or control block exists yet" in rejected[0]["request"]["reason"]
     assert "No signal or control block exists yet" in planner.requests[1].prompt
+    assert manifest.data["loop"]["reason"] == "planner_validation_exhausted"
+    assert "validation_reason" in manifest.data["errors"][-1]
 
 
 async def test_provider_static_power_does_not_bypass_signal_progress_guard(tmp_path):
@@ -310,6 +312,7 @@ async def test_provider_rejects_action_cap_below_offer_readback_cost(tmp_path):
                 "action": "place",
                 "position": [30 + index, 64, 30],
                 "block": "minecraft:lever",
+                "properties": {"face": "floor", "facing": "north"},
             }
             for index in range(2)
         ],
@@ -376,8 +379,16 @@ async def test_identical_invalid_planner_response_stops_retrying_early(tmp_path)
 
 async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_path, monkeypatch):
     checks = iter([{"passed": False}, {"passed": True, "complete": True}])
+
+    def check(_):
+        result = next(checks)
+        if result["passed"] is False:
+            loop.placed_cells.pop((30, 65, 30), None)
+            loop.layout.reconcile([30, 65, 30], {"name": "minecraft:air"})
+        return result
+
     manifest, actions, planner, jev, loop = setup(
-        tmp_path, require_module_grading=True, check=lambda _: next(checks)
+        tmp_path, require_module_grading=True, check=check
     )
     replies = [
         {
@@ -396,6 +407,7 @@ async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_
                     "action": "place",
                     "position": [30, 65, 30],
                     "block": "minecraft:lever",
+                    "properties": {"face": "floor", "facing": "north"},
                 },
             ],
         },
@@ -415,6 +427,7 @@ async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_
                     "action": "place",
                     "position": [30, 65, 30],
                     "block": "minecraft:lever",
+                    "properties": {"face": "floor", "facing": "north"},
                 },
             ],
         },
@@ -429,7 +442,7 @@ async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_
         )
 
     planner.complete = complete
-    selections = iter(["support", "__finish__", "repair_lever"])
+    selections = iter(["support", "initial_lever", "repair_lever"])
     jev.requests = []
 
     def evaluate(request, *, timeout):
@@ -454,6 +467,7 @@ async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_
     assert applied == [
         ("place", [30, 64, 30], "minecraft:stone"),
         ("place", [30, 65, 30], "minecraft:lever"),
+        ("place", [30, 65, 30], "minecraft:lever"),
     ]
     assert len(jev.requests) == 3
     second = jev.requests[2]
@@ -466,6 +480,44 @@ async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_
     }
     assert any(event["kind"] == "action_offer_skipped" for event in manifest.data["events"])
     assert manifest.data["loop"]["status"] == "checkpoint_complete"
+
+
+async def test_replacement_placement_is_not_skipped_when_same_cell_can_be_broken(
+    tmp_path, monkeypatch
+):
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path,
+        require_module_grading=True,
+        check=lambda _: {"passed": True, "complete": True},
+    )
+    position = [30, 65, 30]
+    loop.placed_cells[tuple(position)] = ("minecraft:lever", ())
+    loop.layout.reconcile([30, 64, 30], {"name": "minecraft:stone"})
+    planner.value = {
+        "summary": "Remove and restore the control",
+        "actions": [
+            {"id": "remove", "criteria": "Remove control", "action": "break", "position": position},
+            {
+                "id": "restore",
+                "criteria": "Restore control",
+                "action": "place",
+                "position": position,
+                "block": "minecraft:lever",
+            },
+        ],
+    }
+    applied = []
+
+    def apply(action, position, block, properties):
+        applied.append(action)
+        return {"effect_verified": True}
+
+    monkeypatch.setattr(actions, "apply", apply)
+    await loop.run({})
+    assert applied == ["break", "place"]
+    assert "restore" not in jev.requests[0]["questions"]["action"]["criteria"]
+    assert "restore" in jev.requests[1]["questions"]["action"]["criteria"]
+    assert not any(event["kind"] == "action_offer_skipped" for event in manifest.data["events"])
 
 
 async def test_lamp_repair_task_rejects_actions_outside_seeded_fixture(tmp_path):
@@ -559,10 +611,15 @@ async def test_provider_feedback_reports_verified_construction_progress(tmp_path
     assert '"signal_control_placements": 1' in planner.requests[1].prompt
 
 
-async def test_provider_grading_handoff_requests_full_schema_only_when_ready(tmp_path, monkeypatch):
+@pytest.mark.parametrize("behavior_passed", [True, False])
+async def test_provider_grading_handoff_requests_full_schema_only_when_ready(
+    tmp_path, monkeypatch, behavior_passed
+):
     from test_redstone_behavior import compact_declared
 
-    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, require_module_grading=True, stop_after_module="register"
+    )
     replies = [
         {
             "summary": "Place control",
@@ -608,20 +665,28 @@ async def test_provider_grading_handoff_requests_full_schema_only_when_ready(tmp
             "module": declaration.module,
             "scope": "public_module_behavior",
             "complete": True,
-            "behavioral_passed": True,
+            "behavioral_passed": behavior_passed,
             "checks": [{"passed": True}],
             "failed_checks": [],
         },
     )
     await loop.run({})
     assert len(jev.requests) == 1
+    assert "ONLY an independently verified four-bit register" in requests[0].system
+    assert "two-tick STEP pulse" in requests[0].system
     assert "module_inspection" not in requests[0].response_schema["properties"]
     assert "module_inspection" not in requests[1].response_schema["properties"]
     assert "module_inspection" in requests[2].response_schema["properties"]
-    assert manifest.data["milestone_4"]["modules"]["register"]["construction_epoch"] == 1
+    if behavior_passed:
+        assert manifest.data["module_checkpoint"]["status"] == "passed"
+        assert manifest.data["loop"]["status"] == "module_checkpoint_passed"
+        assert manifest.data["final_grade"]["model_success"] is False
+    else:
+        assert "module_checkpoint" not in manifest.data
+        assert "register" not in manifest.data["milestone_4"]["modules"]
 
 
-async def test_provider_forces_public_grade_after_three_construction_intentions(
+async def test_provider_continues_building_after_three_intentions_and_reminds_at_twelve(
     tmp_path, monkeypatch
 ):
     from test_redstone_behavior import compact_declared
@@ -640,10 +705,11 @@ async def test_provider_forces_public_grade_after_three_construction_intentions(
                 }
             ],
         }
-        for index in range(3)
+        for index in range(13)
     ]
     replies = [
         *builds,
+        {"summary": "Ready for grading", "actions": [], "request_grading": True},
         {
             "summary": "Grade current register module",
             "actions": [],
@@ -683,11 +749,13 @@ async def test_provider_forces_public_grade_after_three_construction_intentions(
 
     await loop.run({})
 
-    assert len(jev.requests) == 3
+    assert len(jev.requests) == 13
     assert "module_inspection" not in requests[0].response_schema["properties"]
-    assert "module_inspection" in requests[3].response_schema["properties"]
-    assert "construction limit was reached" in requests[3].system.lower()
-    assert manifest.data["milestone_4"]["modules"]["register"]["construction_epoch"] == 3
+    assert "module_inspection" not in requests[3].response_schema["properties"]
+    assert "readiness_reminder" in requests[12].prompt
+    assert "module_inspection" in requests[14].response_schema["properties"]
+    assert "construction limit was reached" not in requests[12].system.lower()
+    assert manifest.data["milestone_4"]["modules"]["register"]["construction_epoch"] == 13
 
 
 @pytest.mark.parametrize("provider", ["planner", "jev"])
@@ -815,6 +883,45 @@ async def test_expired_wall_budget_never_calls_provider(tmp_path):
     await loop.run({})
     assert not planner.requests
     assert manifest.data["loop"]["reason"] == "LoopLimit"
+
+
+async def test_selection_timeout_at_intention_deadline_returns_without_world_action(tmp_path):
+    now = [0.0]
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, clock=lambda: now[0], check=lambda _: {"passed": True, "complete": True}
+    )
+
+    def timeout(request, *, timeout):
+        jev.requests.append(request)
+        now[0] = 61
+        raise JevError("Jev selection timed out", diagnostic={"name": "SelectionTimeout"})
+
+    jev.evaluate = timeout
+    await loop.run({})
+    assert actions.used == 0
+    assert len(jev.requests) == 1
+    selection = next(event for event in manifest.data["events"] if event["kind"] == "jev_call")
+    assert selection["outcome"] == "observed"
+    assert selection["result"]["intention_time_exhausted"] is True
+    assert manifest.data["loop"]["status"] == "checkpoint_complete"
+
+
+@pytest.mark.parametrize("elapsed", [30, 3601])
+async def test_selection_timeout_does_not_hide_provider_or_trial_deadline_failure(
+    tmp_path, elapsed
+):
+    now = [0.0]
+    manifest, actions, planner, jev, loop = setup(tmp_path, clock=lambda: now[0])
+
+    def timeout(request, *, timeout):
+        now[0] = elapsed
+        raise JevError("Jev selection timed out", diagnostic={"name": "SelectionTimeout"})
+
+    jev.evaluate = timeout
+    await loop.run({})
+    assert actions.used == 0
+    assert manifest.data["loop"]["reason"] == "JevError"
+    assert manifest.data["events"][-1]["outcome"] == "unknown"
 
 
 async def test_invalid_intention_never_calls_jev(tmp_path):
@@ -1328,3 +1435,46 @@ async def test_behavioral_failure_returns_raw_feedback_and_charges_repair(
     assert feedback["failed_checks"][0]["actual"]["a"] == 8
     assert feedback["failed_checks"][0]["raw"]["snapshots"][0]["signals"]["a"] == [15, 0, 0, 0]
     assert manifest.data["loop_budget"]["repair_rounds"] == 1
+
+
+async def test_register_checkpoint_rejects_other_module_declarations(tmp_path):
+    from test_redstone_behavior import compact_declared
+
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, require_module_grading=True, stop_after_module="register"
+    )
+    planner.value = {
+        "summary": "Try an arithmetic declaration before register acceptance",
+        "actions": [],
+        "module_inspection": compact_declared("arithmetic"),
+    }
+    await loop.run({})
+    assert not jev.requests
+    assert actions.used == 0
+    assert "module_checkpoint" not in manifest.data
+    assert (
+        manifest.data["loop"]["validation_reason"]
+        == "This checkpoint requires the register module only"
+    )
+
+
+async def test_unresolved_interface_failure_survives_recent_history_trim(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    failed = {
+        "target": "reset",
+        "actual": {"name": "minecraft:redstone_torch"},
+        "expected": {"block": "minecraft:lever", "position": [25, 65, 12]},
+    }
+    loop.failed_module_checks = {"register": {"failed_checks": [failed], "declaration": {}}}
+    loop.layout.reconcile([25, 65, 12], {"name": "minecraft:lever", "properties": {}})
+    for index in range(10):
+        loop.context.feedback({"other_observation": index})
+    planner.error = RuntimeError("stop after reading prompt")
+    await loop.run({})
+    prompt = json.loads(planner.requests[0].prompt)
+    assert prompt["unresolved_module_failures"]["register"]["failed_checks"] == [failed]
+    assert prompt["latest_verified_layout"]["cells"] == ["25,65,12:lever"]
+    assert "request a new module inspection" in planner.requests[0].system
+    assert "Prioritize the unresolved module failures" in planner.requests[0].system
+    assert actions.used == 0
+    assert not jev.requests

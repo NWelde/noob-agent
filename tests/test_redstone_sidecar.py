@@ -19,9 +19,11 @@ def test_journals_before_delivery_and_preserves_actual_result(tmp_path: Path) ->
     manifest = TrialManifest(tmp_path)
     body = f"""
 import json,sys
+from pathlib import Path
+from noob_agent.redstone.trial import TrialManifest
 print('{{"ready":true,"version":"1.21.1"}}')
 for line in sys.stdin:
-    journal=json.load(open({str(manifest.path)!r}))
+    journal=TrialManifest.load_data(Path({str(manifest.path)!r}))
     assert journal['events'][-1]['outcome']=='unknown'
     print(json.dumps({{'ok':True,'result':{{'gameMode':'survival'}}}}))
 """

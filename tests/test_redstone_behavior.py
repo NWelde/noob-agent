@@ -203,12 +203,14 @@ def test_behavior_grade_stops_when_declared_probe_is_not_present(tmp_path, monke
 
     assert not result["behavioral_passed"]
     assert result["complete"]
-    assert result["failed_checks"] == [{
-        "reason": "declared_probe_missing_or_mismatched",
-        "role": "a",
-        "index": 2,
-        "detail": "Declared probe missing or mismatched",
-    }]
+    assert result["failed_checks"] == [
+        {
+            "reason": "declared_probe_missing_or_mismatched",
+            "role": "a",
+            "index": 2,
+            "detail": "Declared probe missing or mismatched",
+        }
+    ]
     assert len(result["checks"]) == 0
 
 

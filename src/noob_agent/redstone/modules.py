@@ -192,6 +192,16 @@ def validate_recipe(recipe: object, declaration: ModuleDeclaration) -> int:
                 or controls[key].role not in ("programming", "test_input")
                 or type(op["level"]) is not bool
             ):
+                if type(key) is str and key not in controls:
+                    raise ValueError(f"Recipe control {key} is not declared")
+                if (
+                    type(key) is str
+                    and key in controls
+                    and controls[key].role not in ("programming", "test_input")
+                ):
+                    raise ValueError(
+                        f"Recipe control {key} requires test_input or programming role"
+                    )
                 raise ValueError("Recipe requires declared input/programming levels")
         else:
             raise ValueError("Invalid recipe operation")

@@ -1,8 +1,8 @@
 from noob_agent.redstone.demo import (
-    ActionPing,
     LAMP_POSITION,
     LEVER_POSITION,
     WIRE_POSITION,
+    ActionPing,
     LampRepairCheck,
     prepare_lamp_repair,
 )
@@ -63,8 +63,8 @@ def test_action_ping_announces_selected_block_above_agent_for_two_seconds():
         "execute at noobagentbot run summon minecraft:text_display ~ ~2.45 ~"
         in transport.commands[1]
     )
-    assert '\"text\":\"Place redstone wire\"' in transport.commands[1]
-    assert '\"color\":\"#55ff55\"' in transport.commands[1]
+    assert '"text":"Place redstone wire"' in transport.commands[1]
+    assert '"color":"#55ff55"' in transport.commands[1]
     assert len(transport.commands) == 2
 
 

@@ -31,9 +31,9 @@ function validateBlock(registry, name, properties = {}) {
   }
   return { name, properties };
 }
-function position(value) {
+function position(value, readSupport = false) {
   if (!Array.isArray(value) || value.length !== 3 || value.some((v, i) =>
-    !Number.isInteger(v) || v < contract.build_min[i] || v > contract.build_max[i])) {
+    !Number.isInteger(v) || v < contract.build_min[i] - (readSupport && i === 1 ? 1 : 0) || v > contract.build_max[i])) {
     throw Error('invalid_position');
   }
   return new Vec3(...value);
@@ -85,7 +85,7 @@ async function dispatch(bot, request) {
       dimension: bot.game.dimension, inventory: bot.inventory.slots.flatMap((item, slot) =>
         item ? [{ slot, name: item.name, count: item.count }] : []) };
   }
-  const target = position(request.position);
+  const target = position(request.position, request.op === 'block');
   const before = readBlock(bot, target);
   if (request.op === 'block') return before;
   // Keep this initial action surface restricted to the infrastructure lever check.

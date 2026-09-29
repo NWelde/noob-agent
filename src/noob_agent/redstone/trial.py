@@ -26,6 +26,7 @@ from noob_agent.redstone.rcon import RconClient
 CONTRACT_PATH = Path("scenarios/minecraft/redstone-computer-v1/contract.json")
 RUN_DIRECTORY = Path(".noob-agent/redstone-trials")
 LAMP_MAX_SESSIONS = 4
+JOURNAL_SNAPSHOT_INTERVAL = 128
 
 
 def timestamp() -> str:
@@ -45,14 +46,46 @@ def can_auto_continue(data: dict[str, Any], task: str) -> bool:
     )
 
 
+def can_resume_model_failure(data: dict[str, Any]) -> bool:
+    """Recover inference or completed-action boundaries; reject world uncertainty."""
+    continuation = data.get("continuation", {})
+    events = data.get("events", [])
+    return (
+        data.get("loop", {}).get("status") == "stopped"
+        and data.get("loop", {}).get("reason")
+        in {"JevError", "CancelledError", "KeyboardInterrupt"}
+        and continuation.get("stop_reason") == data.get("loop", {}).get("reason")
+        and continuation.get("session_number") == len(data.get("sessions", []))
+        and isinstance(continuation.get("state"), dict)
+        and bool(events)
+        and (
+            (
+                events[-1].get("kind") in {"jev_call", "planner_call"}
+                and events[-1].get("outcome") == "unknown"
+                and (data["loop"]["reason"] != "JevError" or events[-1].get("kind") == "jev_call")
+            )
+            or (
+                data["loop"]["reason"] in {"CancelledError", "KeyboardInterrupt"}
+                and events[-1].get("kind") == "action_feedback"
+                and events[-1].get("outcome") == "observed"
+            )
+        )
+        and all(
+            e.get("kind") in {"jev_call", "planner_call"}
+            for e in events
+            if e.get("outcome") == "unknown"
+        )
+        and data.get("timeline_resources", {}).get("state", "clean") == "clean"
+    )
+
+
 def verify_continuation(manifest: TrialManifest, task: str, *, actions: Any) -> dict[str, Any]:
     """Compare the retained build with its last journaled state before resuming."""
     if task == "lamp_repair":
         from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
 
         lever, wire, lamp = (
-            actions.observe(position)
-            for position in (LEVER_POSITION, WIRE_POSITION, LAMP_POSITION)
+            actions.observe(position) for position in (LEVER_POSITION, WIRE_POSITION, LAMP_POSITION)
         )
         if lever.get("name") != "minecraft:lever" or lamp.get("name") != "minecraft:redstone_lamp":
             raise ValueError("Saved lamp fixture no longer matches the continuation record")
@@ -120,8 +153,7 @@ def verify_continuation(manifest: TrialManifest, task: str, *, actions: Any) -> 
         matched = any(
             actual.get("name") == expected.get("name")
             and all(
-                actual.get("properties", {}).get(k) == v
-                for k, v in expected["properties"].items()
+                actual.get("properties", {}).get(k) == v for k, v in expected["properties"].items()
             )
             for expected in expected_states
         )
@@ -141,8 +173,18 @@ def verify_continuation(manifest: TrialManifest, task: str, *, actions: Any) -> 
         "observed_cells": observations,
     }
     manifest.data["continuation"]["verification"] = verification
+    manifest.data.setdefault("continuation_verifications", []).append(verification)
     state = manifest.data["continuation"].get("state", {})
     state["world_states"] = observations
+    state["placed_cells"] = [
+        {
+            "position": cell["position"],
+            "block": cell["name"],
+            "properties": cell.get("properties", {}),
+        }
+        for cell in observations
+        if cell.get("name") != "minecraft:air"
+    ]
     manifest.data["continuation"]["state"] = state
     manifest.save()
     return {
@@ -179,6 +221,8 @@ class TrialManifest:
         finally:
             os.close(parent)
         self.path = directory / "manifest.json"
+        self.journal_path = directory / "events.jsonl"
+        self._journal_records = 0
         self.data: dict[str, Any] = {
             "schema_version": 1,
             "run_id": run_id,
@@ -206,12 +250,14 @@ class TrialManifest:
     @classmethod
     def reopen(cls, path: Path) -> TrialManifest:
         """Open an existing campaign journal for a fresh bounded session."""
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = cls.load_data(path)
         if not isinstance(data, dict) or data.get("schema_version") != 1:
             raise ValueError("Unsupported continuation record")
         manifest = object.__new__(cls)
         manifest.started = time.monotonic()
         manifest.path = path
+        manifest.journal_path = path.with_name("events.jsonl")
+        manifest._journal_records = cls._count_journal_records(manifest.journal_path)
         manifest.data = data
         manifest.data.setdefault("sessions", []).append(
             {"started_at": timestamp(), "number": len(manifest.data.get("sessions", [])) + 1}
@@ -220,7 +266,98 @@ class TrialManifest:
         manifest.save()
         return manifest
 
+    @staticmethod
+    def _count_journal_records(path: Path) -> int:
+        if not path.exists():
+            return 0
+        return sum(1 for line in path.open(encoding="utf-8") if line.endswith("\n"))
+
+    @classmethod
+    def load_data(cls, path: Path) -> dict[str, Any]:
+        """Load a legacy snapshot plus any durable events newer than it."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            raise ValueError("Unsupported continuation record")
+        journal_path = path.with_name("events.jsonl")
+        if not journal_path.exists():
+            return data
+        events = data.setdefault("events", [])
+        if not isinstance(events, list):
+            raise ValueError("Invalid event list in trial snapshot")
+        snapshot_records = data.get("event_journal", {}).get("snapshot_records", 0)
+        if type(snapshot_records) is not int or snapshot_records < 0:
+            raise ValueError("Invalid event journal snapshot watermark")
+        lines = journal_path.read_bytes().splitlines(keepends=True)
+        for index, raw in enumerate(lines):
+            complete = raw.endswith(b"\n")
+            if not complete and index == len(lines) - 1:
+                # An interrupted append is never a committed record.
+                break
+            try:
+                record = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("Corrupt trial event journal") from error
+            sequence = record.get("sequence") if isinstance(record, dict) else None
+            event = record.get("event") if isinstance(record, dict) else None
+            if type(sequence) is not int or sequence < 0 or not isinstance(event, dict):
+                raise ValueError("Invalid trial event journal record")
+            if event.get("sequence") != sequence:
+                raise ValueError("Trial event journal sequence mismatch")
+            if index < snapshot_records:
+                continue
+            if sequence < len(events):
+                events[sequence] = event
+                continue
+            if sequence != len(events):
+                raise ValueError("Trial event journal has a sequence gap")
+            events.append(event)
+        return data
+
+    def _append_event(self, sequence: int, event: dict[str, Any]) -> None:
+        payload = (
+            json.dumps(
+                {"sequence": sequence, "event": event}, sort_keys=True, allow_nan=False
+            ).encode("utf-8")
+            + b"\n"
+        )
+        existed = self.journal_path.exists()
+        if existed:
+            with self.journal_path.open("r+b") as existing:
+                existing.seek(0, os.SEEK_END)
+                end = existing.tell()
+                if end:
+                    existing.seek(-1, os.SEEK_END)
+                    if existing.read(1) != b"\n":
+                        contents = self.journal_path.read_bytes()
+                        boundary = contents.rfind(b"\n") + 1
+                        existing.truncate(boundary)
+                        existing.flush()
+                        os.fsync(existing.fileno())
+        descriptor = os.open(self.journal_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            with os.fdopen(descriptor, "ab", closefd=False) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(descriptor)
+        if not existed:
+            directory = os.open(self.journal_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        self._journal_records += 1
+
+    def _maybe_snapshot(self) -> None:
+        if self._journal_records and self._journal_records % JOURNAL_SNAPSHOT_INTERVAL == 0:
+            self.save()
+
     def save(self) -> None:
+        self.data["event_journal"] = {
+            "format": "events-jsonl-v1",
+            "snapshot_records": self._journal_records,
+        }
         temporary = self.path.with_suffix(".tmp")
         with temporary.open("w", encoding="utf-8") as stream:
             json.dump(self.data, stream, indent=2, sort_keys=True, allow_nan=False)
@@ -237,23 +374,25 @@ class TrialManifest:
     def attempt(self, kind: str, request: dict[str, Any]) -> int:
         events = self.data["events"]
         sequence = len(events)
-        events.append(
-            {
-                "sequence": sequence,
-                "kind": kind,
-                "at": timestamp(),
-                "request": request,
-                "outcome": "unknown",
-                "result": None,
-            }
-        )
-        self.save()
+        event = {
+            "sequence": sequence,
+            "kind": kind,
+            "at": timestamp(),
+            "request": request,
+            "outcome": "unknown",
+            "result": None,
+        }
+        self._append_event(sequence, event)
+        events.append(event)
+        self._maybe_snapshot()
         return sequence
 
     def observed(self, sequence: int, result: object) -> None:
         event = self.data["events"][sequence]
-        event.update(outcome="observed", result=result, observed_at=timestamp())
-        self.save()
+        updated = {**event, "outcome": "observed", "result": result, "observed_at": timestamp()}
+        self._append_event(sequence, updated)
+        event.update(updated)
+        self._maybe_snapshot()
 
     def finish_incomplete(self, reasons: list[str]) -> None:
         sessions = self.data.get("sessions", [])
@@ -348,6 +487,8 @@ def run_preflight(
 class TrialConfiguration(FrozenModel):
     mode: Literal["fixture", "provider"]
     task: Literal["computer", "lamp_repair"] = "computer"
+    stop_after_module: Literal["register"] | None = None
+    register_workshop: bool = False
     keep_agent_connected: bool = False
     session_action_limit: int | None = Field(default=None, gt=0)
     planner_model: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_./-]{1,160}$")
@@ -355,6 +496,16 @@ class TrialConfiguration(FrozenModel):
 
     @model_validator(mode="after")
     def explicit_selection(self) -> TrialConfiguration:
+        if self.stop_after_module is not None and (
+            self.mode != "provider" or self.task != "computer"
+        ):
+            raise ValueError("Register checkpoint requires a provider computer trial")
+        if self.stop_after_module is not None and not self.keep_agent_connected:
+            raise ValueError("Register checkpoint requires keeping the agent connected")
+        if self.register_workshop and (
+            self.mode != "provider" or self.task != "computer" or not self.keep_agent_connected
+        ):
+            raise ValueError("Register workshop requires a connected provider computer trial")
         if self.session_action_limit is not None and (
             self.session_action_limit > load_contract(CONTRACT_PATH).budgets.primitive_actions
         ):
@@ -371,6 +522,8 @@ class TrialConfiguration(FrozenModel):
         return {
             "mode": self.mode,
             "task": self.task,
+            **({"stop_after_module": self.stop_after_module} if self.stop_after_module else {}),
+            **({"register_workshop": True} if self.register_workshop else {}),
             "keep_agent_connected": self.keep_agent_connected,
             "session_action_limit": self.session_action_limit,
             "planner": {
@@ -425,7 +578,9 @@ def run_trial(
     from noob_agent.settings import ModelSettings, WandbSettings
 
     if resume is not None:
-        saved = json.loads(resume.read_text(encoding="utf-8"))
+        if config.register_workshop:
+            raise ValueError("Register workshop setup is available only for a fresh trial")
+        saved = TrialManifest.load_data(resume)
         current_contract_hash = hashlib.sha256(CONTRACT_PATH.read_bytes()).hexdigest()
         if not isinstance(saved, dict) or saved.get("kind") != "connected_trial":
             raise ValueError("Only a connected trial can be continued")
@@ -433,7 +588,9 @@ def run_trial(
             raise ValueError("Continuation settings must match the saved trial")
         if saved.get("contract", {}).get("sha256") != current_contract_hash:
             raise ValueError("The saved trial uses a different computer contract")
-        if saved.get("continuation", {}).get("ready") is not True:
+        if saved.get("continuation", {}).get("ready") is not True and not can_resume_model_failure(
+            saved
+        ):
             raise ValueError("The saved trial has no safe continuation point")
     manifest = TrialManifest.reopen(resume) if resume is not None else TrialManifest(root)
     if resume is None:
@@ -478,9 +635,10 @@ def run_trial(
             )
             jev = JevSubprocess()
         stage = "connect"
-        with RconClient.dedicated() as transport, Sidecar(
-            manifest, keep_connected=config.keep_agent_connected
-        ) as sidecar:
+        with (
+            RconClient.dedicated() as transport,
+            Sidecar(manifest, keep_connected=config.keep_agent_connected) as sidecar,
+        ):
             persistent_connected = config.keep_agent_connected
             reset = TrustedReset(manifest, transport, sidecar)
             try:
@@ -495,6 +653,12 @@ def run_trial(
                 if resume is None:
                     reset.restore()
                     observation = {"initial_conditions": manifest.data["initial_conditions"]}
+                    if config.register_workshop:
+                        from noob_agent.redstone.register_workshop import setup_register_workshop
+
+                        stage = "register_workshop_setup"
+                        workshop = setup_register_workshop(manifest, transport, actions)
+                        observation["setup_profile"] = workshop
                 else:
                     observation = verify_continuation(manifest, config.task, actions=actions)
                 stage = "trial_loop"
@@ -526,6 +690,8 @@ def run_trial(
                         config.mode == "provider" and config.task == "computer"
                     ),
                     task=config.task,
+                    register_workshop=config.register_workshop,
+                    stop_after_module=config.stop_after_module,
                     resume_state=manifest.data.get("continuation", {}).get("state")
                     if resume is not None
                     else None,

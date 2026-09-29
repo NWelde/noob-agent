@@ -3,6 +3,13 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { dispatch, validateBlock, createDedicatedBot } = require('../src/noob_agent/connectors/minecraft_sidecar/redstone.js');
 const registry = require('../src/noob_agent/connectors/minecraft_sidecar/node_modules/minecraft-data')('1.21.1');
+test('floor support is readable without allowing below-bound interactions', async () => {
+  const b = bot();
+  b.blockAt = p => ({name: 'grass_block', getProperties: () => ({snowy:false})});
+  assert.equal((await dispatch(b, {op:'block', position:[2,63,2]})).name, 'minecraft:grass_block');
+  await assert.rejects(dispatch(b, {op:'interact', position:[2,63,2]}), /invalid_position/);
+  await assert.rejects(dispatch(b, {op:'block', position:[2,62,2]}), /invalid_position/);
+});
 function bot() {
   const result = new EventEmitter();
   Object.assign(result, { registry, username: 'noobagentbot',
