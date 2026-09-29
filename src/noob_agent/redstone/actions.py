@@ -29,6 +29,45 @@ class InvalidBlockState(ValueError):
     """Completed registry validation rejected a proposed placement before mutation."""
 
 
+# Deliberately conservative: these are common opaque full cubes with a flat top.
+# Slabs, stairs, fences, glass, and other partial/transparent shapes are omitted.
+_WIRE_SUPPORT_BLOCKS = frozenset(
+    f"minecraft:{name}"
+    for name in (
+        "stone", "granite", "polished_granite", "diorite", "polished_diorite",
+        "andesite", "polished_andesite", "deepslate", "cobbled_deepslate",
+        "polished_deepslate", "cobblestone", "mossy_cobblestone", "dirt",
+        "coarse_dirt", "rooted_dirt", "grass_block", "podzol", "mycelium",
+        "clay", "gravel", "sand", "red_sand", "sandstone", "red_sandstone",
+        "bricks", "stone_bricks", "mossy_stone_bricks", "obsidian",
+        "bedrock", "netherrack", "end_stone", "nether_bricks", "blackstone",
+        "oak_planks", "spruce_planks", "birch_planks", "jungle_planks",
+        "acacia_planks", "dark_oak_planks", "mangrove_planks", "cherry_planks",
+        "bamboo_planks", "crimson_planks", "warped_planks",
+    )
+)
+
+
+def _safe_actual_support(support: dict[str, Any]) -> dict[str, Any]:
+    name = support.get("name")
+    safe_name = (
+        name
+        if isinstance(name, str) and re.fullmatch(r"minecraft:[a-z0-9_]+", name)
+        else "unknown"
+    )
+    raw_properties = support.get("properties", {})
+    safe_properties: dict[str, str | bool | int] = {}
+    if isinstance(raw_properties, dict):
+        for key, value in raw_properties.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[a-z_]+", key):
+                continue
+            if type(value) is bool or type(value) is int:
+                safe_properties[key] = value
+            elif isinstance(value, str) and re.fullmatch(r"[a-z0-9_]+", value.lower()):
+                safe_properties[key] = value.lower()
+    return {"name": safe_name, "properties": safe_properties}
+
+
 class Actions:
     def __init__(
         self,
@@ -157,6 +196,23 @@ class Actions:
                 and before["name"] not in self.contract.permitted_blocks
             ):
                 raise ValueError("Target block is not permitted")
+            if action == "place" and block == "minecraft:redstone_wire":
+                support_position = [position[0], position[1] - 1, position[2]]
+                support = self.read({"op": "block", "position": support_position})
+                if support.get("name") not in _WIRE_SUPPORT_BLOCKS:
+                    diagnostic = {
+                        "type": "unsupported_support",
+                        "target": position,
+                        "required_support": {
+                            "position": support_position,
+                            "state": "full_top_solid_block",
+                        },
+                        "actual_support": _safe_actual_support(support),
+                    }
+                    self.manifest.observed(sequence, {"placement_diagnostic": diagnostic})
+                    raise EffectMismatch(
+                        "Redstone wire needs a full solid support block directly below"
+                    )
             if action == "interact":
                 self.read({"op": "interact", "position": position})
             else:
@@ -183,26 +239,6 @@ class Actions:
                     and after["properties"].get("powered") is not before["properties"]["powered"]
                 )
             result = {"before": before, "after": after, "effect_verified": matched}
-            if (
-                action == "place"
-                and block == "minecraft:redstone_wire"
-                and after["name"] == "minecraft:air"
-            ):
-                support_position = [position[0], position[1] - 1, position[2]]
-                support = self.read({"op": "block", "position": support_position})
-                if support.get("name") == "minecraft:air":
-                    result["placement_diagnostic"] = {
-                        "type": "missing_support",
-                        "target": position,
-                        "required_support": {
-                            "position": support_position,
-                            "state": "solid block",
-                        },
-                        "actual_support": {
-                            "name": support["name"],
-                            "properties": support.get("properties", {}),
-                        },
-                    }
             self.manifest.observed(sequence, result)
             if not matched:
                 raise EffectMismatch("Actual effect differs from request")

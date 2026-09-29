@@ -135,6 +135,9 @@ async function persistentMain(socketPath) {
   let server;
   let activeClient = null;
   let stopping = false;
+  // A disconnected client does not cancel an in-flight Mineflayer dispatch.
+  // Serialize work across reconnects so recovery settle/readback cannot race it.
+  let dispatchQueue = Promise.resolve();
   const pidPath = path.join(path.dirname(resolvedSocket), 'redstone-sidecar.pid');
   const shutdown = () => {
     if (stopping) return;
@@ -176,7 +179,9 @@ async function persistentMain(socketPath) {
           return;
         }
         try {
-          const result = await dispatch(bot, request);
+          const pending = dispatchQueue.then(() => dispatch(bot, request));
+          dispatchQueue = pending.catch(() => {});
+          const result = await pending;
           socket.write(JSON.stringify({ ok: true, result }) + '\n');
         } catch {
           socket.write(JSON.stringify({ ok: false, error: 'request_failed' }) + '\n');

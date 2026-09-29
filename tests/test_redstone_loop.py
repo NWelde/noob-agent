@@ -161,7 +161,7 @@ async def test_limit_checkpoint_restores_feedback_in_a_fresh_loop(tmp_path):
         first_planner,
         Jev(manifest),
         clock=lambda: first_time[0],
-        check=lambda _: (first_time.__setitem__(0, 1000.0) or {"passed": False}),
+        check=lambda _: first_time.__setitem__(0, 1000.0) or {"passed": False},
     )
     await first.run({"starting": True})
 
@@ -1161,6 +1161,87 @@ async def test_module_inspection_failure_then_repair_does_not_end_trial(tmp_path
     assert manifest.data["final_grade"]["model_success"] is False
 
 
+async def test_verified_interaction_keeps_cell_in_layout_and_feedback(tmp_path, monkeypatch):
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, check=lambda _: {"passed": True, "complete": True}
+    )
+    position = [20, 65, 10]
+    before = {"position": position, "name": "minecraft:lever", "properties": {"powered": False}}
+    after = {"position": position, "name": "minecraft:lever", "properties": {"powered": True}}
+    loop.placed_cells[tuple(position)] = (
+        "minecraft:lever",
+        (("facing", "north"), ("powered", False)),
+    )
+    planner.value = {
+        "summary": "Toggle the existing load lever",
+        "actions": [
+            {
+                "id": "toggle",
+                "criteria": "Toggle the load lever",
+                "action": "interact",
+                "position": position,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        actions,
+        "apply",
+        lambda *_: {"before": before, "after": after, "effect_verified": True},
+    )
+
+    await loop.run({})
+
+    assert tuple(position) in loop.placed_cells
+    assert loop.layout.to_jsonable() == [
+        {"position": position, "name": "minecraft:lever", "properties": {"powered": True}}
+    ]
+
+
+async def test_verified_layout_is_in_planner_feedback_and_checks_declarations(tmp_path):
+    from test_redstone_behavior import compact_declared
+
+    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    position = [5, 64, 5]
+    planner.value = {
+        "summary": "Place a register control",
+        "actions": [
+            {
+                "id": "control",
+                "criteria": "Place lever",
+                "action": "place",
+                "position": position,
+                "block": "minecraft:lever",
+            }
+        ],
+    }
+
+    def place(*_):
+        return {
+            "before": {"name": "minecraft:air", "properties": {}, "position": position},
+            "after": {
+                "name": "minecraft:lever",
+                "properties": {"powered": False},
+                "position": position,
+            },
+            "effect_verified": True,
+        }
+
+    actions.apply = place
+    actions.reader = World()
+    loop.checker = lambda _: {"passed": True, "complete": True}
+
+    await loop.run({})
+
+    progress = loop.context.history[-1]["construction_progress"]
+    assert progress["verified_layout"] == [
+        {"position": position, "name": "minecraft:lever", "properties": {"powered": False}}
+    ]
+    declaration = compact_declared("register")
+    mismatches = loop._declaration_layout_mismatches(declaration)
+    assert mismatches
+    assert all({"position", "expected", "actual"} <= item.keys() for item in mismatches)
+
+
 async def test_unready_interface_skips_behavioral_grader_after_full_readback(tmp_path, monkeypatch):
     from test_redstone_behavior import compact_declared
 
@@ -1179,6 +1260,7 @@ async def test_unready_interface_skips_behavioral_grader_after_full_readback(tmp
             output_tokens=4,
             model_id="fixture/planner",
         )
+
     planner.complete = complete
     grader_calls = []
     monkeypatch.setattr(
@@ -1189,9 +1271,7 @@ async def test_unready_interface_skips_behavioral_grader_after_full_readback(tmp
     await loop.run({})
 
     assert grader_calls == []
-    assert not [
-        event for event in manifest.data["events"] if event["kind"] == "planner_validation"
-    ]
+    assert not [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
     inspection = manifest.data["checks"][0]
     assert inspection["valid"] is False
     declared_positions = sum(len(probes) for probes in declaration["probes"].values()) + len(

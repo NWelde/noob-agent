@@ -9,6 +9,7 @@ import selectors
 import socket
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -23,7 +24,7 @@ PERSISTENT_PID = REPO_ROOT / ".noob-agent" / "redstone-sidecar.pid"
 
 
 class SidecarError(RuntimeError):
-    """Sanitized failure. A delivered action may have executed; never auto-retry."""
+    """Sanitized failure when the remote outcome cannot be reconciled."""
 
 
 class Sidecar:
@@ -34,6 +35,7 @@ class Sidecar:
         command: list[str] | None = None,
         timeout: float = 12,
         keep_connected: bool = False,
+        recovery_charge: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         if not math.isfinite(timeout) or not 0 < timeout <= 30:
             raise ValueError("Invalid sidecar deadline")
@@ -42,6 +44,7 @@ class Sidecar:
         self.process: subprocess.Popen[bytes] | None = None
         self.buffer = bytearray()
         self.keep_connected = keep_connected
+        self.recovery_charge = recovery_charge
         self.connection: socket.socket | None = None
         self.connection_buffer = bytearray()
         try:
@@ -151,7 +154,7 @@ class Sidecar:
         return result
 
     def request(self, request: dict[str, Any]) -> dict[str, Any]:
-        if self.keep_connected:
+        if getattr(self, "keep_connected", False):
             if self.connection is None:
                 raise SidecarError("Persistent Minecraft agent is disconnected")
         elif self.process is None:
@@ -175,7 +178,7 @@ class Sidecar:
             raise ValueError("Sidecar request too large")
         sequence = self.manifest.attempt("sidecar", request)
         try:
-            if self.keep_connected:
+            if getattr(self, "keep_connected", False):
                 if self.connection is None:
                     raise SidecarError("Persistent Minecraft agent is disconnected")
                 self.connection.sendall(payload)
@@ -197,10 +200,91 @@ class Sidecar:
             self.manifest.observed(sequence, result)
             return result
         except BaseException as error:
+            if self.keep_connected and operation == "interact":
+                # A toggle is safe to replay only after a fresh connection has
+                # settled and a read proves the exact target remains unchanged.
+                position = request["position"]
+                before = self._last_observed_block(position, sequence)
+                try:
+                    self._reconnect_persistent()
+                    settle = {"op": "settle"}
+                    self._charge_recovery(settle)
+                    self._recovery_request(settle)
+                    readback = {"op": "block", "position": position}
+                    self._charge_recovery(readback)
+                    current = self._recovery_request(readback)
+                    if before is None or current != before:
+                        if before is not None and self._same_toggle_state(before, current):
+                            recovered = {"before": before, "after": current, "recovered": True}
+                            self.manifest.observed(sequence, recovered)
+                            return recovered
+                        raise SidecarError("Interaction outcome cannot be reconciled")
+                    self._charge_recovery(request)
+                    retry = self._recovery_request(request)
+                    self.manifest.observed(sequence, retry)
+                    return retry
+                except BaseException as recovery_error:
+                    self.manifest.data["errors"].append(
+                        {"stage": "sidecar_reconcile", "type": type(recovery_error).__name__}
+                    )
+                    self.manifest.save()
+                    self.close()
+                    if not isinstance(recovery_error, Exception):
+                        raise
+                    raise SidecarError("Sidecar interaction outcome unknown") from None
             self._failure("sidecar_exchange", error)
             if not isinstance(error, Exception):
                 raise
             raise SidecarError("Sidecar exchange failed; outcome unknown") from None
+
+    def _last_observed_block(
+        self, position: list[int], before_sequence: int
+    ) -> dict[str, Any] | None:
+        for event in reversed(self.manifest.data["events"][:before_sequence]):
+            request = event.get("request", {})
+            result = event.get("result")
+            if (
+                event.get("outcome") == "observed"
+                and request.get("op") == "block"
+                and request.get("position") == position
+                and isinstance(result, dict)
+            ):
+                return result
+        return None
+
+    @staticmethod
+    def _same_toggle_state(before: dict[str, Any], current: dict[str, Any]) -> bool:
+        return (
+            before.get("position") == current.get("position")
+            and before.get("name") == current.get("name")
+            and before.get("properties", {}).get("powered")
+            != current.get("properties", {}).get("powered")
+        )
+
+    def _reconnect_persistent(self) -> None:
+        self.close()
+        self._connect_persistent()
+
+    def _recovery_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Exchange and journal bounded reconciliation traffic without recursive recovery."""
+        sequence = self.manifest.attempt("sidecar", request)
+        try:
+            assert self.connection is not None
+            self.connection.sendall(json.dumps(request, allow_nan=False).encode() + b"\n")
+            reply = self._read_connection(self.timeout)
+            if reply.get("ok") is not True or not isinstance(reply.get("result"), dict):
+                raise SidecarError("Sidecar reconciliation request failed")
+            result = reply["result"]
+            self.manifest.observed(sequence, result)
+            return result
+        except Exception:
+            self.close()
+            raise
+
+    def _charge_recovery(self, request: dict[str, Any]) -> None:
+        if self.recovery_charge is not None:
+            kind = "bounded_action" if request.get("op") == "interact" else "charged_observation"
+            self.recovery_charge(kind, request)
 
     def close(self) -> None:
         if self.keep_connected:

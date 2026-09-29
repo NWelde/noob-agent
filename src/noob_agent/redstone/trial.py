@@ -490,6 +490,7 @@ def run_trial(
                     sidecar,
                     max_actions=config.session_action_limit,
                 )
+                sidecar.recovery_charge = actions.charge
                 stage = "continuation_check" if resume is not None else "initial_reset"
                 if resume is None:
                     reset.restore()

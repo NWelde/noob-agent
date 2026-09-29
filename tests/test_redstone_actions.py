@@ -76,21 +76,60 @@ def test_failed_wire_placement_records_missing_support_diagnostic(tmp_path: Path
     with pytest.raises(EffectMismatch):
         actions.apply("place", [12, 65, 34], "minecraft:redstone_wire")
 
-    event = next(
-        event
-        for event in manifest.data["events"]
-        if event["kind"] == "bounded_action"
-    )
+    event = next(event for event in manifest.data["events"] if event["kind"] == "bounded_action")
     diagnostic = event["result"]["placement_diagnostic"]
     assert diagnostic == {
-        "type": "missing_support",
+        "type": "unsupported_support",
         "target": [12, 65, 34],
         "required_support": {
             "position": [12, 64, 34],
-            "state": "solid block",
+            "state": "full_top_solid_block",
         },
         "actual_support": {"name": "minecraft:air", "properties": {}},
     }
+    assert actions.transport.commands == []
+
+
+def test_wire_preflight_allows_verified_full_block_support(tmp_path: Path) -> None:
+    class SupportedReader(Reader):
+        def request(self, request: dict) -> dict:
+            if request["op"] == "block" and request["position"] == [12, 64, 34]:
+                return {"name": "minecraft:stone", "properties": {}, "position": [12, 64, 34]}
+            if request["op"] == "block" and request["position"] == [12, 65, 34]:
+                return {
+                    "name": "minecraft:redstone_wire",
+                    "properties": {"power": 0},
+                    "position": [12, 65, 34],
+                }
+            return super().request(request)
+
+    transport = Transport()
+    actions = Actions(TrialManifest(tmp_path), transport, SupportedReader())
+    result = actions.apply("place", [12, 65, 34], "minecraft:redstone_wire")
+    assert result["effect_verified"] is True
+    assert len(transport.commands) == 1
+
+
+@pytest.mark.parametrize(
+    "support_name", ["minecraft:torch", "minecraft:oak_slab", "minecraft:oak_stairs"]
+)
+def test_wire_preflight_rejects_non_full_top_support_before_mutation(
+    tmp_path: Path, support_name: str
+) -> None:
+    class SupportReader(Reader):
+        def request(self, request: dict) -> dict:
+            if request["op"] == "block" and request["position"] == [12, 64, 34]:
+                return {"name": support_name, "properties": {"type": "bottom"}}
+            return super().request(request)
+
+    manifest = TrialManifest(tmp_path)
+    transport = Transport()
+    actions = Actions(manifest, transport, SupportReader())
+    with pytest.raises(EffectMismatch):
+        actions.apply("place", [12, 65, 34], "minecraft:redstone_wire")
+    assert transport.commands == []
+    event = next(event for event in manifest.data["events"] if event["kind"] == "bounded_action")
+    assert event["result"]["placement_diagnostic"]["type"] == "unsupported_support"
 
 
 def test_time_exhaustion_prevents_mutation(tmp_path: Path) -> None:

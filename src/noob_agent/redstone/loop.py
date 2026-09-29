@@ -17,6 +17,7 @@ from noob_agent.redstone.actions import ActionLimit, Actions, EffectMismatch, In
 from noob_agent.redstone.behavior import grade_module, required_recipes
 from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
 from noob_agent.redstone.jev import JevError, action_request, selected_action
+from noob_agent.redstone.layout import VerifiedLayout, validate_declaration_layout
 from noob_agent.redstone.modules import inspect_module, resolve_recipe
 from noob_agent.redstone.planner import (
     MAX_CONSTRUCTION_INTENTIONS_BEFORE_GRADE,
@@ -28,6 +29,7 @@ from noob_agent.redstone.provider_limits import (
     JEV_HTTP_503_RETRIES_PER_SELECTION,
     PLANNER_TIMEOUT_SECONDS,
 )
+from noob_agent.redstone.repair_guard import RepairGuard
 from noob_agent.redstone.trial import CONTRACT_PATH, TrialManifest
 
 
@@ -149,6 +151,18 @@ class TrialLoop:
         self.construction_intentions_since_grade = int(
             (resume_state or {}).get("construction_intentions_since_grade", 0)
         )
+        self.layout = VerifiedLayout()
+        self.repair_guard = RepairGuard.from_state((resume_state or {}).get("repair_guard", {}))
+        self.failed_module_checks: dict[str, dict[str, Any]] = {}
+        restored_failures = (resume_state or {}).get("failed_module_checks", {})
+        if isinstance(restored_failures, dict):
+            self.failed_module_checks = {
+                module: evidence
+                for module, evidence in restored_failures.items()
+                if isinstance(module, str)
+                and isinstance(evidence, dict)
+                and isinstance(evidence.get("failed_checks"), list)
+            }
         self.placed_cells: dict[tuple[int, ...], tuple[str, tuple[tuple[str, Any], ...]]] = {}
         for item in (resume_state or {}).get("placed_cells", []):
             position = tuple(item["position"])
@@ -172,6 +186,13 @@ class TrialLoop:
                 self.placed_cells[position] = (
                     item["block"],
                     tuple(sorted(item.get("properties", {}).items())),
+                )
+                self.layout.reconcile(
+                    position,
+                    {
+                        "name": item["block"],
+                        "properties": actual_properties,
+                    },
                 )
         self.running = False
         self.manifest.data.update(
@@ -215,6 +236,10 @@ class TrialLoop:
         self.used[name] += 1
         self.manifest.save()
 
+    def _declaration_layout_mismatches(self, declaration: Any) -> list[dict[str, Any]]:
+        """Compare declared interface cells with verified world readbacks."""
+        return validate_declaration_layout(self.layout, declaration)
+
     async def run(self, observation: dict[str, Any]) -> None:
         if self.running:
             raise ValueError("A trial loop cannot be reused")
@@ -239,19 +264,14 @@ class TrialLoop:
                 timeout_retries = 0
                 while True:
                     self.charge("planner_calls")
-                    event = self.manifest.attempt(
-                        "planner_call", request.model_dump(mode="json")
-                    )
+                    event = self.manifest.attempt("planner_call", request.model_dump(mode="json"))
                     try:
-                        async with asyncio.timeout(
-                            min(PLANNER_TIMEOUT_SECONDS, self.remaining())
-                        ):
+                        async with asyncio.timeout(min(PLANNER_TIMEOUT_SECONDS, self.remaining())):
                             response = await self.planner.complete(request)
                     except TimeoutError:
                         retry_scheduled = (
                             timeout_retries == 0
-                            and self.used["planner_calls"]
-                            < self.contract.budgets.planner_calls
+                            and self.used["planner_calls"] < self.contract.budgets.planner_calls
                             and self.clock() < self.deadline
                         )
                         timeout_event = self.manifest.attempt(
@@ -261,9 +281,7 @@ class TrialLoop:
                                 "attempt": timeout_retries + 1,
                             },
                         )
-                        self.manifest.observed(
-                            timeout_event, {"retry_scheduled": retry_scheduled}
-                        )
+                        self.manifest.observed(timeout_event, {"retry_scheduled": retry_scheduled})
                         if not retry_scheduled:
                             raise
                         timeout_retries += 1
@@ -553,8 +571,19 @@ class TrialLoop:
                                 self.stone_placements += 1
                             elif offer.block in FUNCTIONAL_BLOCKS:
                                 self.signal_control_placements += 1
-                        elif offer.action in {"break", "interact"}:
+                            self.layout.record_action("place", offer.position, actual)
+                        elif offer.action == "break" and actual.get("effect_verified") is True:
                             self.placed_cells.pop(tuple(offer.position), None)
+                            self.layout.record_action("break", offer.position, actual)
+                        elif offer.action == "interact" and actual.get("effect_verified") is True:
+                            after = actual.get("after")
+                            if isinstance(after, dict):
+                                self.layout.reconcile(offer.position, after)
+                                if after.get("name") != "minecraft:air":
+                                    self.placed_cells[tuple(offer.position)] = (
+                                        after["name"],
+                                        tuple(sorted(after.get("properties", {}).items())),
+                                    )
                     except EffectMismatch:
                         # Actions already journaled the actual mismatching before/after state.
                         result = {
@@ -566,6 +595,17 @@ class TrialLoop:
                                 if event["kind"] == "bounded_action"
                             ),
                         }
+                        evidence = result["evidence"]
+                        after = evidence.get("after") if isinstance(evidence, dict) else None
+                        if isinstance(after, dict):
+                            self.layout.reconcile(offer.position, after)
+                            if after.get("name") == "minecraft:air":
+                                self.placed_cells.pop(tuple(offer.position), None)
+                            else:
+                                self.placed_cells[tuple(offer.position)] = (
+                                    after["name"],
+                                    tuple(sorted(after.get("properties", {}).items())),
+                                )
                         repair = True
                     except InvalidBlockState:
                         result = {
@@ -595,28 +635,79 @@ class TrialLoop:
                     self.remaining()
                 inspection: dict[str, Any] = {}
                 if intention.module_inspection is not None:
-                    # Inspection shares global budgets and returns to the same conversation.
-                    event = self.manifest.attempt(
-                        "module_inspection", intention.module_inspection.model_dump(mode="json")
-                    )
-                    behavioral = bool(
-                        intention.module_inspection.recipes
-                        or intention.module_inspection.recipe_templates
-                    )
-                    readiness = inspect_module(self.actions, intention.module_inspection)
-                    if behavioral and readiness["valid"]:
-                        inspection = grade_module(
-                            self.actions, intention.module_inspection, fail_fast=True
+                    declaration = intention.module_inspection.model_dump(mode="json")
+                    module = intention.module_inspection.module
+                    prior_failure = self.failed_module_checks.get(module)
+                    repeated_grade = (
+                        self.require_module_grading
+                        and prior_failure is not None
+                        and self.repair_guard.blocks_regrade(
+                            module,
+                            prior_failure["failed_checks"],
+                            self.layout.fingerprint(),
+                            declaration,
                         )
-                        inspection["interface_readiness"] = readiness
+                    )
+                    event = self.manifest.attempt(
+                        "module_regrade_blocked" if repeated_grade else "module_inspection",
+                        {"module": module},
+                    )
+                    if repeated_grade:
+                        inspection = {
+                            "module": module,
+                            "scope": "repair_guard",
+                            "valid": False,
+                            "behavioral_passed": False,
+                            "failed_checks": prior_failure["failed_checks"],
+                            "repair_required": True,
+                            "reason": (
+                                "This exact module declaration already failed against the "
+                                "same verified layout. Make a relevant physical repair "
+                                "before requesting this grade again."
+                            ),
+                        }
+                        self.manifest.observed(event, inspection)
                     else:
-                        inspection = readiness
-                    self.manifest.observed(event, inspection)
+                        behavioral = bool(
+                            intention.module_inspection.recipes
+                            or intention.module_inspection.recipe_templates
+                        )
+                        readiness = inspect_module(self.actions, intention.module_inspection)
+                        # Inspection readbacks are authoritative. Reconcile them into the
+                        # persistent layout before checking the declaration so stale local
+                        # state cannot create a false mismatch.
+                        for cell in readiness.get("hardware", []):
+                            if isinstance(cell, dict) and isinstance(cell.get("position"), list):
+                                self.layout.reconcile(cell["position"], cell)
+                        for failed in readiness.get("failed_checks", []):
+                            actual = failed.get("actual") if isinstance(failed, dict) else None
+                            if isinstance(actual, dict) and isinstance(
+                                actual.get("position"), list
+                            ):
+                                self.layout.reconcile(actual["position"], actual)
+                        # Some unit-level callers replace inspect_module with a minimal
+                        # stub. Only enforce declaration/layout consistency when we have
+                        # actual hardware evidence (the production inspector always emits it).
+                        layout_mismatches = (
+                            self._declaration_layout_mismatches(declaration)
+                            if self.require_module_grading and "hardware" in readiness
+                            else []
+                        )
+                        readiness["verified_layout_mismatches"] = layout_mismatches
+                        if layout_mismatches:
+                            readiness["valid"] = False
+                        if behavioral and readiness["valid"]:
+                            inspection = grade_module(
+                                self.actions, intention.module_inspection, fail_fast=True
+                            )
+                            inspection["interface_readiness"] = readiness
+                        else:
+                            inspection = readiness
+                        self.manifest.observed(event, inspection)
                     if self.require_module_grading:
                         self.construction_intentions_since_grade = 0
                         self.context.force_grading = False
                         milestone = self.manifest.data["milestone_4"]
-                        module = intention.module_inspection.module
                         milestone["modules"].pop(module, None)
                         if (
                             not repair
@@ -633,6 +724,24 @@ class TrialLoop:
                             milestone["status"] = "checks_passed"
                         if milestone["status"] != "checks_passed":
                             self.context.grading_enabled = False
+                        failed_grade = inspection.get("valid") is False or (
+                            inspection.get("scope") == "public_module_behavior"
+                            and inspection.get("behavioral_passed") is False
+                        )
+                        if failed_grade:
+                            failed_checks = inspection.get("failed_checks", [])
+                            self.failed_module_checks[module] = {
+                                "failed_checks": failed_checks,
+                                "declaration": declaration,
+                            }
+                            self.repair_guard.record(
+                                module,
+                                failed_checks,
+                                self.layout.fingerprint(),
+                                declaration,
+                            )
+                        elif inspection.get("behavioral_passed") is True:
+                            self.failed_module_checks.pop(module, None)
                     if not behavioral or inspection.get("scope") == "interface_readback_only":
                         self.manifest.data["checks"].append(inspection)
                     self.manifest.save()
@@ -670,6 +779,7 @@ class TrialLoop:
                     observation["construction_progress"] = {
                         "stone_placements": self.stone_placements,
                         "signal_control_placements": self.signal_control_placements,
+                        "verified_layout": self.layout.to_jsonable(),
                     }
                 self.context.feedback(observation)
                 continuation_state: dict[str, Any] = {"history": self.context.history}
@@ -687,6 +797,9 @@ class TrialLoop:
                         }
                         for position, (block, properties) in self.placed_cells.items()
                     ],
+                    verified_layout=self.layout.to_jsonable(),
+                    repair_guard=self.repair_guard.to_state(),
+                    failed_module_checks=self.failed_module_checks,
                 )
                 if self.checker is not None and hasattr(self.checker, "save_state"):
                     continuation_state["checker"] = self.checker.save_state()
