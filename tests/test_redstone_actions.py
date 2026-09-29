@@ -69,6 +69,30 @@ def test_actual_failed_effect_is_not_inferred_from_command_success(tmp_path: Pat
     assert actions.used >= 3
 
 
+def test_failed_wire_placement_records_missing_support_diagnostic(tmp_path: Path) -> None:
+    manifest = TrialManifest(tmp_path)
+    actions = Actions(manifest, Transport(), Reader())
+
+    with pytest.raises(EffectMismatch):
+        actions.apply("place", [12, 65, 34], "minecraft:redstone_wire")
+
+    event = next(
+        event
+        for event in manifest.data["events"]
+        if event["kind"] == "bounded_action"
+    )
+    diagnostic = event["result"]["placement_diagnostic"]
+    assert diagnostic == {
+        "type": "missing_support",
+        "target": [12, 65, 34],
+        "required_support": {
+            "position": [12, 64, 34],
+            "state": "solid block",
+        },
+        "actual_support": {"name": "minecraft:air", "properties": {}},
+    }
+
+
 def test_time_exhaustion_prevents_mutation(tmp_path: Path) -> None:
     now = [0.0]
     transport = Transport()

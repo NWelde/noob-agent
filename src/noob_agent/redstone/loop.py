@@ -603,11 +603,14 @@ class TrialLoop:
                         intention.module_inspection.recipes
                         or intention.module_inspection.recipe_templates
                     )
-                    inspection = (
-                        grade_module(self.actions, intention.module_inspection, fail_fast=True)
-                        if behavioral
-                        else inspect_module(self.actions, intention.module_inspection)
-                    )
+                    readiness = inspect_module(self.actions, intention.module_inspection)
+                    if behavioral and readiness["valid"]:
+                        inspection = grade_module(
+                            self.actions, intention.module_inspection, fail_fast=True
+                        )
+                        inspection["interface_readiness"] = readiness
+                    else:
+                        inspection = readiness
                     self.manifest.observed(event, inspection)
                     if self.require_module_grading:
                         self.construction_intentions_since_grade = 0
@@ -630,7 +633,7 @@ class TrialLoop:
                             milestone["status"] = "checks_passed"
                         if milestone["status"] != "checks_passed":
                             self.context.grading_enabled = False
-                    if not behavioral:
+                    if not behavioral or inspection.get("scope") == "interface_readback_only":
                         self.manifest.data["checks"].append(inspection)
                     self.manifest.save()
                     repair = (

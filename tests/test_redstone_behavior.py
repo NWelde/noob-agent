@@ -109,6 +109,37 @@ def test_four_graders_compare_world_snapshots(tmp_path, module, broken):
         assert sum(sample for _, _, sample in reader.calls) == 33
 
 
+def test_signal_check_failure_reason_is_only_present_when_check_fails(tmp_path):
+    from noob_agent.redstone.behavior import grade_module
+
+    actions = Actions(TrialManifest(tmp_path), None, None)
+    decl = validate_declaration(declared("register"), actions.contract)
+    passing = grade_module(actions, decl, control=WorldReader(actions, decl))
+    assert all("failure_reason" not in item for item in passing["checks"])
+
+    broken_reader = WorldReader(actions, decl, broken=True)
+    failing = grade_module(actions, decl, control=broken_reader)
+    assert all(item["failure_reason"] == "signal_mismatch" for item in failing["failed_checks"])
+
+
+def test_missing_signal_in_snapshot_has_probe_failure_reason(tmp_path):
+    from noob_agent.redstone.behavior import grade_module
+
+    actions = Actions(TrialManifest(tmp_path), None, None)
+    decl = validate_declaration(declared("register"), actions.contract)
+    reader = WorldReader(actions, decl)
+    original = reader.timeline
+
+    def missing(*args, **kwargs):
+        snapshot = original(*args, **kwargs)
+        snapshot["snapshots"][0]["signals"].pop("a")
+        return snapshot
+
+    reader.timeline = missing
+    result = grade_module(actions, decl, control=reader, fail_fast=True)
+    assert result["failed_checks"][0]["failure_reason"] == "missing_or_mismatched_probe"
+
+
 def test_register_batch_preserves_ticks_and_reduces_timeline_count():
     from noob_agent.redstone.behavior import estimate_module_schedule
     from noob_agent.redstone.contract import MachineContract

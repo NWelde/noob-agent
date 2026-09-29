@@ -213,3 +213,17 @@ def test_wrong_control_block_fails_closed(tmp_path):
     assert result["valid"] is False
     assert result["failed_checks"][0]["target"] == "reset"
     assert result["controls"]["reset"] is None
+
+
+def test_inspection_collects_every_unready_probe_and_control(tmp_path):
+    value = declaration()
+    world = World(value)
+    world.cells[(0, 64, 0)]["name"] = "minecraft:air"
+    world.cells[(0, 64, 1)]["name"] = "minecraft:stone"
+    actions = Actions(TrialManifest(tmp_path), world, world)
+
+    result = inspect_module(actions, validate_declaration(value, actions.contract))
+
+    assert result["valid"] is False
+    assert [failure["target"] for failure in result["failed_checks"]] == ["a[0]", "reset"]
+    assert actions.used == len(world.cells)

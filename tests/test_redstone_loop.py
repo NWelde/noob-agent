@@ -599,6 +599,10 @@ async def test_provider_grading_handoff_requests_full_schema_only_when_ready(tmp
     planner.complete = complete
     monkeypatch.setattr(actions, "apply", lambda *args: {"effect_verified": True})
     monkeypatch.setattr(
+        "noob_agent.redstone.loop.inspect_module",
+        lambda runtime, declaration: {"valid": True, "scope": "interface_readback_only"},
+    )
+    monkeypatch.setattr(
         "noob_agent.redstone.loop.grade_module",
         lambda runtime, declaration, *, fail_fast: {
             "module": declaration.module,
@@ -661,6 +665,10 @@ async def test_provider_forces_public_grade_after_three_construction_intentions(
 
     planner.complete = complete
     monkeypatch.setattr(actions, "apply", lambda *args: {"effect_verified": True})
+    monkeypatch.setattr(
+        "noob_agent.redstone.loop.inspect_module",
+        lambda runtime, declaration: {"valid": True, "scope": "interface_readback_only"},
+    )
     monkeypatch.setattr(
         "noob_agent.redstone.loop.grade_module",
         lambda runtime, declaration, *, fail_fast: {
@@ -948,6 +956,10 @@ async def test_provider_checkpoint_requires_four_passes_after_last_build(tmp_pat
         runtime.manifest.save()
         return result
 
+    monkeypatch.setattr(
+        "noob_agent.redstone.loop.inspect_module",
+        lambda runtime, declaration: {"valid": True, "scope": "interface_readback_only"},
+    )
     monkeypatch.setattr("noob_agent.redstone.loop.grade_module", passing_grade)
     loop = TrialLoop(manifest, actions, planner, jev, require_module_grading=True)
     await loop.run({})
@@ -1149,6 +1161,47 @@ async def test_module_inspection_failure_then_repair_does_not_end_trial(tmp_path
     assert manifest.data["final_grade"]["model_success"] is False
 
 
+async def test_unready_interface_skips_behavioral_grader_after_full_readback(tmp_path, monkeypatch):
+    from test_redstone_behavior import compact_declared
+
+    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    declaration = compact_declared("register")
+    replies = [
+        {"summary": "Request grading schema", "actions": [], "request_grading": True},
+        {"summary": "Grade register interface", "actions": [], "module_inspection": declaration},
+    ]
+
+    async def complete(request):
+        planner.requests.append(request)
+        return ModelResponse(
+            text=json.dumps(replies[len(planner.requests) - 1]),
+            input_tokens=3,
+            output_tokens=4,
+            model_id="fixture/planner",
+        )
+    planner.complete = complete
+    grader_calls = []
+    monkeypatch.setattr(
+        "noob_agent.redstone.loop.grade_module",
+        lambda *args, **kwargs: grader_calls.append(args) or pytest.fail("grader called"),
+    )
+
+    await loop.run({})
+
+    assert grader_calls == []
+    assert not [
+        event for event in manifest.data["events"] if event["kind"] == "planner_validation"
+    ]
+    inspection = manifest.data["checks"][0]
+    assert inspection["valid"] is False
+    declared_positions = sum(len(probes) for probes in declaration["probes"].values()) + len(
+        declaration["controls"]
+    )
+    assert len(inspection["failed_checks"]) == declared_positions
+    assert actions.used == declared_positions
+    assert not jev.requests
+
+
 @pytest.mark.parametrize("compact", [False, True])
 async def test_behavioral_failure_returns_raw_feedback_and_charges_repair(
     tmp_path, monkeypatch, compact
@@ -1172,6 +1225,10 @@ async def test_behavioral_failure_returns_raw_feedback_and_charges_repair(
             fail_fast=fail_fast,
         )
 
+    monkeypatch.setattr(
+        "noob_agent.redstone.loop.inspect_module",
+        lambda runtime, declaration: {"valid": True, "scope": "interface_readback_only"},
+    )
     monkeypatch.setattr("noob_agent.redstone.loop.grade_module", grade)
     original = planner.complete
 

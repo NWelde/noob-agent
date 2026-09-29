@@ -333,14 +333,15 @@ def grade_module(
             "case": label,
             "expected": expected,
             "actual": actual,
-            "failure_reason": (
-                "missing_or_mismatched_probe"
-                if any(value is None for value in actual.values())
-                else "signal_mismatch"
-            ),
             "raw": snapshot,
             "passed": actual == expected,
         }
+        if not item["passed"]:
+            item["failure_reason"] = (
+                "missing_or_mismatched_probe"
+                if any(value is None for value in actual.values())
+                else "signal_mismatch"
+            )
         result["checks"].append(item)
         if not item["passed"]:
             result["failed_checks"].append(item)

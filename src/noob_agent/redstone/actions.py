@@ -183,6 +183,26 @@ class Actions:
                     and after["properties"].get("powered") is not before["properties"]["powered"]
                 )
             result = {"before": before, "after": after, "effect_verified": matched}
+            if (
+                action == "place"
+                and block == "minecraft:redstone_wire"
+                and after["name"] == "minecraft:air"
+            ):
+                support_position = [position[0], position[1] - 1, position[2]]
+                support = self.read({"op": "block", "position": support_position})
+                if support.get("name") == "minecraft:air":
+                    result["placement_diagnostic"] = {
+                        "type": "missing_support",
+                        "target": position,
+                        "required_support": {
+                            "position": support_position,
+                            "state": "solid block",
+                        },
+                        "actual_support": {
+                            "name": support["name"],
+                            "properties": support.get("properties", {}),
+                        },
+                    }
             self.manifest.observed(sequence, result)
             if not matched:
                 raise EffectMismatch("Actual effect differs from request")
