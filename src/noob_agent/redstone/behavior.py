@@ -240,6 +240,26 @@ def grade_module(
         result["stopped_before_execution"] = True
         actions.manifest.save()
         return result
+    # Verify every declared probe exists before spending the behavioral suite's
+    # timeline budget. Otherwise a bad coordinate can produce dozens of
+    # misleading per-case failures before we discover the declaration error.
+    if control is None:
+        for role, probes in declaration.probes.items():
+            for index, _probe in enumerate(probes):
+                try:
+                    grader.probe(role, index)
+                except ValueError as error:
+                    result["failed_checks"].append(
+                        {
+                            "reason": "declared_probe_missing_or_mismatched",
+                            "role": role,
+                            "index": index,
+                            "detail": str(error),
+                        }
+                    )
+                    result["complete"] = True
+                    actions.manifest.save()
+                    return result
     reset_id = next(c.id for c in declaration.controls if c.role == "reset")
 
     class FailedCheck(Exception):

@@ -148,6 +148,39 @@ def test_recipes_reject_commands_step_and_missing_cases(tmp_path):
     assert not reader.calls
 
 
+def test_behavior_grade_stops_when_declared_probe_is_not_present(tmp_path, monkeypatch):
+    import noob_agent.redstone.behavior as behavior
+
+    actions = Actions(TrialManifest(tmp_path), None, None)
+    decl = validate_declaration(declared("register"), actions.contract)
+
+    class MissingProbeGrader:
+        max_ticks = 100_000
+        ticks = 0
+
+        def __init__(self, *args, **kwargs):
+            self.probes_checked = []
+
+        def probe(self, role, index):
+            self.probes_checked.append((role, index))
+            if role == "a" and index == 2:
+                raise ValueError("Declared probe missing or mismatched")
+            return {"position": decl.probes[role][index].position}
+
+    monkeypatch.setattr(behavior, "GraderControl", MissingProbeGrader)
+    result = behavior.grade_module(actions, decl)
+
+    assert not result["behavioral_passed"]
+    assert result["complete"]
+    assert result["failed_checks"] == [{
+        "reason": "declared_probe_missing_or_mismatched",
+        "role": "a",
+        "index": 2,
+        "detail": "Declared probe missing or mismatched",
+    }]
+    assert len(result["checks"]) == 0
+
+
 @pytest.mark.parametrize(
     "module,role",
     [("arithmetic", "o"), ("storage", "readout"), ("storage", "address"), ("output", "strobe")],

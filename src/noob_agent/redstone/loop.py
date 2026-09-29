@@ -221,6 +221,7 @@ class TrialLoop:
         self.running = True
         repair = False
         validation_retries = 0
+        last_invalid_response_sha256: str | None = None
         limit_reached = False
         try:
             while True:
@@ -235,10 +236,39 @@ class TrialLoop:
                     self.context.force_grading = True
                     self.context.grading_enabled = True
                 request = self.context.request(observation)
-                self.charge("planner_calls")
-                event = self.manifest.attempt("planner_call", request.model_dump(mode="json"))
-                async with asyncio.timeout(min(PLANNER_TIMEOUT_SECONDS, self.remaining())):
-                    response = await self.planner.complete(request)
+                timeout_retries = 0
+                while True:
+                    self.charge("planner_calls")
+                    event = self.manifest.attempt(
+                        "planner_call", request.model_dump(mode="json")
+                    )
+                    try:
+                        async with asyncio.timeout(
+                            min(PLANNER_TIMEOUT_SECONDS, self.remaining())
+                        ):
+                            response = await self.planner.complete(request)
+                    except TimeoutError:
+                        retry_scheduled = (
+                            timeout_retries == 0
+                            and self.used["planner_calls"]
+                            < self.contract.budgets.planner_calls
+                            and self.clock() < self.deadline
+                        )
+                        timeout_event = self.manifest.attempt(
+                            "planner_timeout",
+                            {
+                                "planner_call_sequence": event,
+                                "attempt": timeout_retries + 1,
+                            },
+                        )
+                        self.manifest.observed(
+                            timeout_event, {"retry_scheduled": retry_scheduled}
+                        )
+                        if not retry_scheduled:
+                            raise
+                        timeout_retries += 1
+                        continue
+                    break
                 # Public output and identity/usage only; omit separate private reasoning.
                 self.manifest.observed(
                     event, response.model_dump(mode="json", exclude={"reasoning"})
@@ -377,13 +407,15 @@ class TrialLoop:
                 else:
                     reason = ""
                 if reason:
+                    response_sha256 = hashlib.sha256(response.text.encode()).hexdigest()
+                    repeat_response = response_sha256 == last_invalid_response_sha256
                     validation = {
                         "planner_call_sequence": event,
                         "reason": reason,
-                        "response_sha256": hashlib.sha256(response.text.encode()).hexdigest(),
+                        "response_sha256": response_sha256,
                         "response_characters": len(response.text),
                     }
-                    retry_scheduled = validation_retries < 2
+                    retry_scheduled = validation_retries < 2 and not repeat_response
                     validation_event = self.manifest.attempt("planner_validation", validation)
                     self.manifest.observed(
                         validation_event,
@@ -392,11 +424,13 @@ class TrialLoop:
                             "jev_dispatched": False,
                             "world_actions": 0,
                             "retry_scheduled": retry_scheduled,
+                            "repeat_response": repeat_response,
                         },
                     )
                     if not retry_scheduled:
                         raise ValueError("Repeated planner validation failure")
                     validation_retries += 1
+                    last_invalid_response_sha256 = response_sha256
                     instruction = planner_validation_instruction(reason, response.finish_reason)
                     self.context.feedback(
                         {
@@ -407,6 +441,7 @@ class TrialLoop:
                     repair = True
                     continue
                 validation_retries = 0
+                last_invalid_response_sha256 = None
                 self.manifest.data["planner_intentions"].append(intention.model_dump(mode="json"))
                 self.manifest.save()
                 if self.require_module_grading and intention.request_grading:

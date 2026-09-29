@@ -509,6 +509,45 @@ def test_the_wandb_client_names_its_provider() -> None:
     assert client.provider == "wandb-inference"
 
 
+def test_the_wandb_sdk_does_not_retry_charged_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    fake_sdk = SimpleNamespace(
+        AsyncOpenAI=lambda **kwargs: captured.update(kwargs) or object()
+    )
+    monkeypatch.setattr("noob_agent.models.client.importlib.import_module", lambda _: fake_sdk)
+    client = WandbInferenceClient(
+        ModelSettings(provider="wandb-inference", inference_model="provider/model"),
+        WandbSettings(api_key=SECRET),
+    )
+
+    client._client()
+
+    assert captured["max_retries"] == 0
+
+
+async def test_wandb_sdk_timeout_is_classified_without_exposing_provider_details() -> None:
+    secret_error_detail = f"request failed with token {SECRET}"
+
+    class APITimeoutError(Exception):
+        pass
+
+    async def fail(**_: object) -> None:
+        raise APITimeoutError(secret_error_detail)
+
+    class FakeClosable:
+        chat = SimpleNamespace(completions=SimpleNamespace(create=fail))
+
+        async def close(self) -> None:
+            return None
+
+    client = _wandb_client(_completion(content="x", finish_reason="stop", usage=None))
+    client._client = lambda: FakeClosable()  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError, match="W&B Inference request timed out") as caught:
+        await client.complete(BUILD_REQUEST)
+
+    assert SECRET not in str(caught.value)
+
+
 def test_model_response_defaults_keep_existing_constructors_working() -> None:
     response = ModelResponse(text="x", input_tokens=1, output_tokens=2, model_id="m")
     assert (response.finish_reason, response.reasoning, response.usage_reported) == (

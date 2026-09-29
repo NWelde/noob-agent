@@ -270,7 +270,25 @@ class PlannerContext:
             schema["properties"]["actions"]["maxItems"] = 8
             schema["properties"]["summary"]["maxLength"] = 200
             schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
-        if self.history and "output token cap" in self.history[-1].get("intention_rejected", ""):
+        if self.force_grading:
+            schema["properties"]["actions"]["minItems"] = 0
+            schema["properties"]["actions"]["maxItems"] = 0
+            schema["properties"]["module_inspection"] = {
+                "$ref": "#/$defs/ModuleDeclaration"
+            }
+            if "module_inspection" not in schema["required"]:
+                schema["required"].append("module_inspection")
+            schema["properties"]["request_grading"] = {
+                "type": "boolean",
+                "enum": [False],
+            }
+            if "request_grading" not in schema["required"]:
+                schema["required"].append("request_grading")
+        if (
+            not self.force_grading
+            and self.history
+            and "output token cap" in self.history[-1].get("intention_rejected", "")
+        ):
             schema["properties"]["actions"]["maxItems"] = 8
             schema["properties"]["summary"]["maxLength"] = 200
             schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
@@ -351,8 +369,15 @@ class PlannerContext:
             "Actions may be empty when requesting inspection or grading."
         )
         if self.force_grading:
-            system += (
-                " A construction limit was reached. Stop building now and return a "
+            system = (
+                "A construction limit was reached. Stop building now. First return "
+                "exactly one JSON object with an empty actions array, "
+                "request_grading false, and one complete module_inspection. Do not "
+                "include any build, break, interact, or observe action. The schema "
+                "forbids actions and requires module_inspection. Then follow these "
+                "declaration requirements: "
+                + system
+                + " Return a "
                 "complete behavioral module_inspection with empty actions. Include all "
                 "required probes, controls, and recipes or recipe_templates so the "
                 "independent public grader can test the current hardware."

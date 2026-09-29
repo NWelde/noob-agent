@@ -120,6 +120,9 @@ class WandbInferenceClient:
             base_url=self._model.inference_base_url,
             api_key=self._wandb.api_key,
             default_headers=headers,
+            # A timed-out completion may already have been accepted and billed.
+            # TrialLoop owns the one explicit retry, so do not retry at SDK level.
+            max_retries=0,
         )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
@@ -140,16 +143,26 @@ class WandbInferenceClient:
                 },
             }
         try:
-            completion = await client.chat.completions.create(
-                model=self._model.inference_model,
-                messages=[
-                    {"role": "system", "content": request.system},
-                    {"role": "user", "content": request.prompt},
-                ],
-                max_tokens=request.max_output_tokens,
-                temperature=request.temperature,
-                **options,
-            )
+            try:
+                completion = await client.chat.completions.create(
+                    model=self._model.inference_model,
+                    messages=[
+                        {"role": "system", "content": request.system},
+                        {"role": "user", "content": request.prompt},
+                    ],
+                    max_tokens=request.max_output_tokens,
+                    temperature=request.temperature,
+                    **options,
+                )
+            except Exception as error:
+                # Keep provider details out of durable model-call error records.
+                # The TrialLoop already has a bounded timeout retry; translating
+                # the SDK's typed timeout into TimeoutError lets it own that path.
+                if type(error).__name__ == "APITimeoutError":
+                    raise TimeoutError(
+                        "W&B Inference request timed out; provider outcome may be unknown."
+                    ) from None
+                raise
         finally:
             # Each call may run under a different event loop, so its HTTP client
             # is closed here rather than left for garbage collection.

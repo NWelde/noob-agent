@@ -101,6 +101,54 @@ async def test_sequence_observations_and_feedback_drive_same_trial_repair(tmp_pa
     assert "missing link" not in other[2].requests[0].prompt
 
 
+async def test_planner_timeout_gets_one_charged_retry_and_can_continue(tmp_path):
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, check=lambda _: {"passed": True, "complete": True}
+    )
+    calls = 0
+
+    async def timeout_once(request):
+        nonlocal calls
+        calls += 1
+        planner.requests.append(request)
+        if calls == 1:
+            raise TimeoutError("transient planner timeout")
+        return ModelResponse(
+            text=json.dumps(intention(1)), input_tokens=3, output_tokens=4, model_id="fixture"
+        )
+
+    planner.complete = timeout_once
+    await loop.run({})
+
+    assert calls == 2
+    assert manifest.data["loop_budget"]["planner_calls"] == 2
+    timeout_events = [e for e in manifest.data["events"] if e["kind"] == "planner_timeout"]
+    assert len(timeout_events) == 1
+    assert timeout_events[0]["result"] == {"retry_scheduled": True}
+    assert timeout_events[0]["request"]["attempt"] == 1
+    assert actions.used > 0
+    assert manifest.data["loop"]["status"] == "checkpoint_complete"
+
+
+async def test_second_planner_timeout_is_terminal_after_two_charged_calls(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path)
+
+    async def always_timeout(request):
+        planner.requests.append(request)
+        raise TimeoutError("planner timeout")
+
+    planner.complete = always_timeout
+    await loop.run({})
+
+    assert len(planner.requests) == 2
+    assert manifest.data["loop_budget"]["planner_calls"] == 2
+    assert actions.used == 0
+    assert not manifest.data["planner_intentions"]
+    timeout_events = [e for e in manifest.data["events"] if e["kind"] == "planner_timeout"]
+    assert [event["result"]["retry_scheduled"] for event in timeout_events] == [True, False]
+    assert manifest.data["loop"] == {"status": "stopped", "reason": "TimeoutError"}
+
+
 async def test_limit_checkpoint_restores_feedback_in_a_fresh_loop(tmp_path):
     manifest = TrialManifest(tmp_path)
     world = World()
@@ -221,11 +269,11 @@ async def test_provider_rejects_stone_only_building_before_circuit_progress(tmp_
         ],
     }
     await loop.run({})
-    assert len(planner.requests) == 3
+    assert len(planner.requests) == 2
     assert not jev.requests
     assert actions.used == 0
     rejected = [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
-    assert len(rejected) == 3
+    assert len(rejected) == 2
     assert "No signal or control block exists yet" in rejected[0]["request"]["reason"]
     assert "No signal or control block exists yet" in planner.requests[1].prompt
 
@@ -247,7 +295,7 @@ async def test_provider_static_power_does_not_bypass_signal_progress_guard(tmp_p
     await loop.run({})
     assert not jev.requests
     assert actions.used == 0
-    assert sum(event["kind"] == "planner_validation" for event in manifest.data["events"]) == 3
+    assert sum(event["kind"] == "planner_validation" for event in manifest.data["events"]) == 2
 
 
 async def test_provider_rejects_action_cap_below_offer_readback_cost(tmp_path):
@@ -270,7 +318,7 @@ async def test_provider_rejects_action_cap_below_offer_readback_cost(tmp_path):
     assert not jev.requests
     assert actions.used == 0
     rejected = [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
-    assert len(rejected) == 3
+    assert len(rejected) == 2
     assert "max_actions cannot cover" in rejected[0]["request"]["reason"]
 
 
@@ -293,8 +341,37 @@ async def test_provider_rejects_replacing_verified_identical_cell(tmp_path, monk
     assert len(jev.requests) == 1
     assert manifest.data["milestone_4"]["construction_epoch"] == 1
     rejected = [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
-    assert len(rejected) == 3
+    assert len(rejected) == 2
     assert "repeated block at x 30 y 64 z 30" in rejected[0]["request"]["reason"]
+
+
+async def test_identical_invalid_planner_response_stops_retrying_early(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    planner.value = {
+        "summary": "Place the same verified input wire again",
+        "actions": [
+            {
+                "id": "input_wire",
+                "criteria": "Connect input",
+                "action": "place",
+                "position": [30, 64, 30],
+                "block": "minecraft:redstone_wire",
+            }
+        ],
+    }
+    loop.placed_cells[(30, 64, 30)] = ("minecraft:redstone_wire", ())
+
+    await loop.run({})
+
+    rejected = [event for event in manifest.data["events"] if event["kind"] == "planner_validation"]
+    assert len(planner.requests) == 2
+    assert len(rejected) == 2
+    assert rejected[0]["result"]["retry_scheduled"] is True
+    assert rejected[1]["result"]["retry_scheduled"] is False
+    assert rejected[1]["result"]["repeat_response"] is True
+    assert not jev.requests
+    assert actions.used == 0
+    assert manifest.data["loop"]["status"] == "stopped"
 
 
 async def test_provider_skips_duplicate_offers_without_blocking_new_repairs(tmp_path, monkeypatch):
@@ -738,13 +815,12 @@ async def test_invalid_intention_never_calls_jev(tmp_path):
     await loop.run({})
     assert not jev.requests
     assert actions.used == 0
-    assert manifest.data["loop_budget"]["planner_calls"] == 3
-    assert manifest.data["loop_budget"]["repair_rounds"] == 2
+    assert manifest.data["loop_budget"]["planner_calls"] == 2
+    assert manifest.data["loop_budget"]["repair_rounds"] == 1
     validation_events = [
         event for event in manifest.data["events"] if event["kind"] == "planner_validation"
     ]
     assert [event["result"]["retry_scheduled"] for event in validation_events] == [
-        True,
         True,
         False,
     ]
@@ -762,7 +838,7 @@ async def test_schema_error_feedback_names_field_without_echoing_input(tmp_path)
         for event in manifest.data["events"]
         if event["kind"] == "planner_validation"
     ]
-    assert reasons == ["Field actions.0.position.0 failed int_type."] * 3
+    assert reasons == ["Field actions.0.position.0 failed int_type."] * 2
     assert "Field actions.0.position.0" in planner.requests[1].prompt
     assert "True" not in reasons[0]
 
@@ -784,7 +860,7 @@ async def test_truncated_json_gets_compact_repair_guidance(tmp_path):
     await loop.run({})
     assert not jev.requests
     assert actions.used == 0
-    assert len(planner.requests) == 3
+    assert len(planner.requests) == 2
     assert "at most 8 actions" in planner.requests[1].prompt
     assert "output token cap" in planner.requests[1].prompt
 

@@ -146,6 +146,35 @@ def test_forced_grade_switches_to_declaration_schema_and_prompt():
     assert "module_inspection" in request.response_schema["properties"]
     assert "construction limit was reached" in request.system.lower()
 
+    schema = request.response_schema
+    assert schema["properties"]["actions"]["maxItems"] == 0
+    assert "module_inspection" in schema["required"]
+    assert schema["properties"]["module_inspection"] == {
+        "$ref": "#/$defs/ModuleDeclaration"
+    }
+    assert "empty actions" in request.system.lower()
+    assert request.response_schema["properties"]["actions"]["minItems"] == 0
+    assert request.response_schema["properties"]["request_grading"] == {
+        "type": "boolean",
+        "enum": [False],
+    }
+    assert "first return exactly one json object" in request.system.lower()
+
+
+def test_forced_grade_keeps_zero_actions_even_after_output_cap_feedback():
+    context = PlannerContext(MachineContract(), require_module_grading=True)
+    context.force_grading = True
+    context.feedback(
+        {"intention_rejected": "Response reached its output token cap before complete JSON."}
+    )
+
+    request = context.request({})
+
+    assert request.response_schema["properties"]["actions"]["maxItems"] == 0
+    assert request.response_schema["properties"]["module_inspection"] == {
+        "$ref": "#/$defs/ModuleDeclaration"
+    }
+
 
 def test_lamp_repair_planner_gets_small_task_schema_and_seeded_fixture():
     request = PlannerContext(MachineContract(), task="lamp_repair").request({})
