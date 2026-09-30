@@ -32,6 +32,18 @@ tests, and JavaScript tests. It does not connect to Minecraft or model providers
 Passing this command establishes software regression coverage, not a functioning
 redstone computer.
 
+Live Minecraft tests are skipped by default, before creating a connector. They
+require the explicit `--run-minecraft-live` pytest flag and a dedicated test world.
+Do not run that flag against the active production server: these fixture tests
+use the same bot identity and send scenario reset commands.
+
+The first end-to-end command validation exposed this inherited automatic live
+connection behavior. Two fixture checks failed while the production world was
+active; the run was stopped. Its bot connections closed, and the observed clock
+construction log subsequently reached completion. Treat player/session state as
+needing re-verification before the next live demonstration. Those failures are
+not production-module grades and remain in the verification log.
+
 ## Evidence gates
 
 From the isolated checkout, inspect the authoritative trial without changing it:
