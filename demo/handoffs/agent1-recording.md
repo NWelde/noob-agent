@@ -1,0 +1,1 @@
+> **Superseded status:** See [continuation-2026-09-29.md](continuation-2026-09-29.md) for the current capture, partial-build state, paths, and resume steps. This older discovery report documents the initial setup only.

@@ -1,0 +1,1 @@
+> **Superseded status:** See [continuation-2026-09-29.md](continuation-2026-09-29.md) for the latest live attempt, verified placements, known failure, current source branches, and safe resume criteria. The details below describe pre-recording inspection and should not be treated as current run state.
