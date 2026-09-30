@@ -1,5 +1,13 @@
 # noob-agent
 
+## Demo video
+
+[![Watch the Minecraft adder demo](assets/minecraft-adder-demo.jpg)](https://github.com/NWelde/noob-agent/releases/download/demo-video-2026-09-30/minecraft-adder-demo-final.mp4)
+
+[Watch or download the final demo (3 minutes, 1080p, 60 fps)](https://github.com/NWelde/noob-agent/releases/download/demo-video-2026-09-30/minecraft-adder-demo-final.mp4).
+The video shows construction footage and the physical redstone adder computing
+**3 + 8 = 11**, with the input controls and output lamps shown at normal speed.
+
 ## Current project
 
 An agent uses Minecraft Java 1.21.1 to design and build a programmable 4-bit
@@ -12,7 +20,8 @@ The active build is the Minecraft redstone computer described in
 [`hackathon_plan.md`](hackathon_plan.md). Infrastructure for resets, bounded
 construction, planner/Jev interaction, module checks, and trial records is in
 place. The retained assisted-production trial has passed the register suite;
-the complete stored-program computer and final video remain unverified. The
+the complete stored-program computer remains unverified. The video above
+demonstrates the adder. The
 [hackathon readiness checklist](docs/hackathon-readiness.md) provides an isolated
 verification command and the mandatory October 1 attendance details.
 Current evidence and the next live checkpoint are in
