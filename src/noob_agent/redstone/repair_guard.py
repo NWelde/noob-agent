@@ -274,6 +274,18 @@ class RepairGuard:
             entry.get("blocked", {}).pop(behavior, None)
             entry.get("no_progress", {}).pop(behavior, None)
 
+    def record_module_diagnostic_improvement(
+        self, module: str, *, verified_improvement: bool
+    ) -> None:
+        """Permit a new full grade after fresh targeted behavior improves.
+
+        The caller must have independent relevant evidence. This forgets only
+        the identical-grade prohibition, never repair behavior history or module
+        acceptance; a complete behavioral suite remains mandatory.
+        """
+        if verified_improvement is True:
+            self._last.pop(module, None)
+
     def record_module_success(self, module: str) -> None:
         """Forget failed-repair history only after the module behavior really passes."""
         self._last.pop(module, None)

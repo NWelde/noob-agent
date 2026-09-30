@@ -15,6 +15,29 @@ def fixture_process(body: str) -> list[str]:
     return [sys.executable, "-u", "-c", body]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"op": "animate", "position": [10, 64, 10], "name": "minecraft:stone"},
+        {"op": "hardware"},
+    ],
+)
+def test_visual_and_hardware_requests_pass_fixed_protocol_and_keep_evidence(tmp_path, payload):
+    manifest = TrialManifest(tmp_path)
+    body = """
+import json,sys
+print('{"ready":true,"version":"1.21.1"}')
+for line in sys.stdin:
+    payload=json.loads(line)
+    print(json.dumps({'ok':True,'result':{'observed_operation':payload['op']}}))
+"""
+    with Sidecar(manifest, command=fixture_process(body)) as sidecar:
+        assert sidecar.request(payload) == {"observed_operation": payload["op"]}
+        with pytest.raises(ValueError):
+            sidecar.request({**payload, "command": "setblock 0 64 0 minecraft:stone"})
+    assert manifest.data["events"][-1]["outcome"] == "observed"
+
+
 def test_journals_before_delivery_and_preserves_actual_result(tmp_path: Path) -> None:
     manifest = TrialManifest(tmp_path)
     body = f"""

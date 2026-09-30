@@ -131,7 +131,7 @@ def test_action_dependencies_must_reference_unique_other_offers():
     )
     assert validate_intention(value, MachineContract()).actions[1].depends_on == ["support"]
     value["actions"][1]["depends_on"] = ["missing"]
-    with pytest.raises(ValueError, match="Invalid dependencies"):
+    with pytest.raises(ValueError, match="Invalid dependencies.*missing.*same response"):
         validate_intention(value, MachineContract())
 
 

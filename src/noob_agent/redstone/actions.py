@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from collections.abc import Callable
@@ -139,6 +140,10 @@ class Actions:
         # The loop can scope its intention guard to action admission while still
         # enforcing global wall and primitive deadlines throughout the action.
         self.action_active = False
+        self.physical_demo = os.environ.get("NOOB_PHYSICAL_ACTIONS") == "1"
+        self.server_visual = os.environ.get("NOOB_SERVER_VISUALS") == "1"
+        if self.physical_demo and self.server_visual:
+            raise ValueError("Select one construction transport")
 
     def estimate(
         self,
@@ -169,9 +174,21 @@ class Actions:
         else:
             # Invalid proposals still consume their bounded outer attempt.
             primitive_count, reader_calls = 1, 0
+        if self.physical_demo and action in {"place", "break", "interact"}:
+            primitive_count += 2  # Physical action and journaled movement evidence.
+            reader_calls += 1
         reader_timeout = self._timeout(self.reader, "timeout", 12.0)
         command_timeout = self._timeout(self.transport, "timeout", 5.0)
         command_calls = 2 if action == "interact" else int(action in {"place", "break"})
+        if self.server_visual and action in {"place", "break"}:
+            primitive_count += 10  # Player read, up to eight movement commands, animation.
+            reader_calls += 2
+            command_calls += 8
+        if self.physical_demo and action in {"place", "break", "interact"}:
+            # Opt-in transport uses five-second read-only requests and one
+            # twenty-second physical request; it issues no server mutation.
+            command_calls = 0
+            reader_timeout = 5.0
         # Reconnect may consume the 35s socket-discovery window, then the
         # persistent-agent 25s ready handshake. Include both in this envelope.
         reconnect_seconds = (
@@ -179,7 +196,10 @@ class Actions:
         )
         return ActionEstimate(
             primitive_count,
-            reader_calls * reader_timeout + command_calls * command_timeout + reconnect_seconds,
+            reader_calls * reader_timeout
+            + command_calls * command_timeout
+            + reconnect_seconds
+            + (15.0 if self.physical_demo and action in {"place", "break", "interact"} else 0.0),
         )
 
     @staticmethod
@@ -341,7 +361,28 @@ class Actions:
                     raise EffectMismatch(
                         "Redstone wire needs a full solid support block directly below"
                     )
-            if action == "interact":
+            if self.physical_demo and action in {"place", "break", "interact"}:
+                physical = self.read(
+                    {
+                        "op": "physical",
+                        "action": action,
+                        "position": position,
+                        "name": block,
+                        "properties": state,
+                    }
+                )
+                if isinstance(physical.get("rejected"), str):
+                    physical_diagnostic: dict[str, Any] = {
+                        "type": physical["rejected"],
+                        "target": position,
+                        "required_floor_support": [position[0], position[1] - 1, position[2]],
+                        "world_mutation_dispatched": False,
+                    }
+                    self.manifest.observed(sequence, {"placement_diagnostic": physical_diagnostic})
+                    raise EffectMismatch(f"Physical preflight rejected: {physical['rejected']}")
+                event = self.charge("bounded_movement", {"method": "walking_controls"})
+                self.manifest.observed(event, physical.get("movement", {}))
+            elif action == "interact":
                 pose = self.read({"op": "player"})
                 coordinates = pose.get("position")
                 yaw, pitch = pose.get("yaw"), pose.get("pitch")
@@ -352,6 +393,10 @@ class Actions:
                         type(v) not in (int, float) or not math.isfinite(v)
                         for v in [*coordinates, yaw, pitch]
                     )
+                    or yaw is None
+                    or pitch is None
+                    or yaw is None
+                    or pitch is None
                     or pose.get("orientationUnits") != "radians"
                 ):
                     raise ValueError("Invalid observed player pose")
@@ -364,7 +409,7 @@ class Actions:
                 self.read({"op": "interact", "position": position})
                 command = (
                     f"tp noobagentbot {' '.join(map(str, coordinates))} "
-                    f"{math.degrees(yaw)} {math.degrees(pitch)}"
+                    f"{math.degrees(float(yaw))} {math.degrees(float(pitch))}"
                 )
                 event = self.charge("bounded_movement", {"command": command})
                 self.manifest.observed(event, {"response": self.transport.command(command)})
@@ -383,6 +428,8 @@ class Actions:
                     else ""
                 )
                 command = f"setblock {' '.join(map(str, position))} {target}{suffix}"
+                if self.server_visual:
+                    self._prepare_server_visual(position, block if action == "place" else None)
                 self.check()
                 event = self.charge("bounded_command", {"command": command})
                 self.manifest.observed(event, {"response": self.transport.command(command)})
@@ -413,3 +460,33 @@ class Actions:
             raise
         finally:
             self.action_active = False
+
+    def _prepare_server_visual(self, position: list[int], block: str | None) -> None:
+        """Journal server-assisted motion and visual-only equip/swing before setblock."""
+        pose = self.read({"op": "player"})
+        start = pose.get("position")
+        if (
+            not isinstance(start, list)
+            or len(start) != 3
+            or not all(type(v) in (int, float) and math.isfinite(v) for v in start)
+        ):
+            raise ValueError("Invalid animation pose")
+        destination = [position[0] + 0.5, position[1], position[2] + 2.5]
+        distance = math.dist(start, destination)
+        steps = min(8, max(1, math.ceil(distance / 0.5)))
+        for index in range(1, steps + 1):
+            location = [
+                a + (b - a) * index / steps for a, b in zip(start, destination, strict=True)
+            ]
+            command = (
+                "tp noobagentbot "
+                + " ".join(f"{v:.5f}" for v in location)
+                + " facing "
+                + " ".join(str(v + 0.5) for v in position)
+            )
+            event = self.charge(
+                "bounded_movement", {"method": "server_assisted_visual_motion", "command": command}
+            )
+            self.manifest.observed(event, {"response": self.transport.command(command)})
+            time.sleep(0.08)
+        self.read({"op": "animate", "position": position, "name": block})

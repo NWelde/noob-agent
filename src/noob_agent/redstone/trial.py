@@ -98,7 +98,19 @@ def verify_continuation(manifest: TrialManifest, task: str, *, actions: Any) -> 
     from noob_agent.redstone.reset import verify_player
 
     player = actions.read({"op": "player"})
-    verify_player(player)
+    verify_player(
+        player,
+        physical_continuation=(
+            (
+                manifest.data.get("assistance", {}).get("physical_actions") is True
+                and os.environ.get("NOOB_PHYSICAL_ACTIONS") == "1"
+            )
+            or (
+                manifest.data.get("assistance", {}).get("server_visuals") is True
+                and os.environ.get("NOOB_SERVER_VISUALS") == "1"
+            )
+        ),
+    )
     states: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
     dynamic = {
         "powered",
@@ -307,11 +319,107 @@ class TrialManifest:
                 continue
             if sequence < len(events):
                 events[sequence] = event
+                cls._apply_grading_checkpoint(data, event)
                 continue
             if sequence != len(events):
                 raise ValueError("Trial event journal has a sequence gap")
             events.append(event)
+            cls._apply_grading_checkpoint(data, event)
         return data
+
+    @staticmethod
+    def _apply_grading_checkpoint(data: dict[str, Any], event: dict[str, Any]) -> None:
+        """Restore a budget reservation even when its outcome remains unknown."""
+        if event.get("kind") != "grading_budget_checkpoint":
+            return
+        request = event.get("request")
+        if not isinstance(request, dict) or set(request) != {"grading_budget", "grading_programs"}:
+            raise ValueError("Invalid grading budget checkpoint")
+        if event.get("outcome") not in {"unknown", "observed"}:
+            raise ValueError("Invalid grading budget checkpoint outcome")
+        if event.get("outcome") == "observed" and event.get("result") != {"world_actions": 0}:
+            raise ValueError("Invalid grading budget checkpoint observation")
+
+        budget = request["grading_budget"]
+        fields = {
+            "operations",
+            "commands",
+            "command_limit",
+            "stopped",
+            "scheduled_ticks",
+            "tick_limit",
+            "shared_action_limit",
+            "namespace",
+            "normal_speed",
+        }
+        if not isinstance(budget, dict) or set(budget) != fields:
+            raise ValueError("Invalid grading budget checkpoint state")
+        for key in (
+            "operations",
+            "commands",
+            "command_limit",
+            "scheduled_ticks",
+            "tick_limit",
+            "shared_action_limit",
+        ):
+            if type(budget[key]) is not int or budget[key] < 0:
+                raise ValueError("Invalid grading budget checkpoint counter")
+        if (
+            budget["command_limit"] < 1
+            or budget["command_limit"] > 1_000_000
+            or budget["commands"] > budget["command_limit"]
+            or budget["tick_limit"] < 1
+            or budget["tick_limit"] > 96_000
+            or budget["scheduled_ticks"] > budget["tick_limit"]
+            or budget["shared_action_limit"] < 1
+            or type(budget["stopped"]) is not bool
+            or type(budget["normal_speed"]) is not bool
+            or not isinstance(budget["namespace"], str)
+            or not budget["namespace"].startswith("ng")
+        ):
+            raise ValueError("Invalid grading budget checkpoint limits")
+
+        programs = request["grading_programs"]
+        if not isinstance(programs, dict):
+            raise ValueError("Invalid grading program checkpoint")
+        for name, state in programs.items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(state, dict)
+                or set(state) != {"steps", "ticks", "started"}
+                or type(state["steps"]) is not int
+                or state["steps"] < 0
+                or type(state["ticks"]) is not int
+                or state["ticks"] < 0
+                or type(state["started"]) not in {int, float}
+            ):
+                raise ValueError("Invalid grading program checkpoint state")
+
+        previous = data.get("grading_budget", {})
+        if previous:
+            if (
+                previous.get("command_limit") != budget["command_limit"]
+                or previous.get("tick_limit") != budget["tick_limit"]
+            ):
+                raise ValueError("Grading budget checkpoint changed frozen limits")
+            for key in ("operations", "commands", "scheduled_ticks"):
+                if type(previous.get(key)) is int and budget[key] < previous[key]:
+                    raise ValueError("Grading budget checkpoint refunded consumed allowance")
+        previous_programs = data.get("grading_programs", {})
+        for name, prior in previous_programs.items():
+            current = programs.get(name)
+            if (
+                current is None
+                or current["steps"] < prior["steps"]
+                or current["ticks"] < prior["ticks"]
+                or current["started"] != prior["started"]
+            ):
+                raise ValueError("Grading program checkpoint refunded or changed a deadline")
+
+        # The attempt request is the reservation: it is durable before work begins.
+        # Thus a crash between attempt and observation still consumes this allowance.
+        data["grading_budget"] = budget
+        data["grading_programs"] = programs
 
     def _append_event(self, sequence: int, event: dict[str, Any]) -> None:
         payload = (
@@ -360,7 +468,13 @@ class TrialManifest:
         }
         temporary = self.path.with_suffix(".tmp")
         with temporary.open("w", encoding="utf-8") as stream:
-            json.dump(self.data, stream, indent=2, sort_keys=True, allow_nan=False)
+            json.dump(
+                self.data,
+                stream,
+                indent=None if getattr(self, "compact_snapshots", False) else 2,
+                sort_keys=True,
+                allow_nan=False,
+            )
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())

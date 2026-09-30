@@ -40,7 +40,9 @@ class Sidecar:
         if not math.isfinite(timeout) or not 0 < timeout <= 30:
             raise ValueError("Invalid sidecar deadline")
         self.manifest = manifest
-        self.timeout = timeout
+        self.timeout = (
+            min(timeout, 5) if os.environ.get("NOOB_PHYSICAL_ACTIONS") == "1" else timeout
+        )
         self.process: subprocess.Popen[bytes] | None = None
         self.buffer = bytearray()
         self.keep_connected = keep_connected
@@ -167,6 +169,9 @@ class Sidecar:
             "block": {"op", "position"},
             "interact": {"op", "position"},
             "validate": {"op", "name", "properties"},
+            "physical": {"op", "action", "position", "name", "properties"},
+            "animate": {"op", "position", "name"},
+            "hardware": {"op"},
         }
         operation = request.get("op")
         if not isinstance(operation, str) or operation not in allowed:
@@ -182,12 +187,12 @@ class Sidecar:
                 if self.connection is None:
                     raise SidecarError("Persistent Minecraft agent is disconnected")
                 self.connection.sendall(payload)
-                reply = self._read_connection(self.timeout)
+                reply = self._read_connection(20 if operation == "physical" else self.timeout)
             else:
                 assert self.process is not None and self.process.stdin is not None
                 self.process.stdin.write(payload)
                 self.process.stdin.flush()
-                reply = self._read(self.timeout)
+                reply = self._read(20 if operation == "physical" else self.timeout)
             if operation == "validate" and reply == {"ok": False, "error": "request_failed"}:
                 # This read-only registry query has a completed negative result.
                 # It cannot leave a world mutation uncertain or require bot teardown.

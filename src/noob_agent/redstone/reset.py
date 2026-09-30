@@ -85,7 +85,7 @@ def verify_scan(scan: dict[str, Any]) -> None:
         raise ResetError("Full world snapshot differs from baseline")
 
 
-def verify_player(player: dict[str, Any]) -> None:
+def verify_player(player: dict[str, Any], *, physical_continuation: bool = False) -> None:
     expected = {
         "username": "noobagentbot",
         "gameMode": "creative",
@@ -95,15 +95,24 @@ def verify_player(player: dict[str, Any]) -> None:
     if any(player.get(k) != v for k, v in expected.items()):
         raise ResetError("Player identity or mode differs")
     position = player.get("position", [])
-    if len(position) != 3 or any(
+    if physical_continuation:
+        if len(position) != 3 or not all(
+            isinstance(v, (int, float)) and math.isfinite(v) and lo <= v <= hi
+            for v, lo, hi in zip(position, [0, 64, 0], [95.99, 96, 111.99], strict=True)
+        ):
+            raise ResetError("Physical continuation position is outside the owned region")
+    elif len(position) != 3 or any(
         not math.isclose(a, b, abs_tol=1e-5)
         for a, b in zip(position, [48.5, 64, 98.5], strict=True)
     ):
         raise ResetError("Player position differs")
     # Mineflayer zero radians corresponds to Minecraft command yaw 180 degrees.
     yaw, pitch = player.get("yaw", math.nan), player.get("pitch", math.nan)
-    if not math.isclose(math.remainder(yaw, 2 * math.pi), 0, abs_tol=1e-5) or not math.isclose(
-        pitch, 0, abs_tol=1e-5
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (yaw, pitch)):
+        raise ResetError("Player orientation is invalid")
+    if not physical_continuation and (
+        not math.isclose(math.remainder(yaw, 2 * math.pi), 0, abs_tol=1e-5)
+        or not math.isclose(pitch, 0, abs_tol=1e-5)
     ):
         raise ResetError("Player orientation differs")
     actual = sorted(player.get("inventory", []), key=lambda item: item["slot"])

@@ -61,6 +61,15 @@ class ModuleDeclaration(FrozenModel):
     ] = Field(default_factory=dict)
 
 
+class MachineDeclaration(ModuleDeclaration):
+    """Full machine interface; programming IDs are address-major, MSB first."""
+
+    # Pydantic replaces the inherited discriminator for the full-machine schema.
+    # Keep ModuleDeclaration restricted to public modules in the planner schema.
+    module: Literal["machine"]  # type: ignore[assignment]
+    word_controls: list[list[str]] = Field(min_length=8, max_length=8)
+
+
 def resolve_recipe(declaration: ModuleDeclaration, key: str) -> list[dict[str, Any]]:
     """Expand only bounded bit selections; no expressions, commands or layouts."""
     if key in declaration.recipes:
@@ -89,6 +98,7 @@ def resolve_recipe(declaration: ModuleDeclaration, key: str) -> list[dict[str, A
 
 
 WIDTHS = {
+    "machine": {"a": 4, "o": 4, "pc": 3, "halted": 1, "strobe": 1, "words": 48},
     "register": {"a": 4},
     "arithmetic": {"a": 4, "o": 4},
     "storage": {"words": 48, "readout": 6, "address": 3},
@@ -97,7 +107,11 @@ WIDTHS = {
 
 
 def validate_declaration(value: object, contract: MachineContract) -> ModuleDeclaration:
-    declaration = ModuleDeclaration.model_validate(value)
+    declaration = (
+        MachineDeclaration.model_validate(value)
+        if isinstance(value, dict) and value.get("module") == "machine"
+        else ModuleDeclaration.model_validate(value)
+    )
     widths = WIDTHS[declaration.module]
     if set(declaration.probes) != set(widths):
         raise ValueError("Missing or unexpected probe roles")
@@ -114,6 +128,15 @@ def validate_declaration(value: object, contract: MachineContract) -> ModuleDecl
     if len(set(ids)) != len(ids):
         raise ValueError("Duplicate control IDs")
     roles = [control.role for control in declaration.controls]
+    if isinstance(declaration, MachineDeclaration):
+        flat = [key for row in declaration.word_controls for key in row]
+        programming = {c.id for c in declaration.controls if c.role == "programming"}
+        if any(len(row) != 6 for row in declaration.word_controls) or len(set(flat)) != 48:
+            raise ValueError("Machine requires 48 distinct programming controls")
+        if set(flat) != programming or any(role == "test_input" for role in roles):
+            raise ValueError("Machine accepts only RESET, STEP and its 48 programming controls")
+        if declaration.recipes or declaration.recipe_templates:
+            raise ValueError("Machine has no external instruction-execution recipes")
     if roles.count("reset") != 1 or roles.count("step") != 1:
         raise ValueError("Exactly one reset and STEP are required")
     if declaration.module == "storage" and "programming" not in roles:

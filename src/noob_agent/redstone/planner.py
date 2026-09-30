@@ -14,7 +14,7 @@ from noob_agent.models.client import ModelRequest, WandbInferenceClient
 from noob_agent.redstone.circuit_plan import CircuitPlan
 from noob_agent.redstone.contract import FrozenModel, MachineContract, validate_build_action
 from noob_agent.redstone.demo import LAMP_POSITION, LEVER_POSITION, WIRE_POSITION
-from noob_agent.redstone.modules import ModuleDeclaration, validate_declaration
+from noob_agent.redstone.modules import MachineDeclaration, ModuleDeclaration, validate_declaration
 from noob_agent.redstone.provider_limits import (
     PLANNER_MAX_OUTPUT_TOKENS,
     PLANNER_TIMEOUT_SECONDS,
@@ -106,6 +106,7 @@ class Intention(FrozenModel):
     summary: str = Field(min_length=1, max_length=2000)
     actions: list[OfferedAction] = Field(max_length=32)
     module_inspection: ModuleDeclaration | None = None
+    machine_inspection: MachineDeclaration | None = None
     circuit_plan: CircuitPlan | None = None
     request_grading: bool = False
     register_bit_check: int | None = Field(default=None, ge=0, le=3, strict=True)
@@ -118,12 +119,17 @@ def validate_intention(value: object, contract: MachineContract) -> Intention:
     if (
         not intention.actions
         and intention.module_inspection is None
+        and intention.machine_inspection is None
         and not intention.request_grading
         and intention.register_bit_check is None
     ):
         raise ValueError("Intention requires actions, module inspection or grading request")
     if intention.module_inspection is not None:
         validate_declaration(intention.module_inspection.model_dump(), contract)
+    if intention.machine_inspection is not None:
+        validate_declaration(intention.machine_inspection.model_dump(), contract)
+        if intention.actions or intention.module_inspection or intention.request_grading:
+            raise ValueError("Full machine grading requires only its interface and no actions")
     if intention.register_bit_check is not None and (
         intention.actions
         or intention.request_grading
@@ -131,7 +137,8 @@ def validate_intention(value: object, contract: MachineContract) -> Intention:
         or intention.module_inspection.module != "register"
     ):
         raise ValueError(
-            "Register bit diagnostics require a register declaration and no actions or grading request"
+            "Register bit diagnostics require a register declaration "
+            "and no actions or grading request"
         )
     if len(intention.actions) > contract.budgets.intention_actions:
         raise ValueError("Intention action limit exceeded")
@@ -149,7 +156,11 @@ def validate_intention(value: object, contract: MachineContract) -> Intention:
         if len(action.depends_on) != len(set(action.depends_on)):
             raise ValueError(f"Duplicate dependencies for action {action.id}")
         if action.id in action.depends_on or any(dep not in ids for dep in action.depends_on):
-            raise ValueError(f"Invalid dependencies for action {action.id}")
+            invalid = next(dep for dep in action.depends_on if dep == action.id or dep not in ids)
+            raise ValueError(
+                f"Invalid dependencies for action {action.id[:24]}: {invalid[:24]}. "
+                "Use other action IDs in this same response only; omit references to prior batches."
+            )
     for action in intention.actions:
         try:
             validate_build_action(
@@ -201,6 +212,7 @@ class PlannerContext:
         self.task = task
         self.register_workshop = register_workshop
         self.grading_enabled = False
+        self.machine_phase = False
         self.force_grading = False
         self.history: list[dict[str, Any]] = (
             json.loads(json.dumps(history[-MAX_FEEDBACK_ENTRIES:], allow_nan=False))
@@ -246,6 +258,7 @@ class PlannerContext:
                 self.circuit_plan.model_dump(mode="json") if self.circuit_plan is not None else None
             ),
             "latest_verified_layout": self.latest_verified_layout,
+            "machine_phase": self.machine_phase,
         }
 
     def request(self, observation: dict[str, Any]) -> ModelRequest:
@@ -259,6 +272,41 @@ class PlannerContext:
         plan = self.circuit_plan.model_dump(mode="json") if self.circuit_plan else None
         feedback = _compact_feedback(self.history)
         payload_feedback = feedback
+        if self.machine_phase:
+            schema["properties"].pop("module_inspection")
+            schema["properties"].pop("register_bit_check", None)
+            schema["properties"]["actions"]["maxItems"] = 8
+            return ModelRequest(
+                system=(
+                    "Integrate the independently checked modules into the frozen "
+                    "stored-program machine. Use bounded single-block construction offers "
+                    "with prior verified supports and same-response dependency IDs. "
+                    "The physical instruction memory must drive LOAD/ADD/OUT/HALT through "
+                    "the PC and decoder; only STEP and RESET may drive execution externally. "
+                    "When ready, submit machine_inspection with no actions. Declare A4, "
+                    "O4 lamps, PC3, halted1, strobe1, words48 probes, one RESET and STEP, "
+                    "and 48 programming levers. word_controls is eight rows of six "
+                    "control IDs, address0..7 and MSB first. No test_input controls, "
+                    "external execution recipes, commands or computed outputs. "
+                    "The independent normal-speed grader will program real levers and "
+                    "compare actual states; design notes cannot prove success."
+                ),
+                prompt=json.dumps(
+                    dict(
+                        requirements=self.public,
+                        observations=compact_observation,
+                        feedback=feedback,
+                        circuit_plan=plan,
+                        latest_verified_layout=_compact_layout(self.latest_verified_layout),
+                    ),
+                    allow_nan=False,
+                ),
+                max_output_tokens=PLANNER_MAX_OUTPUT_TOKENS,
+                thinking=True,
+                response_schema=schema,
+            )
+        schema["properties"].pop("machine_inspection")
+        schema["$defs"].pop("MachineDeclaration", None)
         if self.task == "lamp_repair":
             schema["properties"].pop("module_inspection")
             _prune_compact_defs(schema)
@@ -315,41 +363,51 @@ class PlannerContext:
             schema["properties"]["summary"]["maxLength"] = 200
             schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] = 160
             return ModelRequest(
-                system=("Design within the frozen public requirements. Start with the "
-                "register, then arithmetic, storage and output; use recent feedback "
-                "to continue the current module. "
-                "Offer at most eight supported construction actions and no "
-                "module_inspection. Set request_grading false while building; "
-                "when the module's controls and probes are built and ready for "
-                "public checks, return request_grading true to request the full "
-                "declaration schema on the next turn. Recent feedback reports cumulative "
-                "stone and signal or control placements. The existing grass floor at y=63 can "
-                "support blocks placed at y=64. Before any functional block exists, include "
-                "a lever, wire, torch, repeater, comparator or lamp. Later support-only "
-                "batches are allowed. Supports must be built in a previous batch before "
-                "offering wire or attached components; Jev can choose offers in any order. Stone, "
-                "glass and redstone blocks alone cannot pass a module. Place controls, "
-                "wiring, memory or probes with only the supports "
-                "they need. Use x=0..95, "
-                "y=64..95, z=0..95; "
-                "grass at y=63 is protected. Levers need lasting solid support on "
-                "their attachment face. For a lever omit properties unless face is "
-                "floor, wall or ceiling and facing is horizontal. Use exact "
-                "permitted Minecraft block IDs "
-                "from the requirements. Each action needs a quoted string id, "
-                "criteria, action and position. Optional depends_on lists earlier action IDs "
-                "that must succeed first; select only dependency-ready actions. Optionally "
-                "return circuit_plan as your own durable design notes, never as evidence. "
-                "Only place may include block or "
-                "properties; omit both for break, interact and observe. For boolean "
-                "block properties such as powered, use JSON true/false, not quoted "
-                "strings. Omit properties unless needed. Return "
-                "one compact JSON object with summary and actions; no raw commands. "
-                "Omit max_actions and max_seconds to use safe defaults: placement "
-                "uses at least five primitive actions including readbacks."
-                + (" Register workshop pad: stone at x=40..48, y=64, z=40..48; "
-                   "glass marker at x=40,y=65,z=40. Build above this pad yourself; it "
-                   "contains no circuit or preplaced controls." if self.register_workshop else "")),
+                system=(
+                    "Design within the frozen public requirements. Start with the "
+                    "register, then arithmetic, storage and output; use recent feedback "
+                    "to continue the current module. "
+                    "Offer at most eight supported construction actions and no "
+                    "module_inspection. Set request_grading false while building; "
+                    "when the module's controls and probes are built and ready for "
+                    "public checks, return request_grading true to request the full "
+                    "declaration schema on the next turn. Recent feedback reports cumulative "
+                    "stone and signal or control placements. The existing grass floor at y=63 can "
+                    "support blocks placed at y=64. Before any functional block exists, include "
+                    "a lever, wire, torch, repeater, comparator or lamp. Later support-only "
+                    "batches are allowed. Supports must be built in a previous batch before "
+                    "offering wire or attached components; Jev can choose offers in any order. "
+                    "Stone, "
+                    "glass and redstone blocks alone cannot pass a module. Place controls, "
+                    "wiring, memory or probes with only the supports "
+                    "they need. Use x=0..95, "
+                    "y=64..95, z=0..95; "
+                    "grass at y=63 is protected. Levers need lasting solid support on "
+                    "their attachment face. For a lever omit properties unless face is "
+                    "floor, wall or ceiling and facing is horizontal. Use exact "
+                    "permitted Minecraft block IDs "
+                    "from the requirements. Each action needs a quoted string id, "
+                    "criteria, action and position. Optional depends_on lists other action IDs "
+                    "in this same response only. Never reference prior-batch actions or "
+                    "circuit_plan "
+                    "input IDs; already built hardware needs no depends_on entry. Select only "
+                    "dependency-ready actions. Optionally "
+                    "return circuit_plan as your own durable design notes, never as evidence. "
+                    "Only place may include block or "
+                    "properties; omit both for break, interact and observe. For boolean "
+                    "block properties such as powered, use JSON true/false, not quoted "
+                    "strings. Omit properties unless needed. Return "
+                    "one compact JSON object with summary and actions; no raw commands. "
+                    "Omit max_actions and max_seconds to use safe defaults: placement "
+                    "uses at least five primitive actions including readbacks."
+                    + (
+                        " Register workshop pad: stone at x=40..48, y=64, z=40..48; "
+                        "glass marker at x=40,y=65,z=40. Build above this pad yourself; it "
+                        "contains no circuit or preplaced controls."
+                        if self.register_workshop
+                        else ""
+                    )
+                ),
                 prompt=json.dumps(
                     {
                         "requirements": self.public,

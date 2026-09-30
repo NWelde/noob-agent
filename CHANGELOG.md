@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+2026-09-29 | [ADDED] | Opt-in full-machine integration phase follows public module checks, with a separately validated interface forbidding external execution inputs/recipes. Server verification reads real programming levers and probes at normal speed, preserves shared budgets, and keeps model success false pending final evidence and recording.
+
+2026-09-29 | [FIXED] | The Python sidecar permits the narrowly scoped animation and read-only full-region hardware requests, matching its JavaScript protocol. Live smoke independently verified placement, cleanup and full-region observation.
+
+2026-09-29 | [ADDED] | User-authorized server-assisted demo placement synchronizes bounded bot positioning, facing, held item and arm swing with actual setblock delivery. Visual animation is separately journaled; success still requires world readback. Ordinary player placement is not claimed.
+
+2026-09-29 | [FIXED] | Planner admission checks support teardown against verified attached hardware before Jev dispatch, returning a bounded validation diagnostic instead of terminating after acceptance.
+
+2026-09-29 | [ADDED] | Stored-program verification compares observed A/PC/O/HALT/strobe retirements for both public programs and operand variations, requiring 48-bit storage readback, reset preservation, halt/hold stability and full-region hardware invariance. Offline fixtures are not Minecraft acceptance.
+
+2026-09-29 | [FIXED] | Planner dependency rejection identifies the invalid reference and explains same-response action scope, preventing repeated references to prior-batch controls; dependency validation remains strict.
+
+2026-09-29 | [FIXED] | Physical placement backs away through bounded player controls when its target intersects the bot, before any placement click; failed retreat remains a known non-mutating rejection.
+
+2026-09-29 | [FIXED] | Recorded physical trial continuation verifies the actual walked player pose within the owned region while retaining identity, inventory and block readbacks; fresh-reset pose verification remains exact.
+
+2026-09-29 | [ADDED] | Opt-in recorded-demo player walking and Mineflayer placement/dig/interaction transport, retaining effect readback, budgets and genuine status events. Added assisted full-computer seed notes and sacrificial geometry smoke scripts; no live computer success claimed.
+
+2026-09-29 | [FIXED] | Dependency-cycle errors now identify the deterministic action/coordinate path while retaining fail-closed rejection.
+
 2026-09-25 | [CLEANED] | Narrowed the README and reproducibility/status docs to the active Minecraft redstone computer work. Removed tests for retired demo commands and corrected server setup coverage to check only actual data-pack directories. The old demo failures no longer define the current test baseline.
 
 2026-09-24 | [FIXED] | Provider-mode Jev calls now start at least four seconds apart after repeated HTTP 429s; a paced V4-Pro trial reached 135 charged Jev calls without rate limiting but repeated already placed wires and produced no public grade. The loop now rejects identical verified re-placements. After interrupting that unproductive trial, its final reset failed on a dead sidecar pipe; a separate trusted two-reset check verified the original baseline. Final-reset cleanup now reconnects once and repeats full verification after an error, with both outcomes recorded. Milestone 4 remains incomplete.

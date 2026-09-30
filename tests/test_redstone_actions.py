@@ -323,3 +323,53 @@ def test_readback_crossing_wall_deadline_stops_runtime(tmp_path: Path) -> None:
     with pytest.raises(ActionLimit):
         actions.observe([0, 64, 0])
     assert actions.stopped
+
+
+def test_opt_in_physical_place_uses_player_transport_and_never_server_command(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("NOOB_PHYSICAL_ACTIONS", "1")
+
+    class PhysicalReader(Reader):
+        placed = False
+
+        def request(self, request):
+            if request["op"] == "physical":
+                self.placed = True
+                return {"method": "mineflayer_player_action", "movement": {"ticks": 4}}
+            if request["op"] == "block" and self.placed:
+                return {
+                    "name": "minecraft:stone",
+                    "properties": {},
+                    "position": request["position"],
+                }
+            return super().request(request)
+
+    transport = Transport()
+    manifest = TrialManifest(tmp_path)
+    runtime = Actions(manifest, transport, PhysicalReader())
+    result = runtime.apply("place", [2, 64, 2], "minecraft:stone")
+    assert result["effect_verified"] is True
+    assert transport.commands == []
+    assert any(e["kind"] == "bounded_movement" for e in manifest.data["events"])
+
+
+def test_physical_preflight_rejection_is_completed_and_does_not_stop_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOOB_PHYSICAL_ACTIONS", "1")
+
+    class RejectingPhysicalReader(Reader):
+        def request(self, request):
+            if request["op"] == "physical":
+                return {"rejected": "missing_support", "target": request["position"]}
+            return super().request(request)
+
+    transport = Transport()
+    manifest = TrialManifest(tmp_path)
+    runtime = Actions(manifest, transport, RejectingPhysicalReader())
+    with pytest.raises(EffectMismatch, match="missing_support"):
+        runtime.apply("place", [2, 65, 2], "minecraft:lever")
+    assert runtime.stopped is False
+    assert transport.commands == []
+    event = next(e for e in manifest.data["events"] if e["kind"] == "bounded_action")
+    assert event["outcome"] == "observed"
+    assert event["result"]["placement_diagnostic"]["world_mutation_dispatched"] is False

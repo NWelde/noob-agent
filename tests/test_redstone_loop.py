@@ -101,6 +101,30 @@ async def test_sequence_observations_and_feedback_drive_same_trial_repair(tmp_pa
     assert "missing link" not in other[2].requests[0].prompt
 
 
+async def test_support_teardown_is_rejected_with_layout_before_jev_dispatch(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path)
+    loop.layout.reconcile(
+        (0, 65, 0), {"name": "minecraft:redstone_torch", "properties": {"lit": True}}
+    )
+    planner.value = {
+        "summary": "Remove occupied support",
+        "actions": [
+            {
+                "id": "remove_support",
+                "criteria": "Clear cell",
+                "action": "break",
+                "position": [0, 64, 0],
+            }
+        ],
+    }
+    await loop.run({})
+    assert manifest.data["loop"]["reason"] == "planner_validation_exhausted"
+    rejected = [e for e in manifest.data["events"] if e["kind"] == "planner_validation"]
+    assert "verified attached hardware remains" in rejected[0]["request"]["reason"]
+    assert not jev.requests
+    assert not any(e["kind"] == "bounded_action" for e in manifest.data["events"])
+
+
 async def test_planner_timeout_gets_one_charged_retry_and_can_continue(tmp_path):
     manifest, actions, planner, jev, loop = setup(
         tmp_path, check=lambda _: {"passed": True, "complete": True}
@@ -1478,3 +1502,143 @@ async def test_unresolved_interface_failure_survives_recent_history_trim(tmp_pat
     assert "Prioritize the unresolved module failures" in planner.requests[0].system
     assert actions.used == 0
     assert not jev.requests
+
+
+async def test_opt_in_batch_uses_one_real_jev_call_per_section_and_keeps_charges(tmp_path):
+    checks = iter(
+        [{"passed": False, "actual": "needs another section"}, {"passed": True, "complete": True}]
+    )
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path, batch_construction=True, check=lambda _: next(checks)
+    )
+    planner.value = {
+        "summary": "Inspect dependency-ordered section",
+        "actions": [
+            {
+                "id": "later",
+                "criteria": "Read after earlier",
+                "action": "observe",
+                "position": [1, 64, 0],
+                "depends_on": ["earlier"],
+            },
+            {
+                "id": "earlier",
+                "criteria": "Read first",
+                "action": "observe",
+                "position": [0, 64, 0],
+            },
+        ],
+    }
+    await loop.run({})
+    assert len(jev.requests) == 2
+    assert manifest.data["loop_budget"]["jev_calls"] == 2
+    assert actions.used == 4
+    selections = [e for e in manifest.data["events"] if e["kind"] == "construction_batch_selection"]
+    assert len(selections) == 2
+    assert all(e["result"] == {"action_id": "later", "provider_call": False} for e in selections)
+    reads = [
+        e["request"]["position"]
+        for e in manifest.data["events"]
+        if e["kind"] == "charged_observation"
+    ]
+    assert reads == [[0, 64, 0], [1, 64, 0], [0, 64, 0], [1, 64, 0]]
+
+
+async def test_opt_in_batch_cannot_bypass_dependency_preflight(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path, batch_construction=True)
+    planner.value = {
+        "summary": "Invalid dependency section",
+        "actions": [
+            {
+                "id": "later",
+                "criteria": "Read",
+                "action": "observe",
+                "position": [1, 64, 0],
+                "depends_on": ["missing"],
+            }
+        ],
+    }
+    await loop.run({})
+    assert manifest.data["loop"]["reason"] == "planner_validation_exhausted"
+    assert not jev.requests
+    assert actions.used == 0
+
+
+@pytest.mark.parametrize("elapsed", [61, 3601])
+async def test_batch_selection_boundary_defers_section_but_preserves_global_stop(tmp_path, elapsed):
+    now = [0.0]
+    manifest, actions, planner, jev, loop = setup(
+        tmp_path,
+        batch_construction=True,
+        clock=lambda: now[0],
+        check=lambda _: {"passed": True, "complete": True},
+    )
+    original_evaluate = jev.evaluate
+
+    def selection(request, *, timeout):
+        answer = original_evaluate(request, timeout=timeout)
+        now[0] = elapsed
+        return answer
+
+    jev.evaluate = selection
+    await loop.run({})
+    assert len(jev.requests) == (2 if elapsed == 61 else 1)
+    assert actions.used == (2 if elapsed == 61 else 0)
+    if elapsed == 61:
+        assert "section ended during selection" in planner.requests[1].prompt
+        first_resume = next(
+            e["sequence"]
+            for e in manifest.data["events"]
+            if e["kind"] == "planner_call" and e["sequence"] > 0
+        )
+        assert not any(
+            e["kind"] in {"bounded_action", "construction_batch_selection"}
+            for e in manifest.data["events"][:first_resume]
+        )
+    else:
+        assert not any(
+            e["kind"] in {"bounded_action", "construction_batch_selection"}
+            for e in manifest.data["events"]
+        )
+    assert manifest.data["loop"]["status"] == (
+        "checkpoint_complete" if elapsed == 61 else "stopped"
+    )
+    if elapsed > 3600:
+        assert manifest.data["loop"]["reason"] == "LoopLimit"
+
+
+async def test_duplicate_detection_uses_verified_geometry_after_resume_dynamic_states(tmp_path):
+    manifest, actions, planner, jev, loop = setup(tmp_path, require_module_grading=True)
+    loop.signal_control_placements = 1
+    observed = {
+        "name": "minecraft:redstone_wire",
+        "properties": {
+            "power": 7,
+            "north": "side",
+            "south": "side",
+            "east": "none",
+            "west": "none",
+        },
+    }
+    loop.layout.reconcile((40, 64, 6), observed)
+    loop.placed_cells[(40, 64, 6)] = (
+        "minecraft:redstone_wire",
+        tuple(sorted(observed["properties"].items())),
+    )
+    planner.value = {
+        "summary": "Duplicate retained wire",
+        "actions": [
+            {
+                "id": "duplicate",
+                "criteria": "Place wire",
+                "action": "place",
+                "position": [40, 64, 6],
+                "block": "minecraft:redstone_wire",
+            }
+        ],
+    }
+    await loop.run({})
+    assert not jev.requests
+    assert actions.used == 0
+    assert manifest.data["loop"]["reason"] == "planner_validation_exhausted"
+    assert "already verified" in manifest.data["loop"]["validation_reason"]

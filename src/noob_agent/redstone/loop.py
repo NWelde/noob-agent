@@ -117,6 +117,9 @@ class TrialLoop:
         *,
         check: Callable[[Actions], dict[str, Any]] | None = None,
         require_module_grading: bool = False,
+        full_machine_verification: bool = False,
+        strict_module_gate: bool = False,
+        batch_construction: bool = False,
         stop_after_module: Literal["register"] | None = None,
         register_workshop: bool = False,
         task: Literal["computer", "lamp_repair"] = "computer",
@@ -129,6 +132,8 @@ class TrialLoop:
             raise ValueError("Loop requires a fresh session or a saved continuation")
         self.manifest, self.actions, self.planner, self.jev = manifest, actions, planner, jev
         self.contract = actions.contract
+        self.strict_module_gate = strict_module_gate
+        self.batch_construction = batch_construction
         if task == "lamp_repair" and require_module_grading:
             raise ValueError("Lamp repair demo does not use computer module grading")
         self.context = PlannerContext(
@@ -159,6 +164,13 @@ class TrialLoop:
         ):
             self.checker.load_state(resume_state.get("checker", {}))
         self.require_module_grading = require_module_grading
+        self.full_machine_verification = full_machine_verification
+        if (resume_state or {}).get("machine_phase") is True:
+            if not full_machine_verification:
+                raise ValueError("Machine-phase continuation requires full verification")
+            self.require_module_grading = False
+            self.context.require_module_grading = False
+            self.context.machine_phase = True
         if stop_after_module is not None and not require_module_grading:
             raise ValueError("Module checkpoint requires behavioral module grading")
         self.stop_after_module = stop_after_module
@@ -344,7 +356,8 @@ class TrialLoop:
                         self.context.feedback(
                             {
                                 "readiness_reminder": (
-                                    "Assess readiness for load, hold and reset checks. "
+                                    "Assess readiness for load, hold and reset che"
+                                    "cks. "
                                     "Request grading when ready; otherwise continue "
                                     "building the missing hardware."
                                 )
@@ -359,13 +372,18 @@ class TrialLoop:
                         update={
                             "prompt": json.dumps(prompt, allow_nan=False),
                             "system": (
-                                "Prioritize the unresolved module failures in the prompt. "
+                                "Prioritize the unresolved module failures in "
+                                "the prompt. "
                                 "The failures describe the last inspection "
                                 "and may predate repairs. "
-                                "Compare them with latest_verified_layout before acting. "
-                                "If the expected hardware is already present, request a new "
-                                "module inspection instead of breaking or replacing it again. "
-                                "Otherwise repair the specific failed interface or behavior "
+                                "Compare them with latest_verified_layout befo"
+                                "re acting. "
+                                "If the expected hardware is already present, "
+                                "request a new "
+                                "module inspection instead of breaking or repl"
+                                "acing it again. "
+                                "Otherwise repair the specific failed interfac"
+                                "e or behavior "
                                 "before unrelated wiring, then request grading. " + request.system
                             ),
                         }
@@ -374,24 +392,41 @@ class TrialLoop:
                     request = request.model_copy(
                         update={
                             "system": (
-                                "This run targets ONLY an independently verified "
+                                "This run targets ONLY an independently verifi"
+                                "ed "
                                 "four-bit register. "
-                                "Do not build arithmetic, PC, program storage or output modules. "
-                                "Finish your own register design in its existing location. "
-                                "It must load every value 0..15 on STEP, retain it without STEP, "
-                                "and clear all bits on reset. Build actual data input controls, "
-                                "four probes, reset and STEP before requesting grading. "
-                                "The grader supplies a two-tick STEP pulse for each load "
-                                "and samples after settling. STEP being low at the settled "
-                                "readback is expected; it does not imply a missing pulse. "
-                                "Before repeating a failed repair, observe and trace the "
-                                "data input, stored bit, STEP gate and output path. "
-                                "Identify the first observed point where the signal differs "
-                                "from your design and repair that point. Do not alternate "
-                                "wire and torch at the same cell without new diagnostic "
-                                "evidence. A direct input-to-lamp connection alone cannot "
-                                "satisfy retention: identify where your circuit stores each "
-                                "bit and how STEP controls updates while reset clears it. "
+                                "Do not build arithmetic, PC, program storage "
+                                "or output modules. "
+                                "Finish your own register design in its existi"
+                                "ng location. "
+                                "It must load every value 0..15 on STEP, retai"
+                                "n it without STEP, "
+                                "and clear all bits on reset. Build actual dat"
+                                "a input controls, "
+                                "four probes, reset and STEP before requesting"
+                                " grading. "
+                                "The grader supplies a two-tick STEP pulse for"
+                                " each load "
+                                "and samples after settling. STEP being low at"
+                                " the settled "
+                                "readback is expected; it does not imply a mis"
+                                "sing pulse. "
+                                "Before repeating a failed repair, observe and"
+                                " trace the "
+                                "data input, stored bit, STEP gate and output "
+                                "path. "
+                                "Identify the first observed point where the s"
+                                "ignal differs "
+                                "from your design and repair that point. Do no"
+                                "t alternate "
+                                "wire and torch at the same cell without new d"
+                                "iagnostic "
+                                "evidence. A direct input-to-lamp connection a"
+                                "lone cannot "
+                                "satisfy retention: identify where your circui"
+                                "t stores each "
+                                "bit and how STEP controls updates while reset"
+                                " clears it. "
                                 "Continue repairing this register until "
                                 "its behavioral suite passes. " + request.system
                             )
@@ -431,7 +466,11 @@ class TrialLoop:
                 duplicate_placement_ids: set[str] = set()
                 try:
                     intention = validate_intention(json.loads(response.text), self.contract)
-                    ConstructionExecution(intention.actions)
+                    if self.strict_module_gate:
+                        from noob_agent.redstone.module_gate import admit
+
+                        admit(intention, self.manifest.data["milestone_4"]["modules"])
+                    ConstructionExecution(intention.actions, verified_layout=self.layout)
                     if intention.register_bit_check is not None and (
                         not self.register_workshop
                         or intention.actions
@@ -440,7 +479,8 @@ class TrialLoop:
                         or intention.module_inspection.module != "register"
                     ):
                         raise ValueError(
-                            "A register bit diagnostic requires workshop mode, a register "
+                            "A register bit diagnostic requires workshop m"
+                            "ode, a register "
                             "declaration, and no other request or actions"
                         )
                     if (
@@ -477,8 +517,10 @@ class TrialLoop:
                             )
                             if not allowed:
                                 raise ValueError(
-                                    "Lamp repair demo permits observations of the three "
-                                    "fixture cells, lever interaction, and redstone wire "
+                                    "Lamp repair demo permits observations of the "
+                                    "three "
+                                    "fixture cells, lever interaction, and redston"
+                                    "e wire "
                                     "placement at the open connection only."
                                 )
                     if self.require_module_grading:
@@ -487,15 +529,24 @@ class TrialLoop:
                             for offer in intention.actions
                             if offer.action == "break"
                         }
+                        observed_cells = {
+                            tuple(c["position"]): c for c in self.layout.to_jsonable()
+                        }
                         for offer in intention.actions:
                             if offer.action != "place" or offer.block is None:
                                 continue
                             placement_cell = tuple(offer.position)
+                            observed_cell = observed_cells.get(placement_cell, {})
                             state = (offer.block, tuple(sorted((offer.properties or {}).items())))
-                            if (
-                                placement_cell not in removed_cells
-                                and self.placed_cells.get(placement_cell) == state
-                            ):
+                            already_verified = (
+                                self.placed_cells.get(placement_cell) == state
+                                or observed_cell.get("name") == offer.block
+                                and all(
+                                    observed_cell.get("properties", {}).get(k) == v
+                                    for k, v in (offer.properties or {}).items()
+                                )
+                            )
+                            if placement_cell not in removed_cells and already_verified:
                                 duplicate_placement_ids.add(offer.id)
                         if (
                             duplicate_placement_ids
@@ -510,8 +561,10 @@ class TrialLoop:
                             )
                             placement_cell = tuple(offer.position)
                             raise ValueError(
-                                "All offered placements are already verified; repeated "
-                                f"block at x {placement_cell[0]} y {placement_cell[1]} z {placement_cell[2]}. "
+                                "All offered placements are already verified; "
+                                "repeated "
+                                f"block at x {placement_cell[0]} y {placement_cell[1]} "
+                                f"z {placement_cell[2]}. "
                                 "Change the circuit or request grading."
                             )
                         minimum_actions = sum(
@@ -520,7 +573,8 @@ class TrialLoop:
                         )
                         if intention.max_actions < minimum_actions:
                             raise ValueError(
-                                "max_actions cannot cover offered actions and readbacks; "
+                                "max_actions cannot cover offered actions and "
+                                "readbacks; "
                                 "omit it for default 256 or offer fewer actions."
                             )
                         if (
@@ -533,23 +587,26 @@ class TrialLoop:
                             )
                         ):
                             raise ValueError(
-                                "No signal or control block exists yet; include a lever, "
-                                "wire, torch, repeater, comparator, or lamp with support."
+                                "No signal or control block exists yet; includ"
+                                "e a lever, "
+                                "wire, torch, repeater, comparator, or lamp wi"
+                                "th support."
                             )
                         requested_declaration = intention.module_inspection
                         if self.context.force_grading and (
                             requested_declaration is None or intention.actions
                         ):
                             raise ValueError(
-                                "Construction limit reached; return a complete behavioral "
+                                "Construction limit reached; return a complete"
+                                " behavioral "
                                 "module_inspection with empty actions now."
                             )
                         if requested_declaration is not None:
                             recipe_help = {
                                 "register": "recipe_templates.load for load:0..15",
-                                "arithmetic": "recipe_templates.load and add plus recipes.out",
+                                "arithmetic": ("recipe_templates.load and add plus recipes.out"),
                                 "storage": "recipe_templates.address and write",
-                                "output": "recipe_templates.load and add plus recipes.out",
+                                "output": ("recipe_templates.load and add plus recipes.out"),
                             }
                             for key in sorted(required_recipes(requested_declaration.module)):
                                 try:
@@ -573,7 +630,8 @@ class TrialLoop:
                     raw_reason = str(error)
                     if raw_reason == "Target outside inclusive build bounds":
                         raw_reason = (
-                            "Target outside inclusive build bounds; use x=0..95, "
+                            "Target outside inclusive build bounds; use x="
+                            "0..95, "
                             "y=64..95, z=0..95 for every offered action."
                         )
                     reason = (
@@ -659,7 +717,23 @@ class TrialLoop:
                     self.manifest.observed(skipped_event, skipped)
                     results.append(skipped)
                 repair = False
+                section_selected = False
                 while offers:
+                    if (
+                        self.batch_construction
+                        and self.clock() < self.deadline
+                        and (
+                            self.clock() >= (self.intention_deadline or self.deadline)
+                            or self.actions.used - self.intention_start >= self.intention_max
+                        )
+                    ):
+                        results.append(
+                            {
+                                "deferred": "action_admission",
+                                "reason": "section budget ended before next primitive",
+                            }
+                        )
+                        break
                     eligible = execution.eligible()
                     blocked_repairs = []
                     repair_context = self._repair_context()
@@ -698,54 +772,86 @@ class TrialLoop:
                         },
                         criteria,
                     )
-                    gateway_retries = 0
-                    while True:
-                        if self.last_jev_started is not None:
-                            delay = self.jev_min_interval_seconds - (
-                                self.clock() - self.last_jev_started
-                            )
-                            if delay > 0:
-                                if delay >= self.remaining():
-                                    raise LoopLimit("Jev pacing exceeds intention time")
-                                await asyncio.sleep(delay)
-                        self.charge("jev_calls")
-                        event = self.manifest.attempt("jev_call", jev_request)
-                        try:
-                            self.last_jev_started = self.clock()
-                            answer = self.jev.evaluate(
-                                jev_request, timeout=min(30, self.remaining())
-                            )
-                        except JevError as error:
-                            if (
-                                (error.diagnostic or {}).get("name") == "SelectionTimeout"
-                                and self.intention_deadline is not None
-                                and self.clock() >= self.intention_deadline
-                                and self.clock() < self.deadline
-                            ):
-                                exhausted = {
-                                    "provider_error": error.diagnostic,
-                                    "intention_time_exhausted": True,
-                                    "guidance": "Continue unfinished work in the next intention.",
-                                }
-                                self.manifest.observed(event, exhausted)
-                                results.append(exhausted)
-                                answer = None
-                                break
-                            if (error.diagnostic or {}).get(
-                                "statusCode"
-                            ) != 503 or gateway_retries >= JEV_HTTP_503_RETRIES_PER_SELECTION:
-                                raise
-                            gateway_retries += 1
-                            self.manifest.observed(
-                                event,
-                                {"provider_error": error.diagnostic, "retry_scheduled": True},
-                            )
-                            continue
-                        self.manifest.observed(event, answer)
-                        break
+                    if self.batch_construction and section_selected:
+                        # Explicit assisted-production authorization: execute the
+                        # next dependency-ready primitive in planner order. This
+                        # is not a provider response or a Jev call.
+                        chosen = next(iter(eligible))
+                        event = self.manifest.attempt(
+                            "construction_batch_selection",
+                            {
+                                "action_id": chosen,
+                                "eligible_ids": list(eligible),
+                                "method": "dependency-ready planner order after first Je"
+                                "v selection",
+                            },
+                        )
+                        answer = {"answers": {"action": {"choice": chosen}}}
+                        self.manifest.observed(event, {"action_id": chosen, "provider_call": False})
+                    else:
+                        gateway_retries = 0
+                        while True:
+                            if self.last_jev_started is not None:
+                                delay = self.jev_min_interval_seconds - (
+                                    self.clock() - self.last_jev_started
+                                )
+                                if delay > 0:
+                                    if delay >= self.remaining():
+                                        raise LoopLimit("Jev pacing exceeds intention time")
+                                    await asyncio.sleep(delay)
+                            self.charge("jev_calls")
+                            event = self.manifest.attempt("jev_call", jev_request)
+                            try:
+                                self.last_jev_started = self.clock()
+                                answer = self.jev.evaluate(
+                                    jev_request, timeout=min(30, self.remaining())
+                                )
+                            except JevError as error:
+                                if (
+                                    (error.diagnostic or {}).get("name") == "SelectionTimeout"
+                                    and self.intention_deadline is not None
+                                    and self.clock() >= self.intention_deadline
+                                    and self.clock() < self.deadline
+                                ):
+                                    exhausted = {
+                                        "provider_error": error.diagnostic,
+                                        "intention_time_exhausted": True,
+                                        "guidance": (
+                                            "Continue unfinished work in the next intention."
+                                        ),
+                                    }
+                                    self.manifest.observed(event, exhausted)
+                                    results.append(exhausted)
+                                    answer = None
+                                    break
+                                if (error.diagnostic or {}).get(
+                                    "statusCode"
+                                ) != 503 or gateway_retries >= JEV_HTTP_503_RETRIES_PER_SELECTION:
+                                    raise
+                                gateway_retries += 1
+                                self.manifest.observed(
+                                    event,
+                                    {"provider_error": error.diagnostic, "retry_scheduled": True},
+                                )
+                                continue
+                            self.manifest.observed(event, answer)
+                            break
                     if answer is None:
                         break
+                    if (
+                        self.batch_construction
+                        and self.clock() < self.deadline
+                        and self.clock() >= (self.intention_deadline or self.deadline)
+                    ):
+                        results.append(
+                            {
+                                "deferred": "action_admission",
+                                "reason": "section ended during selection; no primitive dispatched",
+                            }
+                        )
+                        break
                     self.remaining()
+                    section_selected = True
                     choice = selected_action(answer, jev_request)
                     if choice == "__finish__":
                         break
@@ -756,6 +862,10 @@ class TrialLoop:
                     if self.require_module_grading and offer.action != "observe":
                         milestone = self.manifest.data["milestone_4"]
                         prior_modules = sorted(milestone["modules"])
+                        if self.strict_module_gate:
+                            from noob_agent.redstone.module_gate import affected_modules
+
+                            prior_modules = sorted(affected_modules(offer.position, prior_modules))
                         if prior_modules:
                             invalidation = self.manifest.attempt(
                                 "milestone_4_invalidation",
@@ -766,7 +876,8 @@ class TrialLoop:
                                 {"reason": "construction_action_attempted"},
                             )
                         milestone["construction_epoch"] += 1
-                        milestone["modules"] = {}
+                        for prior_module in prior_modules:
+                            milestone["modules"].pop(prior_module, None)
                         milestone["status"] = "pending"
                         self.manifest.save()
                     try:
@@ -849,7 +960,13 @@ class TrialLoop:
                                         after["name"],
                                         tuple(sorted(after.get("properties", {}).items())),
                                     )
-                    except ActionAdmissionDenied as error:
+                    except (ActionAdmissionDenied, LoopLimit) as error:
+                        if isinstance(error, LoopLimit) and not (
+                            self.batch_construction
+                            and self.clock() < self.deadline
+                            and self.actions.used < self.actions.maximum
+                        ):
+                            raise
                         result = {
                             "id": choice,
                             "deferred": "action_admission",
@@ -895,8 +1012,10 @@ class TrialLoop:
                             "id": choice,
                             "rejected": "invalid_block_state",
                             "guidance": (
-                                "Check exact block property names and JSON value types. "
-                                "Boolean properties require JSON true/false, not quoted "
+                                "Check exact block property names and JSON val"
+                                "ue types. "
+                                "Boolean properties require JSON true/false, n"
+                                "ot quoted "
                                 "strings; omit properties unless required."
                             ),
                         }
@@ -935,6 +1054,56 @@ class TrialLoop:
                     self.manifest.save()
                     self.remaining()
                 inspection: dict[str, Any] = {}
+                if intention.machine_inspection is not None:
+                    if not self.full_machine_verification or not self.context.machine_phase:
+                        raise ValueError(
+                            "Full machine interface offered before module checks passed"
+                        )
+                    from noob_agent.redstone.machine import verify_programs
+                    from noob_agent.redstone.machine_world import ServerMachineWorld
+
+                    interface = intention.machine_inspection.model_dump(mode="json")
+                    if self.strict_module_gate:
+                        from noob_agent.redstone.modules import validate_declaration
+
+                        milestone = self.manifest.data["milestone_4"]
+                        failed_rechecks = []
+                        for prior_module, acceptance in list(milestone["modules"].items()):
+                            recheck_declaration = validate_declaration(
+                                acceptance["declaration"], self.contract
+                            )
+                            recheck = self.manifest.attempt(
+                                "module_integration_recheck", {"module": prior_module}
+                            )
+                            evidence = grade_module(
+                                self.actions, recheck_declaration, fail_fast=True
+                            )
+                            self.manifest.observed(recheck, evidence)
+                            if evidence.get("behavioral_passed") is not True:
+                                failed_rechecks.append(prior_module)
+                                milestone["modules"].pop(prior_module, None)
+                                self.failed_module_checks[prior_module] = {
+                                    "failed_checks": evidence.get("failed_checks", []),
+                                    "declaration": acceptance["declaration"],
+                                }
+                        if failed_rechecks:
+                            self.require_module_grading = True
+                            self.context.require_module_grading = True
+                            self.context.machine_phase = False
+                            self.context.grading_enabled = True
+                            milestone["status"] = "pending"
+                            self.manifest.save()
+                            observation = {"integration_rechecks_failed": failed_rechecks}
+                            continue
+                    event = self.manifest.attempt("full_machine_grade", {"interface": interface})
+                    inspection = verify_programs(ServerMachineWorld(self.actions, interface))
+                    self.manifest.observed(event, inspection)
+                    self.manifest.data["full_machine_verification"] = inspection
+                    self.manifest.save()
+                    if inspection["passed"]:
+                        self.manifest.data["loop"] = {"status": "full_machine_behavior_passed"}
+                        break
+                    repair = True
                 if intention.module_inspection is not None and not admission_deferred:
                     declaration = intention.module_inspection.model_dump(mode="json")
                     module = intention.module_inspection.module
@@ -953,7 +1122,12 @@ class TrialLoop:
                         "module_regrade_blocked" if repeated_grade else "module_inspection",
                         {"module": module},
                     )
+                    behavioral = bool(
+                        intention.module_inspection.recipes
+                        or intention.module_inspection.recipe_templates
+                    )
                     if repeated_grade:
+                        assert prior_failure is not None
                         inspection = {
                             "module": module,
                             "scope": "repair_guard",
@@ -962,8 +1136,10 @@ class TrialLoop:
                             "failed_checks": prior_failure["failed_checks"],
                             "repair_required": True,
                             "reason": (
-                                "This exact module declaration already failed against the "
-                                "same verified layout. Make a relevant physical repair "
+                                "This exact module declaration already failed "
+                                "against the "
+                                "same verified layout. Make a relevant physica"
+                                "l repair "
                                 "before requesting this grade again."
                             ),
                         }
@@ -977,7 +1153,7 @@ class TrialLoop:
                             # The diagnostic checks its selected data path directly
                             # through the trusted grader. Do not pre-grade all four
                             # probes or let that diagnostic imply interface readiness.
-                            readiness = {
+                            readiness: dict[str, Any] = {
                                 "module": "register",
                                 "scope": "one_bit_diagnostic_prerequisites",
                                 "valid": True,
@@ -1007,7 +1183,8 @@ class TrialLoop:
                         layout_mismatches = (
                             self._declaration_layout_mismatches(declaration)
                             if intention.register_bit_check is None
-                            and self.require_module_grading and "hardware" in readiness
+                            and self.require_module_grading
+                            and "hardware" in readiness
                             else []
                         )
                         readiness["verified_layout_mismatches"] = layout_mismatches
@@ -1058,6 +1235,7 @@ class TrialLoop:
                                 "construction_epoch": milestone["construction_epoch"],
                                 "grader_event": event,
                                 "check_count": len(inspection["checks"]),
+                                "declaration": declaration,
                             }
                         if set(milestone["modules"]) == PUBLIC_MODULES:
                             milestone["status"] = (
@@ -1176,6 +1354,21 @@ class TrialLoop:
                     in {"checks_passed", "workshop_modules_passed"}
                     and not repair
                 ):
+                    if self.full_machine_verification:
+                        self.require_module_grading = False
+                        self.context.require_module_grading = False
+                        self.context.machine_phase = True
+                        self.context.grading_enabled = False
+                        self.context.feedback(
+                            {
+                                "full_machine_integration_required": True,
+                                "passed_modules": sorted(PUBLIC_MODULES),
+                                "verified_layout": self.layout.to_jsonable(),
+                            }
+                        )
+                        self.manifest.data["machine_phase"] = True
+                        self.manifest.save()
+                        continue
                     self.manifest.data["loop"] = {
                         "status": (
                             "workshop_modules_passed"
@@ -1229,8 +1422,10 @@ class TrialLoop:
                 self.manifest.save()
             reasons = (
                 [
-                    "All four public modules passed on one construction epoch; "
-                    "trusted final reset still required for milestone 4 acceptance",
+                    "All four public modules passed on one constru"
+                    "ction epoch; "
+                    "trusted final reset still required for milest"
+                    "one 4 acceptance",
                     "Full-machine independent grading and recording pending; model success false",
                 ]
                 if self.manifest.data.get("milestone_4", {}).get("status") == "checks_passed"

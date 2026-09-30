@@ -216,16 +216,23 @@ class ConstructionExecution:
 
     def _check_cycles(self) -> None:
         visiting: set[str] = set()
+        path: list[str] = []
         visited: set[str] = set()
 
         def visit(action_id: str) -> None:
             if action_id in visiting:
-                raise DependencyError("Dependency cycle")
+                cycle = path[path.index(action_id):] + [action_id]
+                details = " -> ".join(
+                    f"{node}@{list(_pos(self.actions[node]) or ())}" for node in cycle
+                )
+                raise DependencyError(f"Dependency cycle: {details}")
             if action_id in visited:
                 return
             visiting.add(action_id)
-            for dep in self.dependencies[action_id]:
+            path.append(action_id)
+            for dep in sorted(self.dependencies[action_id]):
                 visit(dep)
+            path.pop()
             visiting.remove(action_id)
             visited.add(action_id)
 

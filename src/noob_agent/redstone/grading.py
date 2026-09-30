@@ -40,6 +40,7 @@ class GraderControl:
         *,
         max_ticks: int = 1600,
         max_commands: int = 4096,
+        normal_speed: bool = False,
     ):
         if type(max_ticks) is not int or not 1 <= max_ticks <= 96000:
             raise ValueError("Invalid grading tick budget")
@@ -48,6 +49,9 @@ class GraderControl:
         if actions.manifest.data.get("timeline_resources", {}).get("state", "clean") != "clean":
             raise ValueError("Pending timeline resources require explicit recovery")
         self.actions = actions
+        if type(normal_speed) is not bool:
+            raise ValueError("Invalid normal-speed mode")
+        self.normal_speed = normal_speed
         self.declaration = validate_declaration(declaration.model_dump(), actions.contract)
         prior = actions.manifest.data.get("grading_budget", {})
         if prior and (prior["tick_limit"] != max_ticks or prior["command_limit"] != max_commands):
@@ -62,7 +66,7 @@ class GraderControl:
         self._save_budget()
 
     def _save_budget(self) -> None:
-        self.actions.manifest.data["grading_budget"] = {
+        budget = {
             "operations": self.operations,
             "commands": self.commands,
             "command_limit": self.max_commands,
@@ -71,8 +75,19 @@ class GraderControl:
             "tick_limit": self.max_ticks,
             "shared_action_limit": self.actions.maximum,
             "namespace": self.namespace,
+            "normal_speed": self.normal_speed,
         }
-        self.actions.manifest.save()
+        manifest = self.actions.manifest
+        manifest.data["grading_budget"] = budget
+        if not getattr(manifest, "journal_grading_budgets", False):
+            manifest.save()
+            return
+        programs = manifest.data.get("grading_programs", {})
+        event = manifest.attempt(
+            "grading_budget_checkpoint",
+            {"grading_budget": dict(budget), "grading_programs": json.loads(json.dumps(programs))},
+        )
+        manifest.observed(event, {"world_actions": 0})
 
     def _run(
         self, op: str, request: dict[str, Any], body: Callable[[], dict[str, Any]]
@@ -551,7 +566,11 @@ class GraderControl:
             self._command(f"scoreboard objectives add {self.objective} dummy")
             self._command(f"scoreboard players set done {self.objective} 0")
             self._command(f"function {self.namespace}:t0")
-            if isinstance(self.actions.transport, RconClient) and duration > 0:
+            if (
+                isinstance(self.actions.transport, RconClient)
+                and duration > 0
+                and not self.normal_speed
+            ):
                 # Sprint executes the same game ticks and scheduled functions as
                 # normal play. Record intent before delivery so recovery stops
                 # a sprint whose command outcome became uncertain.

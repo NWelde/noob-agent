@@ -58,8 +58,32 @@ async function dispatch(bot, request) {
   const keys = {
     baseline: ['op'], settle: ['op'], player: ['op'], block: ['op', 'position'], interact: ['op', 'position'],
     validate: ['op', 'name', 'properties'],
+    physical: ['op', 'action', 'position', 'name', 'properties'],
+    hardware: ['op'],
+    animate: ['op','position','name'],
   }[request.op];
   if (!keys || Object.keys(request).some(k => !keys.includes(k))) throw Error('invalid_request');
+  if(request.op==='animate'){
+    position(request.position);
+    if(request.name&&!contract.permitted_blocks.includes(request.name))throw Error('invalid_block');
+    return await require('./server_visual.js').animate(bot,request);
+  }
+  if (request.op === 'physical') {
+    position(request.position);
+    if (request.action === 'place') validateBlock(bot.registry, request.name, request.properties || {});
+    if (!['place', 'break', 'interact', 'walk'].includes(request.action)) throw Error('invalid_action');
+    try {
+      return await require('./physical_demo.js').physicalAction(bot, request);
+    } catch (error) {
+      // These exact locally-authored errors occur before place/dig/activation.
+      // Transport or post-dispatch failures still propagate as uncertain.
+      const preflight = ['missing_support', 'missing_inventory', 'occupied_target',
+        'creative_required', 'attachment_facing_required', 'empty_target',
+        'walking_stalled', 'walking_deadline', 'walking_vertical_unreachable'];
+      if (preflight.includes(error.message)) return { rejected: error.message, target: request.position };
+      throw error;
+    }
+  }
   if (request.op === 'settle') {
     await bot.waitForTicks(10);
     return { settled: true };
@@ -76,6 +100,23 @@ async function dispatch(bot, request) {
       layers.push({y, sha256: hash.digest('hex')});
     }
     return {layers, blocks};
+  }
+  if(request.op==='hardware'){
+    const transient={redstone_wire:['power'],redstone_lamp:['lit'],lever:['powered'],
+      stone_button:['powered'],repeater:['powered','locked'],comparator:['powered'],
+      redstone_torch:['lit'],redstone_wall_torch:['lit']};
+    const hash=createHash('sha256');let blocks=0;const illegal=[];
+    for(let y=64;y<=95;y++)for(let x=0;x<=95;x++)for(let z=0;z<=95;z++){
+      const state=readBlock(bot,new Vec3(x,y,z));
+      if(state.name!=='minecraft:air'&&!contract.permitted_blocks.includes(state.name)){
+        if(illegal.length<32)illegal.push({position:state.position,name:state.name});
+      }
+      const dynamic=transient[state.name.slice(10)]||[];
+      const properties=Object.fromEntries(Object.entries(state.properties)
+        .filter(([key])=>!dynamic.includes(key)).sort(([a],[b])=>a.localeCompare(b)));
+      hash.update(JSON.stringify({position:state.position,name:state.name,properties})+'\n');blocks++;
+    }
+    return {full_region_sha256:hash.digest('hex'),blocks,illegal};
   }
   if (request.op === 'validate') return validateBlock(bot.registry, request.name, request.properties);
   if (request.op === 'player') {

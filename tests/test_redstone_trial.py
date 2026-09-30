@@ -325,3 +325,22 @@ def test_manual_inference_checkpoint_recovers_without_world_mutation():
             "events": [{"kind": "bounded_command", "outcome": "unknown"}, *evidence["events"]],
         }
     )
+
+
+def test_opt_in_compact_snapshot_preserves_rehydratable_event_evidence(tmp_path):
+    from noob_agent.redstone.trial import TrialManifest
+    manifest = TrialManifest(tmp_path)
+    event = manifest.attempt("read_fixture", {"position":[40,64,5]})
+    manifest.observed(event, {"powered":True})
+    manifest.save()
+    before = TrialManifest.load_data(manifest.path)
+    old_size = manifest.path.stat().st_size
+    manifest.compact_snapshots = True
+    manifest.save()
+    after = TrialManifest.load_data(manifest.path)
+    assert after == before
+    assert manifest.path.stat().st_size < old_size
+    next_event = manifest.attempt("read_fixture", {"position":[42,64,15]})
+    manifest.observed(next_event, {"power":10})
+    loaded = TrialManifest.load_data(manifest.path)
+    assert loaded['events'][next_event]['result'] == {"power":10}

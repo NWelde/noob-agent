@@ -11,8 +11,11 @@ machine.
 The active build is the Minecraft redstone computer described in
 [`hackathon_plan.md`](hackathon_plan.md). Infrastructure for resets, bounded
 construction, planner/Jev interaction, module checks, and trial records is in
-place. **No model-designed module has passed yet**, so the full computer demo is
-not complete. Current evidence and the next live checkpoint are in
+place. The retained assisted-production trial has passed the register suite;
+the complete stored-program computer and final video remain unverified. The
+[hackathon readiness checklist](docs/hackathon-readiness.md) provides an isolated
+verification command and the mandatory October 1 attendance details.
+Current evidence and the next live checkpoint are in
 [`docs/redstone-trials.md`](docs/redstone-trials.md).
 
 ### Working demo slice

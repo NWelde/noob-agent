@@ -181,3 +181,14 @@ def test_support_break_rejected_when_verified_attached_hardware_is_not_removed()
                 }
             ],
         )
+
+
+def test_cycle_diagnostic_names_ordered_actions_and_positions():
+    with pytest.raises(DependencyError) as exc:
+        ConstructionExecution([
+            action("a", "observe", [0, 64, 0], depends_on=["b"]),
+            action("b", "observe", [1, 64, 0], depends_on=["a"]),
+        ])
+    assert str(exc.value) == (
+        "Dependency cycle: a@[0, 64, 0] -> b@[1, 64, 0] -> a@[0, 64, 0]"
+    )
