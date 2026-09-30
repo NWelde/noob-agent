@@ -8,6 +8,8 @@ command -v npm >/dev/null
 uv sync --locked --group dev --group integrations
 npm ci
 npm --prefix src/noob_agent/connectors/minecraft_sidecar ci
+npm audit --omit=dev
+npm --prefix src/noob_agent/connectors/minecraft_sidecar audit --omit=dev
 uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest -q

@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .noob-agent/
+/docs/latest-readiness.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
