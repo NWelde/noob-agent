@@ -1,159 +1,149 @@
-# noob-agent
+# Noob Agent
 
-## Current project
+**Can an AI model build something that works, find its mistakes, and fix them?**
 
-An agent uses Minecraft Java 1.21.1 to design and build a programmable 4-bit
-redstone computer in a repeatable creative world. The planner proposes a circuit
-and bounded build intentions; Jev executes those actions and reports observed
-results. Independent in-world checks grade each module and the completed
-machine.
+Noob Agent tests this in Minecraft. It asks a model to build a small programmable
+computer from redstone, the game's wiring and logic parts. A bot carries out the
+actions. Separate tests check whether the circuit works.
 
-The active build is the Minecraft redstone computer described in
-[`hackathon_plan.md`](hackathon_plan.md). Infrastructure for resets, bounded
-construction, planner/Jev interaction, module checks, and trial records is in
-place. **No model-designed module has passed yet**, so the full computer demo is
-not complete. Current evidence and the next live checkpoint are in
-[`docs/redstone-trials.md`](docs/redstone-trials.md).
+This gives us a concrete way to test planning, tool use, and recovery from
+mistakes. We can inspect what the model built, what failed, and what it repaired.
 
-### Working demo slice
+[Code](https://github.com/NWelde/noob-agent) ·
+[W&B project and run traces](https://wandb.ai/nathanweldegiorgis731-minerva-university/Noob-agent/overview)
 
-For a live, judgeable result today, run the bounded seeded lamp repair:
+## The computer
 
-```sh
-set -a; source .env; set +a
-.venv/bin/python scripts/run_redstone_trial.py --trial provider --task lamp-repair \
-  --keep-agent-connected \
-  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
-  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
-```
+The project builds a 4-bit computer inside Minecraft Java 1.21.1. It has memory,
+arithmetic, stored instructions, and four lamps that show its output in binary.
+The computation happens in the redstone circuit.
 
-The harness places a lever and lamp with one wire gap; the agent must place the
-wire and operate the lever. The independent checker reads Minecraft state and
-requires the lamp to transition off → on → off. This demonstrates repair of a
-small seeded circuit only. The harness builds the endpoints, so this is not a
-model-built circuit and does not complete the 4-bit computer. A successful live
-run is recorded under `.noob-agent/redstone-trials/`.
+| Instruction | What it does |
+| --- | --- |
+| `LOAD n` | Store a number in the working register |
+| `ADD n` | Add a number; values wrap around at 16 |
+| `OUT` | Copy the result to the output lamps |
+| `HALT` | Stop execution and hold the result |
 
-Provider demos start or reuse one persistent Minecraft bot session by default.
-If a run stalls, the bot and partial build stay in the world; the next trial
-resets that same connection in place. Use `--disconnect-after-trial` only when
-you want the old disconnect behavior. Stop a persistent session deliberately
-with `.venv/bin/python scripts/run_redstone_trial.py --stop-agent`.
+The machine contract defines two programs for the same hardware:
 
-To continue the model-built register/computer attempt while keeping that same
-bot session alive between retries, run the provider task with `--task computer
---keep-agent-connected`. A normal new trial resets the owned build area through
-the existing bot session; `--resume` continues a stopped build after checking
-the bot and all cells the previous session touched.
+- `LOAD 3 → OUT → ADD 5 → OUT → HALT`: show **3, then 8**.
+- `LOAD 14 → OUT → ADD 5 → OUT → HALT`: show **14, then 3**.
 
-Both tasks automatically start a fresh session after a harness action or time
-limit, keeping the same world and saved feedback. Automatic continuation runs
-up to four sessions. If the limit is reached again, or the process itself is
-interrupted, use the manifest path printed by the run to continue it:
+Only the stored program changes between tests. See the
+[machine contract](docs/redstone-computer-contract.md) for the full specification.
 
-```sh
-.venv/bin/python scripts/run_redstone_trial.py --trial provider --task lamp-repair \
-  --resume .noob-agent/redstone-trials/<run-id>/manifest.json \
-  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
-  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
-```
+## Results and demo
 
-The new session restores the saved planner feedback and checks the current build
-in Minecraft before continuing. For the computer task, it tells the planner
-which touched blocks changed or disappeared, so it can repair them. The optional
-`--session-action-limit` sets a smaller per-session cap, which is useful for
-checking that restart works.
+Most modules now pass their checks, including arithmetic. The polished demo is
+ready; its viewing link will be added here.
 
-### Register submission checkpoint
+- **Memory:** the 4-bit register passed all 49 load, hold, and reset checks.
+- **Arithmetic:** checks pass in the latest build.
+- **Repair:** the agent repaired a seeded lamp circuit and passed independent
+  off → on → off checks.
+- **Recovery:** a lamp-repair run completed across four bounded sessions, with
+  verified resets.
 
-To preserve an agent-built register after its independent load/hold/reset suite passes:
+Module checks and full-program checks are recorded separately. The final
+computer test requires both programs to run on the same hardware and produce
+the expected outputs.
 
-```sh
-set -a; source .env; set +a
-.venv/bin/python scripts/run_redstone_trial.py --trial provider --task computer \
-  --keep-agent-connected --stop-after-module register \
-  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
-  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
-```
+The demonstration build used extra design and construction help. We keep its
+results separate from tests of an unaided model so comparisons stay fair.
+Earlier trial records include failed and partial runs.
 
-A passed `module_checkpoint` is register evidence only; the full computer grade remains
-unevaluated. Construction now continues past three intentions, with readiness reminders
-every twelve. Invalid recipe feedback identifies missing controls; exhausted validation
-records the last reason as `planner_validation_exhausted`. The bot preserves the build.
+## How it works
 
-The same `--resume <manifest.json>` command can manually recover a stopped Jev call
-or interrupted model inference, including interruption after a completed action readback. Recovery requires every unknown event to be a model
-call, a clean timeline, and a fresh player/build verification. Inference-error recovery
-rejects unknown world actions. Existing budget-limit continuations still reverify and
-reconcile the observed world before continuing. Historical inspection failures and the current verified
-layout stay in planner feedback until a new inspection resolves them.
+1. **Plan:** a model proposes a circuit and a small set of build actions.
+2. **Act:** Jev selects actions, and a Mineflayer bot places blocks and operates
+   controls.
+3. **Check:** separate tests read the Minecraft world and check circuit behavior.
+4. **Repair:** failures go back to the planner so it can revise the build.
+5. **Record:** the system saves decisions, actions, results, and errors.
 
-## Run checks
+A model saying “done” does not pass a test. The circuit must produce the right
+behavior in the game.
 
-Install the development environment and run the Python suite:
+## Why the system is ready for real use
+
+Agent runs can fail halfway through. Noob Agent is built to make those failures
+visible and recoverable:
+
+- Fixed task rules and build bounds keep each trial well defined.
+- Action, time, and model-call limits bound each run.
+- Saved trial records preserve failed actions and repair attempts.
+- A persistent bot keeps the partial build available after a stopped run.
+- Before resuming, the system checks the player and previously touched blocks.
+- Independent tests judge the result from world state.
+
+These features make the project useful as an evaluation system: judges and
+researchers can inspect how a result was reached, not just watch the final clip.
+
+## Tech stack
+
+| Part | Tools |
+| --- | --- |
+| Planning | DeepSeek through W&B Inference |
+| Action selection | Jev through the Vercel AI SDK |
+| Trial loop and validation | Python, asyncio, Pydantic, Typer |
+| Minecraft bot | Node.js, Mineflayer |
+| Environment | Minecraft Java 1.21.1 |
+| Traces and run records | W&B Weave, trial manifests, JSONL event journals |
+| Recording | Replay Mod |
+| Code checks | pytest, Node.js tests, Ruff, mypy |
+
+## Run a trial
+
+Use Python 3.11+, Node.js 22+, Java 21, and `uv`. Run these commands from the
+repository root:
 
 ```sh
 uv sync --group dev --group integrations
-uv run pytest
+npm ci
+npm --prefix src/noob_agent/connectors/minecraft_sidecar ci
 ```
 
-The Minecraft sidecar checks use Node.js. Run them with:
+Follow the [server setup guide](docs/minecraft-server.md) to create and start the
+dedicated Minecraft server. The trial server uses game port `25567` and RCON
+port `25577`.
+
+Put `WANDB_API_KEY` and `AI_GATEWAY_API_KEY` in a local `.env` file. Choose an
+available W&B model ID for `MODEL_ID` below.
+
+Start with the small lamp-repair task:
 
 ```sh
-cd src/noob_agent/connectors/minecraft_sidecar
-npm ci
-cd ../../../../
-npm install --no-save
+uv run --env-file .env python scripts/run_redstone_trial.py \
+  --trial provider --task lamp-repair \
+  --planner-model MODEL_ID \
+  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
+```
+
+For a computer trial, replace `--task lamp-repair` with `--task computer`.
+A fresh trial resets the owned build area. To continue a stopped trial, add
+`--resume .noob-agent/redstone-trials/<run-id>/manifest.json` with the same
+provider configuration.
+
+Provider runs keep the bot connected by default. To disconnect it deliberately:
+
+```sh
+uv run python scripts/run_redstone_trial.py --stop-agent
+```
+
+Run records are saved under `.noob-agent/redstone-trials/`. The
+[trial documentation](docs/redstone-trials.md) explains grading, limits, and
+recovery. The [memory demo guide](docs/memory-demo.md) covers the separate memory
+and wire-repair demonstration.
+
+## Check the code
+
+```sh
+uv run pytest
+uv run ruff check src tests scripts
+uv run mypy src
 node --test tests/redstone_sidecar.test.cjs tests/minecraft_obs_recorder.test.mjs
 npm run test:jev
 ```
 
-Run lint and type checks with:
-
-```sh
-uv run ruff check src tests scripts
-uv run mypy src
-```
-
-## Minecraft environment
-
-Read the Minecraft EULA before accepting it. The setup command installs a local
-vanilla server and the versioned Minecraft data packs. By default it targets
-`.noob-agent/redstone-server`, creates the flat `redstone-trials` world, and
-listens on port `25567` for the active redstone-computer demo:
-
-```sh
-uv run python scripts/setup_minecraft_server.py --accept-eula --player <minecraft-name>
-```
-
-Start the server using the command printed by setup. Operational details,
-including the dedicated trial server and ports, are in
-[`docs/minecraft-server.md`](docs/minecraft-server.md).
-
-The current connected trial command is:
-
-```sh
-uv run python scripts/run_redstone_trial.py --trial fixture
-```
-
-This scripted fixture checks the connected build/grade/repair/reset plumbing.
-It is not evidence of a model-designed circuit or a successful computer. Live
-provider trials require explicit provider configuration; their latest status
-and limitations are recorded in [`docs/redstone-trials.md`](docs/redstone-trials.md).
-
-## Project map
-
-The recording-ready redstone memory demo and replay instructions are in
-[`docs/memory-demo.md`](docs/memory-demo.md). It demonstrates
-physical four-bit storage, a powered display, and Jev-selected wire repair using
-a tested circuit plan. It is separate from the full-computer acceptance trial.
-
-- [`hackathon_plan.md`](hackathon_plan.md): approved scope and milestone order
-- [`docs/redstone-computer-contract.md`](docs/redstone-computer-contract.md):
-  observable computer behavior
-- [`docs/redstone-trials.md`](docs/redstone-trials.md): implementation and live
-  trial evidence
-- [`docs/minecraft-server.md`](docs/minecraft-server.md): local server setup
-- `src/noob_agent/redstone/`: bounded planner/Jev loop and independent graders
-- `scripts/run_redstone_trial.py`: connected trial and infrastructure checks
-- `scenarios/minecraft/`: versioned Minecraft fixtures and contract
+Code tests check the software. Live Minecraft tests check the circuit.
