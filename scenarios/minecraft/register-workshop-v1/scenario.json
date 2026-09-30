@@ -1,0 +1,15 @@
+{
+  "id": "register-workshop-v1",
+  "profile": "register_workshop",
+  "version": 1,
+  "setup": {
+    "support_block": "minecraft:stone",
+    "support_dimensions": [9, 1, 9],
+    "clear_headroom": 4,
+    "marker": "minecraft:glass",
+    "provides_circuit": false,
+    "provides_blueprint": false
+  },
+  "baseline_comparable": false,
+  "frozen_template": "redstone-computer-v1"
+}

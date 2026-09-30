@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 import re
 import time
 from collections.abc import Callable
@@ -29,6 +31,89 @@ class InvalidBlockState(ValueError):
     """Completed registry validation rejected a proposed placement before mutation."""
 
 
+class ActionAdmissionDenied(RuntimeError):
+    """A proposed mutation did not fit in the current intention's reserved budget."""
+
+
+class ActionEstimate:
+    """A conservative upper bound for one bounded action and its readback."""
+
+    def __init__(self, primitives: int, seconds: float) -> None:
+        self.primitives = primitives
+        self.seconds = seconds
+
+
+# Deliberately conservative: these are common opaque full cubes with a flat top.
+# Slabs, stairs, fences, glass, and other partial/transparent shapes are omitted.
+_WIRE_SUPPORT_BLOCKS = frozenset(
+    f"minecraft:{name}"
+    for name in (
+        "stone",
+        "granite",
+        "polished_granite",
+        "diorite",
+        "polished_diorite",
+        "andesite",
+        "polished_andesite",
+        "deepslate",
+        "cobbled_deepslate",
+        "polished_deepslate",
+        "cobblestone",
+        "mossy_cobblestone",
+        "dirt",
+        "coarse_dirt",
+        "rooted_dirt",
+        "grass_block",
+        "podzol",
+        "mycelium",
+        "clay",
+        "gravel",
+        "sand",
+        "red_sand",
+        "sandstone",
+        "red_sandstone",
+        "bricks",
+        "stone_bricks",
+        "mossy_stone_bricks",
+        "obsidian",
+        "bedrock",
+        "netherrack",
+        "end_stone",
+        "nether_bricks",
+        "blackstone",
+        "oak_planks",
+        "spruce_planks",
+        "birch_planks",
+        "jungle_planks",
+        "acacia_planks",
+        "dark_oak_planks",
+        "mangrove_planks",
+        "cherry_planks",
+        "bamboo_planks",
+        "crimson_planks",
+        "warped_planks",
+    )
+)
+
+
+def _safe_actual_support(support: dict[str, Any]) -> dict[str, Any]:
+    name = support.get("name")
+    safe_name = (
+        name if isinstance(name, str) and re.fullmatch(r"minecraft:[a-z0-9_]+", name) else "unknown"
+    )
+    raw_properties = support.get("properties", {})
+    safe_properties: dict[str, str | bool | int] = {}
+    if isinstance(raw_properties, dict):
+        for key, value in raw_properties.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[a-z_]+", key):
+                continue
+            if type(value) is bool or type(value) is int:
+                safe_properties[key] = value
+            elif isinstance(value, str) and re.fullmatch(r"[a-z0-9_]+", value.lower()):
+                safe_properties[key] = value.lower()
+    return {"name": safe_name, "properties": safe_properties}
+
+
 class Actions:
     def __init__(
         self,
@@ -51,6 +136,79 @@ class Actions:
         self.used = 0
         self.stopped = False
         self.guard: Callable[[bool], None] | None = None
+        self.admit: Callable[[ActionEstimate], None] | None = None
+        # The loop can scope its intention guard to action admission while still
+        # enforcing global wall and primitive deadlines throughout the action.
+        self.action_active = False
+        self.physical_demo = os.environ.get("NOOB_PHYSICAL_ACTIONS") == "1"
+        self.server_visual = os.environ.get("NOOB_SERVER_VISUALS") == "1"
+        if self.physical_demo and self.server_visual:
+            raise ValueError("Select one construction transport")
+
+    def estimate(
+        self,
+        action: str,
+        position: list[int],
+        block: str | None = None,
+        properties: dict[str, Any] | None = None,
+    ) -> ActionEstimate:
+        """Return the maximum primitive and bounded I/O cost for ``apply``.
+
+        Counts include the outer action record, all preflight reads, the world
+        command/interact, settling, and final readback. Persistent sidecar
+        interaction reconciliation can add three charged recovery operations.
+        """
+        if action == "observe":
+            primitive_count, reader_calls = 1, 1
+        elif action == "interact":
+            primitive_count, reader_calls = 10, 7
+            if getattr(self.reader, "keep_connected", False):
+                primitive_count += 3
+                reader_calls += 3
+        elif action == "break":
+            primitive_count, reader_calls = 5, 3
+        elif action == "place":
+            is_wire = block == "minecraft:redstone_wire"
+            primitive_count = 6 + int(is_wire)
+            reader_calls = 4 + int(is_wire)
+        else:
+            # Invalid proposals still consume their bounded outer attempt.
+            primitive_count, reader_calls = 1, 0
+        if self.physical_demo and action in {"place", "break", "interact"}:
+            primitive_count += 2  # Physical action and journaled movement evidence.
+            reader_calls += 1
+        reader_timeout = self._timeout(self.reader, "timeout", 12.0)
+        command_timeout = self._timeout(self.transport, "timeout", 5.0)
+        command_calls = 2 if action == "interact" else int(action in {"place", "break"})
+        if self.server_visual and action in {"place", "break"}:
+            primitive_count += 10  # Player read, up to eight movement commands, animation.
+            reader_calls += 2
+            command_calls += 8
+        if self.physical_demo and action in {"place", "break", "interact"}:
+            # Opt-in transport uses five-second read-only requests and one
+            # twenty-second physical request; it issues no server mutation.
+            command_calls = 0
+            reader_timeout = 5.0
+        # Reconnect may consume the 35s socket-discovery window, then the
+        # persistent-agent 25s ready handshake. Include both in this envelope.
+        reconnect_seconds = (
+            60.2 if action == "interact" and getattr(self.reader, "keep_connected", False) else 0.0
+        )
+        return ActionEstimate(
+            primitive_count,
+            reader_calls * reader_timeout
+            + command_calls * command_timeout
+            + reconnect_seconds
+            + (15.0 if self.physical_demo and action in {"place", "break", "interact"} else 0.0),
+        )
+
+    @staticmethod
+    def _timeout(adapter: object, attribute: str, default: float) -> float:
+        """Read a concrete transport timeout without accepting unsafe metadata."""
+        value = getattr(adapter, attribute, default)
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 30:
+            raise ValueError("Transport timeout metadata must be finite and in (0, 30]")
+        return float(value)
 
     @staticmethod
     def position(position: list[int]) -> tuple[int, int, int]:
@@ -115,6 +273,19 @@ class Actions:
             raise
 
     def observe(self, position: list[int]) -> dict[str, Any]:
+        if self.admit is None or self.action_active:
+            return self._observe(position)
+        estimate = self.estimate("observe", position)
+        if estimate.primitives > self.maximum - self.used:
+            raise ActionAdmissionDenied("Observation cannot fit in remaining primitive budget")
+        self.admit(estimate)
+        self.action_active = True
+        try:
+            return self._observe(position)
+        finally:
+            self.action_active = False
+
+    def _observe(self, position: list[int]) -> dict[str, Any]:
         sequence = self.charge("charged_observation", {"op": "block", "position": position})
         validate_build_action(self.contract, "break", self.position(position))
         try:
@@ -134,18 +305,34 @@ class Actions:
         properties: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request = {"action": action, "position": position, "block": block, "properties": properties}
-        sequence = self.charge("bounded_action", request)
+        estimate = self.estimate(action, position, block, properties)
         try:
             validate_build_action(self.contract, action, self.position(position), block)
             if action != "place" and (block is not None or properties is not None):
                 raise ValueError("Unexpected block state")
             state = {} if properties is None else properties
             if not isinstance(state, dict) or any(
-                not re.fullmatch("[a-z_]+", key)
+                not isinstance(key, str)
+                or not re.fullmatch("[a-z_]+", key)
                 or not re.fullmatch("[a-z0-9_]+", str(value).lower())
                 for key, value in state.items()
             ):
                 raise ValueError("Invalid property syntax")
+        except BaseException as error:
+            sequence = self.charge("bounded_action", request)
+            self.manifest.data["errors"].append(
+                {"stage": "bounded_action", "type": type(error).__name__, "sequence": sequence}
+            )
+            self.manifest.save()
+            raise
+        self.check()
+        if estimate.primitives > self.maximum - self.used:
+            raise ActionAdmissionDenied("Action cannot fit in remaining primitive budget")
+        if self.admit is not None:
+            self.admit(estimate)
+        sequence = self.charge("bounded_action", request)
+        self.action_active = True
+        try:
             if action == "place":
                 validation = self.read({"op": "validate", "name": block, "properties": state})
                 if validation == {"valid": False}:
@@ -157,8 +344,82 @@ class Actions:
                 and before["name"] not in self.contract.permitted_blocks
             ):
                 raise ValueError("Target block is not permitted")
-            if action == "interact":
+            if action == "place" and block == "minecraft:redstone_wire":
+                support_position = [position[0], position[1] - 1, position[2]]
+                support = self.read({"op": "block", "position": support_position})
+                if support.get("name") not in _WIRE_SUPPORT_BLOCKS:
+                    diagnostic = {
+                        "type": "unsupported_support",
+                        "target": position,
+                        "required_support": {
+                            "position": support_position,
+                            "state": "full_top_solid_block",
+                        },
+                        "actual_support": _safe_actual_support(support),
+                    }
+                    self.manifest.observed(sequence, {"placement_diagnostic": diagnostic})
+                    raise EffectMismatch(
+                        "Redstone wire needs a full solid support block directly below"
+                    )
+            if self.physical_demo and action in {"place", "break", "interact"}:
+                physical = self.read(
+                    {
+                        "op": "physical",
+                        "action": action,
+                        "position": position,
+                        "name": block,
+                        "properties": state,
+                    }
+                )
+                if isinstance(physical.get("rejected"), str):
+                    physical_diagnostic: dict[str, Any] = {
+                        "type": physical["rejected"],
+                        "target": position,
+                        "required_floor_support": [position[0], position[1] - 1, position[2]],
+                        "world_mutation_dispatched": False,
+                    }
+                    self.manifest.observed(sequence, {"placement_diagnostic": physical_diagnostic})
+                    raise EffectMismatch(f"Physical preflight rejected: {physical['rejected']}")
+                event = self.charge("bounded_movement", {"method": "walking_controls"})
+                self.manifest.observed(event, physical.get("movement", {}))
+            elif action == "interact":
+                pose = self.read({"op": "player"})
+                coordinates = pose.get("position")
+                yaw, pitch = pose.get("yaw"), pose.get("pitch")
+                if (
+                    not isinstance(coordinates, list)
+                    or len(coordinates) != 3
+                    or any(
+                        type(v) not in (int, float) or not math.isfinite(v)
+                        for v in [*coordinates, yaw, pitch]
+                    )
+                    or yaw is None
+                    or pitch is None
+                    or yaw is None
+                    or pitch is None
+                    or pose.get("orientationUnits") != "radians"
+                ):
+                    raise ValueError("Invalid observed player pose")
+                command = (
+                    f"tp noobagentbot {position[0] + 0.5} {position[1] + 1} {position[2] + 0.5}"
+                )
+                event = self.charge("bounded_movement", {"command": command})
+                self.manifest.observed(event, {"response": self.transport.command(command)})
+                self.read({"op": "settle"})
                 self.read({"op": "interact", "position": position})
+                command = (
+                    f"tp noobagentbot {' '.join(map(str, coordinates))} "
+                    f"{math.degrees(float(yaw))} {math.degrees(float(pitch))}"
+                )
+                event = self.charge("bounded_movement", {"command": command})
+                self.manifest.observed(event, {"response": self.transport.command(command)})
+                self.read({"op": "settle"})
+                restored = self.read({"op": "player"})
+                if any(
+                    abs(a - b) > 0.01
+                    for a, b in zip(restored.get("position", []), coordinates, strict=True)
+                ):
+                    raise EffectMismatch("Player position was not restored after interaction")
             else:
                 target = "minecraft:air" if action == "break" else block
                 suffix = (
@@ -167,8 +428,10 @@ class Actions:
                     else ""
                 )
                 command = f"setblock {' '.join(map(str, position))} {target}{suffix}"
+                if self.server_visual:
+                    self._prepare_server_visual(position, block if action == "place" else None)
                 self.check()
-                event = self.manifest.attempt("bounded_command", {"command": command})
+                event = self.charge("bounded_command", {"command": command})
                 self.manifest.observed(event, {"response": self.transport.command(command)})
                 self.read({"op": "settle"})
             after = self.observe(position)
@@ -183,26 +446,6 @@ class Actions:
                     and after["properties"].get("powered") is not before["properties"]["powered"]
                 )
             result = {"before": before, "after": after, "effect_verified": matched}
-            if (
-                action == "place"
-                and block == "minecraft:redstone_wire"
-                and after["name"] == "minecraft:air"
-            ):
-                support_position = [position[0], position[1] - 1, position[2]]
-                support = self.read({"op": "block", "position": support_position})
-                if support.get("name") == "minecraft:air":
-                    result["placement_diagnostic"] = {
-                        "type": "missing_support",
-                        "target": position,
-                        "required_support": {
-                            "position": support_position,
-                            "state": "solid block",
-                        },
-                        "actual_support": {
-                            "name": support["name"],
-                            "properties": support.get("properties", {}),
-                        },
-                    }
             self.manifest.observed(sequence, result)
             if not matched:
                 raise EffectMismatch("Actual effect differs from request")
@@ -215,3 +458,35 @@ class Actions:
             )
             self.manifest.save()
             raise
+        finally:
+            self.action_active = False
+
+    def _prepare_server_visual(self, position: list[int], block: str | None) -> None:
+        """Journal server-assisted motion and visual-only equip/swing before setblock."""
+        pose = self.read({"op": "player"})
+        start = pose.get("position")
+        if (
+            not isinstance(start, list)
+            or len(start) != 3
+            or not all(type(v) in (int, float) and math.isfinite(v) for v in start)
+        ):
+            raise ValueError("Invalid animation pose")
+        destination = [position[0] + 0.5, position[1], position[2] + 2.5]
+        distance = math.dist(start, destination)
+        steps = min(8, max(1, math.ceil(distance / 0.5)))
+        for index in range(1, steps + 1):
+            location = [
+                a + (b - a) * index / steps for a, b in zip(start, destination, strict=True)
+            ]
+            command = (
+                "tp noobagentbot "
+                + " ".join(f"{v:.5f}" for v in location)
+                + " facing "
+                + " ".join(str(v + 0.5) for v in position)
+            )
+            event = self.charge(
+                "bounded_movement", {"method": "server_assisted_visual_motion", "command": command}
+            )
+            self.manifest.observed(event, {"response": self.transport.command(command)})
+            time.sleep(0.08)
+        self.read({"op": "animate", "position": position, "name": block})

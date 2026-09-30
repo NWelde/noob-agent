@@ -68,8 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         "--keep-agent-connected",
         action="store_true",
         help=(
-            "Keep the Minecraft bot and current world connected after this demo "
-            "(provider default)"
+            "Keep the Minecraft bot and current world connected after this demo (provider default)"
         ),
     )
     parser.add_argument(
@@ -83,10 +82,32 @@ def main(argv: list[str] | None = None) -> int:
         default="computer",
         help="Provider target; lamp-repair is a seeded, separately graded vertical slice",
     )
+    parser.add_argument(
+        "--stop-after-module",
+        choices=("register",),
+        help="Preserve the build after independently verified register behavior",
+    )
+    parser.add_argument(
+        "--register-workshop",
+        action="store_true",
+        help="Fresh provider trial with a marked bare pad and optional one-bit diagnostics",
+    )
     args = parser.parse_args(argv)
+    if args.register_workshop and (
+        args.trial != "provider" or args.task != "computer" or args.resume is not None
+    ):
+        parser.error("--register-workshop requires a fresh provider computer trial")
+    if args.stop_after_module and (
+        args.trial != "provider" or args.task != "computer" or args.disconnect_after_trial
+    ):
+        parser.error(
+            "--stop-after-module requires a provider computer trial with the agent kept connected"
+        )
     if args.stop_agent:
         if (
-            args.keep_agent_connected
+            args.stop_after_module
+            or args.register_workshop
+            or args.keep_agent_connected
             or args.planner_model
             or args.planner_project
             or args.task != "computer"
@@ -100,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             config = TrialConfiguration(
                 mode=args.trial,
                 task=args.task.replace("-", "_"),
+                stop_after_module=args.stop_after_module,
+                register_workshop=args.register_workshop,
                 keep_agent_connected=(
                     args.keep_agent_connected
                     or (args.trial == "provider" and not args.disconnect_after_trial)
@@ -114,14 +137,14 @@ def main(argv: list[str] | None = None) -> int:
                 "and lamp-repair"
             )
         manifest = (
-            run_trial(config, resume=args.resume)
-            if args.resume is not None
-            else run_trial(config)
+            run_trial(config, resume=args.resume) if args.resume is not None else run_trial(config)
         )
         print(manifest.path)
         return 2
     if (
-        args.planner_model
+        args.stop_after_module
+        or args.register_workshop
+        or args.planner_model
         or args.planner_project
         or args.task != "computer"
         or args.keep_agent_connected

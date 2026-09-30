@@ -3,6 +3,13 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { dispatch, validateBlock, createDedicatedBot } = require('../src/noob_agent/connectors/minecraft_sidecar/redstone.js');
 const registry = require('../src/noob_agent/connectors/minecraft_sidecar/node_modules/minecraft-data')('1.21.1');
+test('floor support is readable without allowing below-bound interactions', async () => {
+  const b = bot();
+  b.blockAt = p => ({name: 'grass_block', getProperties: () => ({snowy:false})});
+  assert.equal((await dispatch(b, {op:'block', position:[2,63,2]})).name, 'minecraft:grass_block');
+  await assert.rejects(dispatch(b, {op:'interact', position:[2,63,2]}), /invalid_position/);
+  await assert.rejects(dispatch(b, {op:'block', position:[2,62,2]}), /invalid_position/);
+});
 function bot() {
   const result = new EventEmitter();
   Object.assign(result, { registry, username: 'noobagentbot',
@@ -14,6 +21,20 @@ function bot() {
   });
   return result;
 }
+test('full hardware snapshot covers region and ignores only known signal fields',async()=>{
+  const b=bot();let powered=false;let facing='north';let illegal=false;
+  b.blockAt=p=>({name:p.x===0&&p.y===64&&p.z===0?(illegal?'diamond_block':'repeater'):'air',
+    getProperties:()=>p.x===0&&p.y===64&&p.z===0&&!illegal?
+      {facing,delay:1,locked:powered,powered}:{} });
+  const first=await dispatch(b,{op:'hardware'});
+  assert.equal(first.blocks,96*96*32); assert.deepEqual(first.illegal,[]);
+  powered=true;const signal=await dispatch(b,{op:'hardware'});
+  assert.equal(signal.full_region_sha256,first.full_region_sha256);
+  facing='south';const changed=await dispatch(b,{op:'hardware'});
+  assert.notEqual(changed.full_region_sha256,first.full_region_sha256);
+  illegal=true;const bad=await dispatch(b,{op:'hardware'});
+  assert.equal(bad.illegal[0].name,'minecraft:diamond_block');
+});
 test('dedicated endpoint cannot be supplied by caller', () => {
   let options;
   createDedicatedBot({ createBot: o => { options = o; return bot(); } });
@@ -79,4 +100,17 @@ test('normal interaction retains its ten client tick wait, not STEP timing', asy
   b.waitForTicks = async ticks => { waits.push(ticks); };
   await dispatch(b, {op:'interact', position:[2,64,2]});
   assert.deepEqual(waits, [10]);
+});
+test('physical missing inventory is completed rejection but unexpected action error stays uncertain', async()=>{
+  const b=bot();const {Vec3}=require('../src/noob_agent/connectors/minecraft_sidecar/node_modules/vec3'); b.entity.position=new Vec3(0,64,2);
+  b.inventory.items=()=>[];
+  b.blockAt=p=>({name:'air',position:p,getProperties:()=>({})});
+  b.setControlState=()=>{};b.waitForTicks=async()=>{};
+  const result=await dispatch(b,{op:'physical',action:'place',position:[2,64,2],name:'minecraft:stone',properties:{}});
+  assert.equal(result.rejected,'missing_inventory');
+  b.inventory.items=()=>[{name:'stone',count:64}];
+  b.blockAt=p=>({name:p.y===63?'grass_block':'air',position:p,getProperties:()=>({})});
+  b.equip=async()=>{};b.lookAt=async()=>{};
+  b._placeBlockWithOptions=async()=>{throw Error('packet_outcome_unknown');};
+  await assert.rejects(dispatch(b,{op:'physical',action:'place',position:[2,64,2],name:'minecraft:stone',properties:{}}),/packet_outcome_unknown/);
 });

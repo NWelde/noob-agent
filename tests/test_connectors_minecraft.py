@@ -5,10 +5,10 @@ These cover build-order step 1 and the primitive-completion milestone from
 
 Most tests drive the connector through a substituted sidecar transport, so
 schema validity, tool rejection, private-state filtering, and timeout
-classification are deterministic and need no game server. The two live tests
+classification are deterministic and need no game server. The three live tests
 require the local server and the installed Node sidecar from
 `docs/minecraft-server.md`; they skip with a clear reason when either is
-missing, and never hang or silently pass.
+missing. They require --run-minecraft-live and a dedicated test world.
 """
 
 from __future__ import annotations
@@ -715,8 +715,10 @@ async def test_close_releases_the_sidecar() -> None:
 # --- Live server and sidecar (skipped when unavailable) --------------------
 
 
-async def live_connector() -> MinecraftConnector:
+async def live_connector(request: pytest.FixtureRequest) -> MinecraftConnector:
     """Return a started connector, or skip when the game side is unavailable."""
+    if not request.config.getoption("--run-minecraft-live"):
+        pytest.skip("Live Minecraft tests require --run-minecraft-live and a dedicated test world")
     connector = MinecraftConnector()
     try:
         await connector.start()
@@ -800,8 +802,8 @@ def test_sidecar_records_action_bar_feedback_from_its_nbt_packet() -> None:
     assert _sidecar_eval(f"s.text({json.dumps(component)})") == "The device does not respond."
 
 
-async def test_live_reset_is_repeatable_on_a_fixed_seed() -> None:
-    connector = await live_connector()
+async def test_live_reset_is_repeatable_on_a_fixed_seed(request: pytest.FixtureRequest) -> None:
+    connector = await live_connector(request)
     try:
         first = await connector.reset(SCENARIO_ID, SEED)
         second = await connector.reset(SCENARIO_ID, SEED)
@@ -812,8 +814,8 @@ async def test_live_reset_is_repeatable_on_a_fixed_seed() -> None:
     assert repeatable_public_state(first) == repeatable_public_state(second)
 
 
-async def test_live_observe_performs_one_hard_coded_action() -> None:
-    connector = await live_connector()
+async def test_live_observe_performs_one_hard_coded_action(request: pytest.FixtureRequest) -> None:
+    connector = await live_connector(request)
     try:
         await connector.reset(SCENARIO_ID, SEED)
         result = await connector.step(
@@ -829,8 +831,8 @@ async def test_live_observe_performs_one_hard_coded_action() -> None:
     assert result.observation.player.position is not None
 
 
-async def test_live_complete_primitive_surface() -> None:
-    connector = await live_connector()
+async def test_live_complete_primitive_surface(request: pytest.FixtureRequest) -> None:
+    connector = await live_connector(request)
     try:
         observation = await connector.reset(SCENARIO_ID, SEED)
         move = await connector.step(

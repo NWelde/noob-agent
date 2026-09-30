@@ -155,6 +155,10 @@ class JevSubprocess:
             }
         except _ProviderFailure as error:
             raise JevError("Jev provider request failed", diagnostic=error.diagnostic) from None
+        except TimeoutError:
+            raise JevError(
+                "Jev selection timed out", diagnostic={"name": "SelectionTimeout"}
+            ) from None
         except Exception:
             raise JevError("Jev subprocess failed or returned an invalid response") from None
         finally:

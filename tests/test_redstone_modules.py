@@ -227,3 +227,19 @@ def test_inspection_collects_every_unready_probe_and_control(tmp_path):
     assert result["valid"] is False
     assert [failure["target"] for failure in result["failed_checks"]] == ["a[0]", "reset"]
     assert actions.used == len(world.cells)
+
+
+def test_recipe_feedback_names_missing_control():
+    value = declaration()
+    value["recipes"] = {"load:0": [{"control": "load_bit0", "level": False}]}
+    with pytest.raises(ValueError, match="Recipe control load_bit0 is not declared"):
+        validate_declaration(value, MachineContract())
+
+
+def test_recipe_feedback_names_invalid_control_role():
+    value = declaration()
+    value["recipes"] = {"load:0": [{"control": "reset", "level": False}]}
+    with pytest.raises(
+        ValueError, match="Recipe control reset requires test_input or programming role"
+    ):
+        validate_declaration(value, MachineContract())

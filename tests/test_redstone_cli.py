@@ -25,12 +25,7 @@ def test_provider_trials_keep_agent_connected_by_default(
         return SimpleNamespace(path=Path("manifest.json"))
 
     monkeypatch.setattr(run_redstone_trial, "run_trial", run_trial)
-    assert (
-        run_redstone_trial.main(
-            ["--trial", "provider", "--planner-model", "model", *extra]
-        )
-        == 2
-    )
+    assert run_redstone_trial.main(["--trial", "provider", "--planner-model", "model", *extra]) == 2
     assert captured["config"].keep_agent_connected is expected
     assert "manifest.json" in capsys.readouterr().out
 
@@ -44,18 +39,21 @@ def test_lamp_trial_dispatches_saved_manifest_for_continuation(monkeypatch, caps
         return SimpleNamespace(path=Path("manifest.json"))
 
     monkeypatch.setattr(run_redstone_trial, "run_trial", run_trial)
-    assert run_redstone_trial.main(
-        [
-            "--trial",
-            "provider",
-            "--task",
-            "lamp-repair",
-            "--planner-model",
-            "model",
-            "--resume",
-            str(saved),
-        ]
-    ) == 2
+    assert (
+        run_redstone_trial.main(
+            [
+                "--trial",
+                "provider",
+                "--task",
+                "lamp-repair",
+                "--planner-model",
+                "model",
+                "--resume",
+                str(saved),
+            ]
+        )
+        == 2
+    )
     assert captured["resume"] == saved
     assert captured["config"].task == "lamp_repair"
     assert "manifest.json" in capsys.readouterr().out

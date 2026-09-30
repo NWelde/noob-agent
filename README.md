@@ -1,5 +1,13 @@
 # noob-agent
 
+## Demo video
+
+[![Watch the Minecraft adder demo](assets/minecraft-adder-demo.jpg)](https://github.com/NWelde/noob-agent/releases/download/demo-video-2026-09-30/minecraft-adder-demo-final.mp4)
+
+[Watch or download the final demo (3 minutes, 1080p, 60 fps)](https://github.com/NWelde/noob-agent/releases/download/demo-video-2026-09-30/minecraft-adder-demo-final.mp4).
+The video shows construction footage and the physical redstone adder computing
+**3 + 8 = 11**, with the input controls and output lamps shown at normal speed.
+
 ## Current project
 
 An agent uses Minecraft Java 1.21.1 to design and build a programmable 4-bit
@@ -11,8 +19,12 @@ machine.
 The active build is the Minecraft redstone computer described in
 [`hackathon_plan.md`](hackathon_plan.md). Infrastructure for resets, bounded
 construction, planner/Jev interaction, module checks, and trial records is in
-place. **No model-designed module has passed yet**, so the full computer demo is
-not complete. Current evidence and the next live checkpoint are in
+place. The retained assisted-production trial has passed the register suite;
+the complete stored-program computer remains unverified. The video above
+demonstrates the adder. The
+[hackathon readiness checklist](docs/hackathon-readiness.md) provides an isolated
+verification command and the mandatory October 1 attendance details.
+Current evidence and the next live checkpoint are in
 [`docs/redstone-trials.md`](docs/redstone-trials.md).
 
 ### Working demo slice
@@ -63,6 +75,30 @@ in Minecraft before continuing. For the computer task, it tells the planner
 which touched blocks changed or disappeared, so it can repair them. The optional
 `--session-action-limit` sets a smaller per-session cap, which is useful for
 checking that restart works.
+
+### Register submission checkpoint
+
+To preserve an agent-built register after its independent load/hold/reset suite passes:
+
+```sh
+set -a; source .env; set +a
+.venv/bin/python scripts/run_redstone_trial.py --trial provider --task computer \
+  --keep-agent-connected --stop-after-module register \
+  --planner-model deepseek-ai/DeepSeek-V4-Pro-0813 \
+  --planner-project nathanweldegiorgis731-minerva-university/Noob-agent
+```
+
+A passed `module_checkpoint` is register evidence only; the full computer grade remains
+unevaluated. Construction now continues past three intentions, with readiness reminders
+every twelve. Invalid recipe feedback identifies missing controls; exhausted validation
+records the last reason as `planner_validation_exhausted`. The bot preserves the build.
+
+The same `--resume <manifest.json>` command can manually recover a stopped Jev call
+or interrupted model inference, including interruption after a completed action readback. Recovery requires every unknown event to be a model
+call, a clean timeline, and a fresh player/build verification. Inference-error recovery
+rejects unknown world actions. Existing budget-limit continuations still reverify and
+reconcile the observed world before continuing. Historical inspection failures and the current verified
+layout stay in planner feedback until a new inspection resolves them.
 
 ## Run checks
 
@@ -118,6 +154,11 @@ provider trials require explicit provider configuration; their latest status
 and limitations are recorded in [`docs/redstone-trials.md`](docs/redstone-trials.md).
 
 ## Project map
+
+The recording-ready redstone memory demo and replay instructions are in
+[`docs/memory-demo.md`](docs/memory-demo.md). It demonstrates
+physical four-bit storage, a powered display, and Jev-selected wire repair using
+a tested circuit plan. It is separate from the full-computer acceptance trial.
 
 - [`hackathon_plan.md`](hackathon_plan.md): approved scope and milestone order
 - [`docs/redstone-computer-contract.md`](docs/redstone-computer-contract.md):

@@ -41,6 +41,15 @@ GAME_ID = "minecraft"
 SCENARIO_ID = "mc_signal_post_a"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-minecraft-live",
+        action="store_true",
+        default=False,
+        help="Enable Minecraft tests that connect to and mutate the configured test world",
+    )
+
+
 @pytest.fixture
 def manifest() -> ConnectorManifest:
     return ConnectorManifest(

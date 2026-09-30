@@ -8,6 +8,7 @@ import pytest
 from noob_agent.models.client import ModelResponse
 from noob_agent.redstone.contract import MachineContract
 from noob_agent.redstone.planner import (
+    Intention,
     PlannerContext,
     TrialWandbClient,
     planner_validation_instruction,
@@ -46,6 +47,91 @@ def test_invalid_intention_never_becomes_an_offer(change):
     value = intention()
     value["actions"][0].update(change)
     with pytest.raises(ValueError):
+        validate_intention(value, MachineContract())
+
+
+def test_circuit_plan_is_optional_and_validated_as_planner_authored_state():
+    base = validate_intention(intention(), MachineContract())
+    assert base.circuit_plan is None
+    value = intention()
+    value["circuit_plan"] = {
+        "module": "register",
+        "inputs": [{"id": "load0", "role": "load bit 0", "position": [10, 64, 10]}],
+        "storage_nodes": [
+            {"id": "word0", "purpose": "instruction storage", "position": [20, 64, 20]}
+        ],
+        "signal_paths": [
+            {
+                "id": "load_path",
+                "source": "load0",
+                "target": "register",
+                "expected_polarity": "active_high",
+            }
+        ],
+        "unfinished_connections": [
+            {"source": "load0", "target": "word0", "reason": "wire path incomplete"}
+        ],
+    }
+    parsed = validate_intention(value, MachineContract())
+    assert parsed.circuit_plan.module == "register"
+    assert "circuit_plan" not in Intention.model_json_schema()["required"]
+
+
+def test_saved_plan_survives_feedback_trim_and_restores():
+    context = PlannerContext(MachineContract())
+    context.update_circuit_plan({"module": "arithmetic", "notes": ["control at [10,64,10]"]})
+    for index in range(9):
+        context.feedback({"failed_case": index})
+    saved = context.saved_state()
+    restored = PlannerContext(
+        MachineContract(),
+        history=saved["history"],
+        circuit_plan=saved["circuit_plan"],
+        latest_verified_layout=saved["latest_verified_layout"],
+    )
+    payload = json.loads(restored.request({}).prompt)
+    assert payload["circuit_plan"]["module"] == "arithmetic"
+    assert [item["failed_case"] for item in payload["feedback"]] == [3, 4, 5, 6, 7, 8]
+
+
+def test_feedback_prompt_keeps_one_observed_layout_and_failure_details():
+    context = PlannerContext(MachineContract())
+    layout = [{"position": [2, 64, 3], "name": "minecraft:lever", "properties": {}}]
+    context.feedback(
+        {
+            "construction_progress": {"verified_layout": layout},
+            "interface_check": {"passed": False, "reason": "wrong lever"},
+        }
+    )
+    context.feedback(
+        {
+            "construction_progress": {"verified_layout": layout},
+            "action_outcome": {"id": "wire", "success": False},
+        }
+    )
+    payload = json.loads(context.request({}).prompt)
+    assert "verified_layout" not in json.dumps(payload["feedback"])
+    assert len(payload["latest_verified_layout"]["cells"]) == 1
+    assert payload["feedback"][0]["interface_check"]["passed"] is False
+    assert payload["feedback"][1]["action_outcome"]["success"] is False
+    assert "top_down_by_y" in payload["latest_verified_layout"]
+
+
+def test_action_dependencies_must_reference_unique_other_offers():
+    value = intention()
+    value["actions"].append(
+        {
+            "id": "wire",
+            "criteria": "wire after support",
+            "action": "place",
+            "position": [2, 64, 1],
+            "block": "minecraft:redstone_wire",
+            "depends_on": ["support"],
+        }
+    )
+    assert validate_intention(value, MachineContract()).actions[1].depends_on == ["support"]
+    value["actions"][1]["depends_on"] = ["missing"]
+    with pytest.raises(ValueError, match="Invalid dependencies.*missing.*same response"):
         validate_intention(value, MachineContract())
 
 
@@ -124,7 +210,8 @@ def test_provider_schema_allows_build_only_and_bounds_intention():
     assert schema["properties"]["summary"]["maxLength"] == 200
     assert schema["$defs"]["OfferedAction"]["properties"]["criteria"]["maxLength"] == 160
     assert "module_inspection" not in schema["properties"]
-    assert list(schema["$defs"]) == ["OfferedAction"]
+    assert "CircuitPlan" in schema["$defs"]
+    assert "PlannedSignalPath" in schema["$defs"]
     assert "quoted string id" in first.system
     assert "request_grading" in schema["properties"]
     context.feedback(
@@ -149,9 +236,7 @@ def test_forced_grade_switches_to_declaration_schema_and_prompt():
     schema = request.response_schema
     assert schema["properties"]["actions"]["maxItems"] == 0
     assert "module_inspection" in schema["required"]
-    assert schema["properties"]["module_inspection"] == {
-        "$ref": "#/$defs/ModuleDeclaration"
-    }
+    assert schema["properties"]["module_inspection"] == {"$ref": "#/$defs/ModuleDeclaration"}
     assert "empty actions" in request.system.lower()
     assert request.response_schema["properties"]["actions"]["minItems"] == 0
     assert request.response_schema["properties"]["request_grading"] == {
@@ -262,3 +347,24 @@ def test_complete_parameterized_declarations_are_planner_intentions(module):
     assert request.max_output_tokens == 16_384
     assert "recipe_templates" in request.system
     assert "ParameterBit" in request.response_schema["$defs"]
+
+
+def test_recipe_control_feedback_requires_built_declared_inputs():
+    from noob_agent.redstone.planner import planner_validation_instruction
+
+    guidance = planner_validation_instruction("Recipe control load_bit0 is not declared", "stop")
+    assert "test_input or programming" in guidance
+    assert "actual built lever" in guidance
+    assert "construction actions" in guidance
+
+
+def test_missing_register_recipe_feedback_requires_complete_load_template():
+    from noob_agent.redstone.planner import planner_validation_instruction
+
+    guidance = planner_validation_instruction(
+        "Missing register recipe load:0; provide recipe_templates.load for load:0..15",
+        "stop",
+    )
+    assert "recipe_templates.load" in guidance
+    assert "load:0 through load:15" in guidance
+    assert "actual built data levers" in guidance

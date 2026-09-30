@@ -14,7 +14,7 @@ def test_unique_manifests_start_incomplete_and_journal_pending_attempt(tmp_path:
     second = TrialManifest(tmp_path)
     assert first.path != second.path
     first.attempt("trusted_probe", {"command": "seed"})
-    saved = json.loads(first.path.read_text())
+    saved = TrialManifest.load_data(first.path)
     assert saved["completion"]["status"] == "incomplete"
     assert saved["events"][0]["outcome"] == "unknown"
     assert saved["events"][0]["result"] is None
@@ -34,6 +34,57 @@ def test_manifest_can_be_reopened_as_a_new_session(tmp_path: Path) -> None:
     assert resumed.data["sessions"][0]["number"] == 1
     assert resumed.data["continuation"]["state"] == {"history": []}
     assert resumed.data["completion"]["status"] == "incomplete"
+
+
+def test_event_journal_replays_result_and_terminal_save_exports_events(tmp_path: Path) -> None:
+    manifest = TrialManifest(tmp_path)
+    sequence = manifest.attempt("bounded_action", {"action": "place"})
+    manifest.observed(sequence, {"after": {"name": "minecraft:stone"}})
+
+    # The manifest snapshot may lag while the durable sidecar already has the result.
+    replayed = TrialManifest.load_data(manifest.path)
+    assert replayed["events"][0]["outcome"] == "observed"
+    assert replayed["events"][0]["result"] == {"after": {"name": "minecraft:stone"}}
+
+    manifest.finish_incomplete(["done"])
+    exported = json.loads(manifest.path.read_text())
+    assert exported["events"] == replayed["events"]
+    assert exported["completion"]["status"] == "incomplete"
+
+
+def test_journal_replays_result_for_attempt_already_in_snapshot(tmp_path: Path) -> None:
+    manifest = TrialManifest(tmp_path)
+    sequence = manifest.attempt("bounded_command", {"command": "fixture"})
+    manifest.save()
+    manifest.observed(sequence, {"response": "completed"})
+    replay = TrialManifest.load_data(manifest.path)
+    assert replay["events"][sequence]["outcome"] == "observed"
+    assert replay["events"][sequence]["result"] == {"response": "completed"}
+    reopened = TrialManifest.reopen(manifest.path)
+    assert reopened.data["events"] == replay["events"]
+
+
+def test_event_journal_ignores_only_a_truncated_final_record(tmp_path: Path) -> None:
+    manifest = TrialManifest(tmp_path)
+    manifest.attempt("trusted_probe", {"command": "list"})
+    with manifest.journal_path.open("ab") as stream:
+        stream.write(b'{"sequence":1,"event":')
+
+    recovered = TrialManifest.load_data(manifest.path)
+    assert len(recovered["events"]) == 1
+    assert recovered["events"][0]["outcome"] == "unknown"
+
+
+def test_event_journal_avoids_snapshot_rewrite_for_each_event(tmp_path: Path) -> None:
+    manifest = TrialManifest(tmp_path)
+    original_snapshot = manifest.path.read_bytes()
+    for index in range(10):
+        sequence = manifest.attempt("trusted_probe", {"command": str(index)})
+        manifest.observed(sequence, {"response": "ok"})
+    assert manifest.path.read_bytes() == original_snapshot
+    assert len(TrialManifest.load_data(manifest.path)["events"]) == 10
+    manifest.save()
+    assert len(json.loads(manifest.path.read_text())["events"]) == 10
 
 
 def test_only_a_current_task_limit_triggers_automatic_continuation() -> None:
@@ -107,6 +158,9 @@ def test_computer_continuation_rechecks_player_and_touched_blocks(tmp_path: Path
 
     assert result["resume_check"]["blocks_checked"] == 1
     assert actions.observed == [[0, 64, 0]]
+    assert manifest.data["continuation"]["state"]["placed_cells"] == [
+        {"position": [0, 64, 0], "block": "minecraft:stone", "properties": {}}
+    ]
 
     actions.observed.clear()
     actions.observe = lambda position: {
@@ -125,6 +179,8 @@ def test_computer_continuation_rechecks_player_and_touched_blocks(tmp_path: Path
     assert manifest.data["continuation"]["state"]["world_states"] == [
         {"name": "minecraft:air", "properties": {}, "position": [0, 64, 0]}
     ]
+    assert manifest.data["continuation"]["state"]["placed_cells"] == []
+    assert len(manifest.data["continuation_verifications"]) == 2
 
 
 def test_failure_before_connection_leaves_explicit_incomplete_evidence(tmp_path: Path) -> None:
@@ -158,8 +214,8 @@ def test_lost_probe_remains_unknown_and_close_failure_is_recorded(
         closed = False
 
         def command(self, command: str) -> str:
-            # Inspect on-disk intent before responding to the first command.
-            saved = json.loads(next(tmp_path.glob("*/manifest.json")).read_text())
+            # Inspect durable intent before responding to the first command.
+            saved = TrialManifest.load_data(next(tmp_path.glob("*/manifest.json")))
             assert saved["events"][0]["request"] == {"command": command}
             assert saved["events"][0]["outcome"] == "unknown"
             raise RconError("lost connection")
@@ -195,3 +251,96 @@ def test_interrupted_preflight_preserves_cause_and_pending_probe(tmp_path: Path)
     assert saved["errors"] == [{"stage": "probe", "type": "KeyboardInterrupt"}]
     assert saved["events"][0]["outcome"] == "unknown"
     assert saved["completion"]["status"] == "incomplete"
+
+
+def test_register_checkpoint_requires_preserved_provider_computer():
+    from noob_agent.redstone.trial import TrialConfiguration
+
+    with pytest.raises(ValueError):
+        TrialConfiguration(mode="fixture", stop_after_module="register")
+    with pytest.raises(ValueError):
+        TrialConfiguration(
+            mode="provider", planner_model="fixture/model", stop_after_module="register"
+        )
+    config = TrialConfiguration(
+        mode="provider",
+        planner_model="fixture/model",
+        keep_agent_connected=True,
+        stop_after_module="register",
+    )
+    assert config.public()["stop_after_module"] == "register"
+    assert "stop_after_module" not in TrialConfiguration(mode="fixture").public()
+
+
+def test_manual_selection_recovery_excludes_world_uncertainty():
+    from noob_agent.redstone.trial import can_resume_model_failure
+
+    evidence = {
+        "loop": {"status": "stopped", "reason": "JevError"},
+        "sessions": [{"number": 1}],
+        "continuation": {"state": {}, "session_number": 1, "stop_reason": "JevError"},
+        "events": [{"kind": "jev_call", "outcome": "unknown"}],
+    }
+    assert can_resume_model_failure(evidence)
+    assert not can_auto_continue(evidence, "computer")
+    assert not can_resume_model_failure(
+        {
+            **evidence,
+            "events": [{"kind": "bounded_action", "outcome": "unknown"}, *evidence["events"]],
+        }
+    )
+    assert not can_resume_model_failure({**evidence, "timeline_resources": {"state": "pending"}})
+
+
+def test_manual_inference_checkpoint_recovers_without_world_mutation():
+    from noob_agent.redstone.trial import can_resume_model_failure
+
+    evidence = {
+        "loop": {"status": "stopped", "reason": "CancelledError"},
+        "sessions": [{"number": 1}],
+        "continuation": {"state": {}, "session_number": 1, "stop_reason": "CancelledError"},
+        "events": [{"kind": "planner_call", "outcome": "unknown"}],
+    }
+    assert can_resume_model_failure(evidence)
+    assert not can_resume_model_failure({**evidence, "events": []})
+    completed = {
+        **evidence,
+        "events": [
+            {"kind": "bounded_action", "outcome": "observed"},
+            {"kind": "action_feedback", "outcome": "observed"},
+        ],
+    }
+    assert can_resume_model_failure(completed)
+    assert not can_auto_continue(completed, "computer")
+    assert not can_resume_model_failure({**completed, "timeline_resources": {"state": "pending"}})
+    assert not can_resume_model_failure(
+        {
+            **completed,
+            "events": [{"kind": "bounded_action", "outcome": "unknown"}, completed["events"][-1]],
+        }
+    )
+    assert not can_resume_model_failure(
+        {
+            **evidence,
+            "events": [{"kind": "bounded_command", "outcome": "unknown"}, *evidence["events"]],
+        }
+    )
+
+
+def test_opt_in_compact_snapshot_preserves_rehydratable_event_evidence(tmp_path):
+    from noob_agent.redstone.trial import TrialManifest
+    manifest = TrialManifest(tmp_path)
+    event = manifest.attempt("read_fixture", {"position":[40,64,5]})
+    manifest.observed(event, {"powered":True})
+    manifest.save()
+    before = TrialManifest.load_data(manifest.path)
+    old_size = manifest.path.stat().st_size
+    manifest.compact_snapshots = True
+    manifest.save()
+    after = TrialManifest.load_data(manifest.path)
+    assert after == before
+    assert manifest.path.stat().st_size < old_size
+    next_event = manifest.attempt("read_fixture", {"position":[42,64,15]})
+    manifest.observed(next_event, {"power":10})
+    loaded = TrialManifest.load_data(manifest.path)
+    assert loaded['events'][next_event]['result'] == {"power":10}

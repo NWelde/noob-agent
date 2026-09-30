@@ -106,6 +106,8 @@ def test_session_action_limit_is_a_positive_lower_cap():
         trial.TrialConfiguration(
             mode="provider", planner_model="open/model", session_action_limit=20_001
         )
+
+
 def test_missing_provider_credentials_retained_without_fixture_fallback(tmp_path, monkeypatch):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
@@ -168,10 +170,12 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
             evaluator,
             *,
             check,
-                require_module_grading=False,
-                task="computer",
-                resume_state=None,
-                jev_min_interval_seconds=0,
+            require_module_grading=False,
+            task="computer",
+            register_workshop=False,
+            stop_after_module=None,
+            resume_state=None,
+            jev_min_interval_seconds=0,
         ):
             assert type(model) is planner.TrialWandbClient
             assert type(evaluator) is jev.JevSubprocess
@@ -180,6 +184,8 @@ def test_provider_adapters_are_selected_without_fixture_or_network(tmp_path, mon
             assert model._wandb.api_key == "secret-planner"
             assert check is None
             assert require_module_grading is True
+            assert register_workshop is False
+            assert stop_after_module is None
             assert task == "computer"
             assert jev_min_interval_seconds == 4
             instances.append((manifest, model, evaluator))
